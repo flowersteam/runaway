@@ -135,6 +135,9 @@ impl Campaign {
             .get(1)
             .unwrap()
             .as_str();
+        // We initialize lfs
+        git::init_lfs(&cmp_parent_path.join(repo_name))?;
+        // We retrieve campaign
         let cmp_config = Campaign::from_path(&cmp_parent_path.join(repo_name))?;
         // We return the campaign configuration
         return Ok(cmp_config);
