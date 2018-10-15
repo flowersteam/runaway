@@ -270,19 +270,6 @@ pub fn init(cmd_dir: &path::PathBuf) -> Result<(), Error> {
         }
 }
 
-/// Initializes LFS
-pub fn init_lfs(cmd_dir: &path::PathBuf) -> Result<(), Error> {
-    match utilities::run_command(vec!["git", "lfs", "install"],
-                                 cmd_dir,
-                                 format!("initializes LFS in {}", cmd_dir.to_str().unwrap()).as_str(),
-                                 false)
-        {
-            Ok(_) => Ok(()),
-            Err(Error::ExecutionFailed(output)) => Err(Error::Git(utilities::output_to_message(&output))),
-            Err(_) => Err(Error::Unknown),
-        }
-}
-
 // TESTS
 #[cfg(test)]
 mod test {
