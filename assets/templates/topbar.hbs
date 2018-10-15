@@ -1,0 +1,44 @@
+<!-- Top Fixed menu -->
+<div class="ui secondary fixed pointing top menu" id="topbar", style="background-color: white">
+    <div class="item" style="width: 100%">
+        <div class="ui fluid search selection dropdown" id="topbar_dropdown">
+            <input name="country" type="hidden" class="executions_input">
+            <i class="search icon"></i>
+            <div class="default text">Navigate to execution</div>
+        </div>
+    </div>
+</div>
+
+<!-- We setup the dropdown -->
+<script>
+    $('#topbar_dropdown').dropdown({
+        // The dropdown is setup to directly retrieve data from api
+        apiSettings: {
+            action: "get executions identifiers",
+            onResponse: function (response) {
+                var values = {
+                    "success": true,
+                    "results": [],
+                };
+                for (v in response) {
+                    values["results"].push({
+                        "name": response[v],
+                        "value": response[v],
+                        "text": response[v]
+                    });
+                }
+                return values;
+            },
+            cache: false,
+        },
+        filterRemoteData: true,
+        saveRemoteData: false,
+        clearable: true,
+        ignoreCase: true,
+        selectOnKeydown: false,
+        forceSelection: false,
+        onChange: function(value, text, $selectedItem) {
+            location.replace("/executions/"+text);
+        },
+    });
+</script>

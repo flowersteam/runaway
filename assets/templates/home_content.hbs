@@ -1,0 +1,50 @@
+{{!--
+The home page present basic settings of the campaign
+--}}
+
+{{!-- Title and help box --}}
+<div class="ui accordion" style="padding-top: 2%">
+    <div class="title">
+        <h1>Campaign "{{campaign_name}}" on experiment "{{exp_name}}"<i class="dropdown icon"></i></h1>
+    </div>
+    <div class="content">
+        <div class="ui info message transition">
+            <div class="header">
+                What to do next ?
+            </div>
+            <p> You have loaded a campaign. Now, you can navigate your existing executions using the topbar, or
+                generate batches of executions using the manual generation tool.
+            </p>
+        </div>
+    </div>
+    <br>
+</div>
+<script>
+    $(".ui.accordion").accordion();
+</script>
+
+
+<!-- Campaign related informations -->
+<div class="ui centered grid" , id="grid">
+    <div class="ui horizontal divider">
+        Campaign Settings
+    </div>
+    <div class="sixteen wide column">
+        <table class="ui definition table">
+            <tbody>
+                <tr>
+                    <td class="two wide column">Campaign Repository</td>
+                    <td><a href="{{campaign_web_url}}">{{campaign_repo_url}}</a></td>
+                </tr>
+                <tr>
+                    <td>Experiment Repository</td>
+                    <td><a href="{{exp_web_url}}">{{exp_repo_url}}</a></td>
+                </tr>
+                <tr>
+                    <td>Total number of executions</td>
+                    <td>{{execution_count}}</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>

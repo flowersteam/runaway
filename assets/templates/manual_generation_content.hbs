@@ -1,0 +1,187 @@
+{{!--
+The manual generation page allows to generate batches of experiments and add them to the queue.
+--}}
+
+
+
+{{!-- Title and help box --}}
+<div class="ui accordion" style="padding-top: 2%">
+    <div class="title">
+        <h1>Manual Execution Generation <i class="dropdown icon"></i> </h1>
+    </div>
+    <div class="content">
+        <div class="ui info message transition">
+            <div class="header">
+                How does it work?
+            </div>
+            <p>This page allows you to manually generate batches of experiment execution. Please enter the following
+                informations:
+                <ul class="ui list">
+                    <li>The path to the experiment script, relative to the experiment repository</li>
+                    <li>The commit hash of the experiment at which you want to perform the experiments</li>
+                    <li>The execution profile to use to run the executions</li>
+                    <li>The number of times you want to perform each combinations of parameters</li>
+                    <li>The parameters variations you want to try</li>
+                </ul>
+                Note that for each possible combination of the parameters you inputed, an execution wil be created.
+            </p>
+        </div>
+    </div>
+    <br>
+</div>
+
+
+{{!-- The form --}}
+<form class="ui form" id="jobs_generation_form">
+    <h4 class="ui dividing header">General Settings</h4>
+    <div class="three fields">
+        <div class="field">
+            <label>Commit hash</label>
+            <div class="ui fluid search selection dropdown" id="commit_dropdown">
+                <input name="commit_hash" type="hidden">
+                <i class="dropdown icon"></i>
+                <div class="default text">Select commit</div>
+            </div>
+            <script>
+                $('#commit_dropdown').dropdown({
+                    apiSettings: {
+                        action: 'get commits',
+                        onResponse: function (response) {
+                            var values = {
+                                "success": true,
+                                "results": [],
+                            };
+                            for (v in response) {
+                                values["results"].push({
+                                    "name": response[v],
+                                    "value": response[v],
+                                    "text": response[v]
+                                });
+                            }
+                            return values;
+                        },
+                        cache: false,
+                    },
+                    filterRemoteData: true,
+                    saveRemoteData: false,
+                });
+            </script>
+        </div>
+        <div class="field">
+            <label>Execution profile</label>
+            <div class="ui fluid search selection dropdown" id="profile_dropdown">
+                <input name="execution_profile" type="hidden">
+                <i class="dropdown icon"></i>
+                <div class="default text">Select profile</div>
+            </div>
+            <script>
+                $('#profile_dropdown').dropdown({
+                    apiSettings: {
+                        action: 'get profiles',
+                        onResponse: function (response) {
+                            var values = {
+                                "success": true,
+                                "results": [],
+                            };
+                            for (v in response) {
+                                values["results"].push({
+                                    "name": response[v],
+                                    "value": response[v],
+                                    "text": response[v]
+                                });
+                            }
+                            return values;
+                        },
+                    },
+                    filterRemoteData: true,
+                    saveRemoteData: false,
+                });
+            </script>
+        </div>
+        <div class="field">
+            <label>Executions repetition</label>
+            <input name="repetitions" placeholder="1" type="number">
+        </div>
+    </div>
+    <h4 class="ui dividing header">Parameters</h4>
+    <table class="ui celled table" id="params_table">
+        <thead>
+            <tr>
+                <th>Value</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td data-label="Value">
+                    <div class="ui fluid transparent input">
+                        <input placeholder="Separate different parameters with semi-colon ;" type="text">
+                    </div>
+                </td>
+            </tr>
+        </tbody>
+        <tfoot class="full-width">
+            <tr>
+                <th>
+                    <div class="ui small  button" id="add_params_button">
+                        Add
+                    </div>
+                </th>
+            </tr>
+        </tfoot>
+    </table>
+    <script>
+        $("#add_params_button").click(function () {
+            let i = $("#params_table >tbody >tr").length + 1;
+            $('#params_table tbody:last').append(`<tr id="params_tr_${i}"><td data-label="Value"><div class="ui fluid transparent input"><input placeholder="Separate different parameters with semi-colon ;" type="text"></div></td></tr>`);
+            $(`#params_tr_${i}`).keypress(function (e) {
+                if ((e.which === 8) && ($(`#params_tr_${i} input:last`).val() === "")) {
+                    $(this).remove();
+                }
+            });
+        });
+    </script>
+    <div class="ui error message" id="error">
+    </div>
+    <button class="ui green ok inverted submit button">
+        <i class="checkmark icon"></i>
+        Generate Jobs
+    </button>
+</form>
+<script>
+    // Set up form
+    $("#jobs_generation_form")
+    .form({
+        fields: {
+            script_path: 'empty',
+            commit_hash: 'empty',
+            execution_profile: 'empty',
+            repetitions: ['empty', 'integer'],
+        },
+        onFailure: function (response) {
+            $("#error").text(response.error);
+            $("#error").show();
+        },
+        onSuccess: function (response) {
+            location.replace("/tasks");
+        },
+    })
+    .api({
+        action: "generate jobs",
+        method: "POST",
+        serializeForm: true,
+        beforeSend: function (settings) {
+            $("#jobs_generation_form").addClass("loading");
+            settings.data.parameters = $("#params_table >tbody >tr input").toArray().map(x => x.value).join("¤");
+            return settings;
+        },
+        successTest: function (response) {
+            return response.success;
+        },
+        
+    });
+</script>
+
+
+<script>
+    $('.ui.accordion').accordion();
+</script

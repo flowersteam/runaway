@@ -1,0 +1,24 @@
+<!-- Left Sidebar -->
+<div class="ui left fixed vertical menu" id="sidebar">
+    <h1 class="item teal header">Orchestra</h1>
+    <a class="item" href="/home" id="home"><i class="home icon"></i>Home</a>
+    <div class="item" id="reports"> <i class="chart pie icon"></i>
+        Reports
+        <div class="menu">
+            <a class="item" href="/executions" id="reports_executions">Executions</a>
+        </div>
+    </div>
+    <div class="item" id="tasks"> <i class="boxes icon"></i>
+        Taks Management
+        <div class="menu">
+            <a class="item" href="/tasks" id="tasks_overview">Overview</a>
+            <a class="item" href="/manual_generation" id="tasks_manual_generation">Manual Generation</a>
+        </div>
+    </div>
+    <a class="item" id="settings"> <i class="cogs icon"></i>Settings</a>
+</div>
+
+<!-- Activate the current page -->
+<script>
+    $("#{{menu_item}}").addClass("active");
+</script>

@@ -1,0 +1,182 @@
+{{!--
+The executions overview page allows to see all the executions, to sort filter and manipulate those.
+--}}
+
+
+{{!-- Title and buttons--}}
+<div class="ui grid" style="padding-top:5%;">
+    <div class="ten wide column">
+        <h1> Execution {{execution_id}}</h1>
+    </div>
+    <div class="right aligned six wide column">
+        <div class="ui buttons">
+            <button class="ui primary basic button" href="{{execution_remote_url}}">
+                <i class="git icon"></i>
+                Repository
+            </button>
+            <button class="ui yellow basic button" id="reschedule_button">
+                <i class="recycle icon"></i>
+                Reschedule
+            </button>
+            <button class="ui negative basic button" id="delete_button">
+                <i class="trash alternate outline icon"></i>
+                Delete
+            </button>
+        </div>
+    </div>
+</div>
+<script>
+    $("#reschedule_button").api({
+        action: "reschedule execution",
+        method: "POST",
+        data:{
+            "identifier": "{{execution_id}}",
+        },
+        serializeForm: true,
+        beforeSend: function (settings) {
+            $("#reschedule_button").addClass("loading");
+            return settings;
+        },
+        onResponse: function (response) {
+            $("#reschedule_button").removeClass("loading");
+            return response;
+        },
+        successTest: function (response) {
+            return response.success;
+        },
+    });
+    $("#delete_button").api({
+        action: "delete execution",
+        method: "POST",
+        data:{
+            "identifier": "{{execution_id}}",
+        },
+        serializeForm: true,
+        beforeSend: function (settings) {
+            $("#delete_button").addClass("loading");
+            return settings;
+        },
+        onResponse: function (response) {
+            $("#delete_button").removeClass("loading");
+            return response;
+        },
+        successTest: function (response) {
+            return response.success;
+        },
+    })
+
+</script>
+
+
+{{!-- Execution related content --}}
+<div class="ui grid">
+    <div class="ui horizontal divider">
+        Settings
+    </div>
+    <div class="sixteen wide column">
+        <table class="ui definition table">
+            <tbody>
+                <tr>
+                    <td class="three wide column">Experiment git commit</td>
+                    <td><a href="{{experiment_commit_url}}">{{execution_commit}}</a></td>
+                </tr>
+                <tr>
+                    <td>Parameters</td>
+                    <td>{{execution_parameters}}</td>
+                </tr>
+                <tr>
+                    <td>Profile</td>
+                    <td>{{execution_executor}}</td>
+                </tr>
+                <tr>
+                    <td>Date</td>
+                    <td>{{execution_start_time}}</td>
+                </tr>
+                <tr>
+                    <td>Duration</td>
+                    <td>{{execution_duration}}</td>
+                </tr>
+                <tr>
+                    <td>Exit Code</td>
+                    <td>{{execution_exit_code}}</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    <div class="ui horizontal divider">
+        Script Streams
+    </div>
+    <div class="sixteen wide column">
+        <div class="ui segments">
+            <div class="ui green segment">
+                <div class="ui accordion">
+                    <div class="title">
+                        <i class="dropdown icon"></i>
+                        Standard Output
+                    </div>
+                    <div class="content">
+                        <p class="transition visible" style="display: block !important;">
+                            <div class="ui olive message">
+                                <p>
+                                    {{{execution_stdout}}}
+                                </p>
+                            </div>
+                        </p>
+                    </div>
+                </div>
+            </div>
+            <div class="ui red segment">
+                <div class="ui accordion">
+                    <div class="title">
+                        <i class="dropdown icon"></i>
+                        Standard Error
+                    </div>
+                    <div class="content">
+                        <p class="transition visible" style="display: block !important;">
+                            <div class="ui red message">
+                                <p>
+                                    {{{execution_stderr}}}
+                                </p>
+                            </div>
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="ui horizontal divider">
+        Figures
+    </div>
+    <div class="sixteen wide column">
+        {{#each figures}}
+        <img class="ui centered big image" src={{this}}>
+        {{/each}}
+    </div>
+    <div class="ui horizontal divider">
+        Files
+    </div>
+    <div class="sixteen wide column">
+        <div class="ui items">
+            {{#each files}}
+            <div class="item">
+                <div class="image">
+                    <i class=" huge file alternate outline icon"></i>
+                </div>
+                <div class="content">
+                    <a class="header" href={{this.address}}>{{this.name}}</a>
+                    <div class="meta">
+                        <span>Path</span>
+                    </div>
+                    <div class="description">
+                        <p>{{this.path}}</p>
+                    </div>
+                </div>
+            </div>
+            {{/each}}
+        </div>
+    </div>
+</div>
+
+<script>
+    $('.ui.accordion').accordion();
+</script>
