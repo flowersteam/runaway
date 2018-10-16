@@ -177,7 +177,7 @@ pub fn push(set_upstream: Option<&str>, cmd_dir: &path::PathBuf) -> Result<(), E
 
 /// Pull changes from remote. Note that submodules are not affected by this command.
 pub fn pull(cmd_dir: &path::PathBuf) -> Result<(), Error> {
-    match utilities::run_command(vec!["git", "pull", "--rebase", "--no-edit"],
+    match utilities::run_command(vec!["git", "pull", "--rebase", "--no-edit", "origin", "master"],
                                  cmd_dir,
                                  format!("pull in {}", cmd_dir.to_str().unwrap()).as_str(),
                                  false)
