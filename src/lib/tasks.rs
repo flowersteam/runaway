@@ -118,12 +118,23 @@ impl Task {
         // We finish the execution
         {
             let cmp_repo = self.campaign_repo.lock().unwrap();
-            cmp_repo.finish_execution(&mut execution).unwrap();
+            if cmp_repo.finish_execution(&mut execution).is_err(){
+                warn!("Failed to finish execution {}", execution);
+                return;
+            }
         }
-        // We push the execution
+        // We pull push the execution
         {
             let cmp_repo = self.campaign_repo.lock().unwrap();
-            cmp_repo.push().unwrap();
+            for _ in 0..5 {
+                if cmp_repo.pull().is_ok() && cmp_repo.push().is_ok(){
+                    return ;
+                }
+                else{
+                    warn!("Failed to push the execution {}. Retrying ...", execution);
+                }
+            }
+            warn!("Failed to push the execution {}. Giving up ... ", execution);
         }
     }
 }
