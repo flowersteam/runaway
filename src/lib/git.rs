@@ -163,6 +163,18 @@ pub fn push(set_upstream: Option<&str>, cmd_dir: &path::PathBuf) -> Result<(), E
     }
 }
 
+/// Abort previous rebase
+pub fn abort_rebase(cmd_dir: &path::PathBuf) -> Result<(), Error> {
+    match utilities::run_command(vec!["git", "rebase", "--abort"],
+                                 cmd_dir,
+                                 format!("pull in {}", cmd_dir.to_str().unwrap()).as_str())
+        {
+            Ok(_) => Ok(()),
+            Err(Error::ExecutionFailed(output)) => Err(Error::Git(utilities::output_to_message(&output))),
+            Err(_) => Err(Error::Unknown),
+        }
+}
+
 /// Pull changes from remote. Note that submodules are not affected by this command.
 pub fn pull(cmd_dir: &path::PathBuf) -> Result<(), Error> {
     match utilities::run_command(vec!["git", "pull", "--rebase", "--autostash", "--no-edit", "origin", "master"],

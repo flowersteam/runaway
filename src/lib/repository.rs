@@ -10,7 +10,7 @@
 /// and as such, avoid races condition on the file system.
 
 // IMPORTS
-use std::{fmt, fs, io, path, str};
+use std::{fmt, fs, io, path, str, thread, time};
 use serde_yaml;
 use regex;
 use chrono;
@@ -154,6 +154,8 @@ impl Campaign {
     /// are not affected by this method.
     pub fn pull(&self) -> Result<(), Error> {
         info!("Pulling changes from remote");
+        // We abort rebase
+        git::abort_rebase(&self.get_path());
         // We pull the repo
         git::pull(&self.get_path())?;
         // We return
@@ -163,7 +165,7 @@ impl Campaign {
     /// Pushes the changes to the origin branch.
     pub fn push(&self) -> Result<(), Error> {
         info!("Pushing changes to remote");
-        // We try to push
+        // We abort possible rebase
         git::push(None, &self.get_path())?;
         // We return
         return Ok(());
