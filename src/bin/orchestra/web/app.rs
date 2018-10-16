@@ -345,6 +345,7 @@ mod api {
                     |u| format!("{}:{}:{}", u / 3600, u % 3600 / 60, u % 3600 % 60),
                 ));
                 execution_data.push(e.get_executor().clone().unwrap_or(String::from("None")));
+                execution_data.push(e.get_generator().to_owned());
                 execution_data.push(
                     e.get_execution_exit_code()
                         .map_or_else(|| String::from("None"), |u| format!("{}", u)),
@@ -357,46 +358,95 @@ mod api {
     }
 
     #[derive(Deserialize)]
-    pub struct ExecutionRequest{identifier: String}
-
-    /// Handles POST "/api/delete_execution"
-    pub fn delete_execution((state, req): (State<ApplicationState>, Form<ExecutionRequest>)) -> HttpResponse {
-        // We retrieve data
-        let campaign = state.get_campaign();
-        let execution_path = campaign.get_executions_path().join(&req.identifier);
-        // Does the execution exists?
-        match repository::Execution::from_path(&execution_path) {
-            Err(_) => HttpResponse::build(http::StatusCode::NOT_FOUND).finish(),
-            Ok(execution) => {
-                // We remove the execution
-                campaign.remove_execution(execution).unwrap();
-                // We return the response
-                HttpResponse::build(http::StatusCode::OK).finish()
-            }
-        }
+    pub struct DeleteExecutionsRequest{
+        // The identifiers separated by a `¤` character.
+        identifiers: String
     }
 
-    /// Handles POST "/api/reschedule_execution"
-    pub fn reschedule_execution((state, req): (State<ApplicationState>, Form<ExecutionRequest>)) -> HttpResponse {
+    /// Handles POST "/api/delete_executions"
+    pub fn delete_execution((state, req): (State<ApplicationState>, Form<DeleteExecutionsRequest>)) -> HttpResponse {
         // We retrieve data
         let campaign = state.get_campaign();
-        let execution_path = campaign.get_executions_path().join(&req.identifier);
-        // Does the execution exists?
-        match repository::Execution::from_path(&execution_path) {
-            Err(_) => HttpResponse::build(http::StatusCode::NOT_FOUND).finish(),
-            Ok(ref mut execution) => {
-                let profile = {
-                    execution.get_executor().as_ref().unwrap().clone()
-                };
-                // We reset the execution
-                campaign.reset_execution(execution).unwrap();
-                // We add the task
-                let task = tasks::Task::from_execution(state.campaign.clone(), execution.clone(), profile.to_owned());
-                state.get_taskqueue().push(task);
-                // We return the response
-                HttpResponse::build(http::StatusCode::OK).finish()
-            }
+        let execution_ids = req.identifiers.split("¤").collect::<Vec<_>>();
+        // We retrieve executions results
+        let executions = execution_ids
+            .iter()
+            .map(|id| repository::Execution::from_path(&campaign.get_executions_path().join(id)))
+            .collect::<Vec<_>>();
+        // If one execution is an error, we return a not found
+        if executions.iter().any(|e| e.is_err()){
+            return HttpResponse::build(http::StatusCode::NOT_FOUND).finish();
         }
+        // We remove executions
+        executions
+            .into_iter()
+            .map(|e| e.unwrap())
+            .for_each(|e| campaign.remove_execution(e).unwrap());
+        // We pull and push
+        for _ in 0..5 {
+            if campaign.pull().is_ok() && campaign.push().is_ok(){
+                break
+            }
+                else{
+                    warn!("Failed to push the executions removal. Retrying ...");
+                }
+        }
+        // We return a OK
+        return HttpResponse::build(http::StatusCode::OK).finish();
+    }
+
+    #[derive(Deserialize, Debug)]
+    pub struct RescheduleExecutionsRequest{
+        // The identifiers separated by a `¤` character.
+        identifiers: String,
+        // The profile to use.
+        profile: String,
+    }
+
+    /// Handles POST "/api/reschedule_executions"
+    pub fn reschedule_executions((state, req): (State<ApplicationState>, Form<RescheduleExecutionsRequest>)) -> HttpResponse {
+        println!("{:?}", req);
+        // We retrieve data
+        let campaign = state.get_campaign();
+        let execution_ids = req.identifiers.split("¤").collect::<Vec<_>>();
+        // We retrieve executions results
+        let executions = execution_ids
+            .iter()
+            .map(|id| repository::Execution::from_path(&campaign.get_executions_path().join(id)))
+            .collect::<Vec<_>>();
+        // If one execution is an error, we return a not found
+        if executions.iter().any(|e| e.is_err()){
+            return HttpResponse::build(http::StatusCode::NOT_FOUND).finish();
+        }
+        // We generate the tasks
+        let rescheduled_tasks = executions
+            .iter()
+            .map(|e| e.as_ref().unwrap())
+            .map(|e| tasks::Task::new(state.campaign.clone(),
+                                      e.get_parameters().to_owned(),
+                                      Some(e.get_commit().to_owned()),
+                                      req.profile.clone()))
+            .collect::<Vec<_>>();
+        // We remove executions
+        executions
+            .into_iter()
+            .map(|e| e.unwrap())
+            .for_each(|e| campaign.remove_execution(e).unwrap());
+        // We pull and push
+        for _ in 0..5 {
+            if campaign.pull().is_ok() && campaign.push().is_ok(){
+                break
+            }
+                else{
+                    warn!("Failed to push the executions removal. Retrying ...");
+                }
+        }
+        // We push the tasks
+        rescheduled_tasks
+            .into_iter()
+            .for_each(|t| state.get_taskqueue().push(t));
+        // We return a OK
+        return HttpResponse::build(http::StatusCode::OK).finish();
     }
 }
 
@@ -437,8 +487,8 @@ pub fn launch_orchestra(campaign:repository::Campaign, port: u32, n_workers: u32
             .resource("/api/get_workers", |r| { r.method(http::Method::GET).with(api::get_workers) })
             .resource("/api/get_tasks", |r| { r.method(http::Method::GET).with(api::get_tasks) })
             .resource("/api/get_executions", |r| {r.method(http::Method::GET).with(api::get_executions)})
-            .resource("/api/delete_execution", |r| {r.method(http::Method::POST).with(api::delete_execution)})
-            .resource("/api/reschedule_execution", |r| {r.method(http::Method::POST).with(api::reschedule_execution)})
+            .resource("/api/delete_executions", |r| {r.method(http::Method::POST).with(api::delete_execution)})
+            .resource("/api/reschedule_executions", |r| {r.method(http::Method::POST).with(api::reschedule_executions)})
             .handler("/static", StaticFiles::new(campaign.lock().unwrap().get_executions_path()).unwrap())
     })
     .bind(format!("127.0.0.1:{}", port).as_str())

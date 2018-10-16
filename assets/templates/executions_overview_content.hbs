@@ -6,7 +6,7 @@ The executions overview page allows to see all the executions, to sort filter an
 {{!-- Title and help box --}}
 <div class="ui accordion" style="padding-top: 2%">
     <div class="title">
-        <h1>Executions<i class="dropdown icon"></i> </h1>
+        <h1>Executions<i class="dropdown icon"></i></h1>
     </div>
     <div class="content">
         <div class="ui info message transition">
@@ -28,44 +28,46 @@ The executions overview page allows to see all the executions, to sort filter an
     <div class="sixteen wide column">
         <table class="ui compact table" id='executions_table'>
             <thead>
-                <tr>
-                    <th>Id</th> 
-                    <th>Commit</th>
-                    <th>Params.</th>
-                    <th>Status</th>
-                    <th>Date</th>
-                    <th>Duration</th>
-                    <th>Profile</th>
-                    <th>Code</th>
-                </tr>
+            <tr>
+                <th>Id</th>
+                <th>Commit</th>
+                <th>Params.</th>
+                <th>Status</th>
+                <th>Date</th>
+                <th>Duration</th>
+                <th>Profile</th>
+                <th>Generator</th>
+                <th>Code</th>
+            </tr>
             </thead>
             <tbody>
             </tbody>
         </table>
     </div>
+
     <script>
         $("#executions_table").DataTable({
-            "paging":   false,
+            "paging": false,
             "ajax": "/api/get_executions",
             "columnDefs": [
                 {
-                    "render": function(data, type, row){
-                        return `<a href="/executions/${data}" id="${data}">${data.slice(0, 9)+"..."}</a>`;
+                    "render": function (data, type, row) {
+                        return `<a href="/executions/${data}" id="${data}">${data.slice(0, 9) + "..."}</a>`;
                     },
                     "targets": 0,
                 },
                 {
-                    "render": function(data, type, row){
-                        return data.slice(0,5);
+                    "render": function (data, type, row) {
+                        return data.slice(0, 5);
                     },
                     "targets": 1,
                 }
             ],
-            "createdRow": function(row, data, dataIndex){
-                if(data[7] == "0"){
+            "createdRow": function (row, data, dataIndex) {
+                if (data[8] == "0") {
                     $(row).addClass("positive");
                 }
-                else{
+                else {
                     $(row).addClass("negative");
                 }
             },
@@ -78,45 +80,75 @@ The executions overview page allows to see all the executions, to sort filter an
             <button class="ui basic primary button" id="executions_table_deselect_all_button">
                 Deselect All
             </button>
-            <button class="ui basic yellow button" id="executions_table_reschedule_button">
+            <div class="ui basic yellow dropdown button" id="executions_table_reschedule_button">
                 <i class="recycle icon"></i>
-                Reschedule
-            </button>
+                <span class="text">Reschedule</span>
+                <div class="menu">
+                </div>
+            </div>
             <button class="ui basic negative button" id="executions_table_delete_button">
                 <i class="trash alternate outline icon"></i>
                 Delete
             </button>
         `);
         $("#executions_table_filter").css("float", "right");
-        $("#executions_table tbody").on("click", "tr", function(){
+        $("#executions_table tbody").on("click", "tr", function () {
             $(this).toggleClass("active");
         });
-        $("#executions_table_select_all_button").click(function(){
+        $("#executions_table_select_all_button").click(function () {
             $("#executions_table").DataTable().rows({"search": "applied",}).nodes().toArray().forEach(x => $(x).addClass("active"));
         });
-        $("#executions_table_deselect_all_button").click(function(){
+        $("#executions_table_deselect_all_button").click(function () {
             $("#executions_table").DataTable().rows({"search": "applied",}).nodes().toArray().forEach(x => $(x).removeClass("active"));
         });
-        $("#executions_table_reschedule_button").click(function(){
-            $("#executions_table_reschedule_button").addClass("loading");
-            let requests = $("#executions_table").DataTable().rows({"search": "applied",}).nodes().toArray().filter(x=>$(x).hasClass("active")).map(function(x){
-                $.post("/api/reschedule_execution", {identifier: $(x).find("a").attr("id")})
-            });
-            $.when.apply(this, requests).done(function(){
-                $("#executions_table_reschedule_button").removeClass("loading");
-                location.reload()
-            });            
-        });
-        $("#executions_table_delete_button").click(function(){
+        $("#executions_table_delete_button").click(function () {
             $("#executions_table_delete_button").addClass("loading");
-            let requests = $("#executions_table").DataTable().rows({"search": "applied",}).nodes().toArray().filter(x=>$(x).hasClass("active")).map(function(x){
-                $.post("/api/delete_execution", {identifier: $(x).find("a").attr("id")})
-            });
-            $.when.apply(this, requests).done(function(){
-                $("#executions_table_delete_button").removeClass("loading");
-                location.reload();
-            });            
+            let identifiers = $("#executions_table").DataTable()
+                    .rows({"search": "applied",})
+                    .nodes()
+                    .toArray()
+                    .filter(x => $(x).hasClass("active"))
+                    .map(x => $(x).find("a").attr("id"))
+                    .join("¤");
+            $.post("/api/delete_executions", {identifiers: identifiers}, _ => location.reload());
         });
+        $('#executions_table_reschedule_button').dropdown({
+            apiSettings: {
+                action: 'get profiles',
+                onResponse: function (response) {
+                    var values = {
+                        "success": true,
+                        "results": [],
+                    };
+                    for (v in response) {
+                        values["results"].push({
+                            "name": response[v],
+                            "value": response[v],
+                            "text": response[v]
+                        });
+                    }
+                    return values;
+                },
+            },
+            onChange: function (value, text, $selectedItem) {
+                $("#executions_table_reschedule_button").addClass("loading");
+                let identifiers = $("#executions_table").DataTable()
+                        .rows({"search": "applied",})
+                        .nodes()
+                        .toArray()
+                        .filter(x => $(x).hasClass("active"))
+                        .map(x => $(x).find("a").attr("id"))
+                        .join("¤");
+                var profile = $("#executions_table_reschedule_button").find("span").text();
+                $.post("/api/reschedule_executions", {
+                    identifiers: identifiers,
+                    profile: profile
+                }, _ => location.reload());
+            },
+            filterRemoteData: true,
+            saveRemoteData: false,
+        });
+
 
     </script>
 </div>
