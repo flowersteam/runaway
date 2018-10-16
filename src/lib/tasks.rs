@@ -11,6 +11,7 @@
 use super::async;
 use std::sync::{Arc, Mutex};
 use std::fmt;
+use std::{thread, time};
 use chrono::prelude::*;
 use super::Error;
 use super::repository::{Campaign, Execution};
@@ -122,19 +123,15 @@ impl Task {
                 warn!("Failed to finish execution {}", execution);
                 return;
             }
-        }
-        // We pull push the execution
-        {
-            let cmp_repo = self.campaign_repo.lock().unwrap();
             for _ in 0..5 {
                 if cmp_repo.pull().is_ok() && cmp_repo.push().is_ok(){
                     return ;
                 }
                 else{
                     warn!("Failed to push the execution {}. Retrying ...", execution);
+                    thread::sleep(time::Duration::from_millis(10))
                 }
             }
-            warn!("Failed to push the execution {}. Giving up ... ", execution);
         }
     }
 }

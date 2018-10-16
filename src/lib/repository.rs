@@ -339,7 +339,7 @@ impl Campaign {
         // We commit the folder
         git::stage(&path::PathBuf::from("."), &exc_config.get_path())?;
         git::commit(
-            format!("Initialize execution {}", exc_config.get_identifier()).as_ref(),
+           format!("Initialize execution {}", exc_config.get_identifier()).as_ref(),
             &self.get_path(),
         )?;
         // We return the execution config
