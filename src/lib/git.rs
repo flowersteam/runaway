@@ -18,8 +18,7 @@ use super::utilities;
 pub fn clone_remote_repo(git_url: &str, cmd_dir: &path::PathBuf) -> Result<(), Error> {
     match utilities::run_command(vec!["git", "clone", "--recurse-submodule", git_url],
                                  cmd_dir,
-                                 format!("clone remote repository {}", git_url).as_str(),
-                                 false)
+                                 format!("clone remote repository {}", git_url).as_str())
         {
             Ok(_) => Ok(()),
             Err(Error::ExecutionFailed(output)) => Err(Error::Git(utilities::output_to_message(&output))),
@@ -31,8 +30,7 @@ pub fn clone_remote_repo(git_url: &str, cmd_dir: &path::PathBuf) -> Result<(), E
 pub fn clone_local_repo(repo_path: &path::PathBuf, cmd_dir: &path::PathBuf) -> Result<(), Error> {
     match utilities::run_command(vec!["git", "clone", "-ls", repo_path.to_str().unwrap(), "."],
                                  cmd_dir,
-                                 format!("clone local repository {}", repo_path.to_str().unwrap()).as_str(),
-                                 false)
+                                 format!("clone local repository {}", repo_path.to_str().unwrap()).as_str())
         {
             Ok(_) => Ok(()),
             Err(Error::ExecutionFailed(output)) => Err(Error::Git(utilities::output_to_message(&output))),
@@ -44,8 +42,7 @@ pub fn clone_local_repo(repo_path: &path::PathBuf, cmd_dir: &path::PathBuf) -> R
 pub fn get_tip(branch: &str, cmd_dir: &path::PathBuf) -> Result<String, Error> {
     match utilities::run_command(vec!["git", "rev-parse", branch],
                                  cmd_dir,
-                                 format!("get head in {}", cmd_dir.to_str().unwrap()).as_str(),
-                                 true)
+                                 format!("get head in {}", cmd_dir.to_str().unwrap()).as_str())
         {
             Ok(output) => Ok(str::replace(String::from_utf8(output.stdout).unwrap().as_str(), "\n", "")),
             Err(Error::ExecutionFailed(output)) => Err(Error::Git(utilities::output_to_message(&output))),
@@ -57,8 +54,7 @@ pub fn get_tip(branch: &str, cmd_dir: &path::PathBuf) -> Result<String, Error> {
 pub fn checkout(commit_hash: &str, cmd_dir: &path::PathBuf) -> Result<(), Error> {
     match utilities::run_command(vec!["git", "checkout", commit_hash],
                                  cmd_dir,
-                                 format!("check out to {} in {}", commit_hash, cmd_dir.to_str().unwrap()).as_str(),
-                                 false)
+                                 format!("check out to {} in {}", commit_hash, cmd_dir.to_str().unwrap()).as_str())
         {
             Ok(_) => Ok(()),
             Err(Error::ExecutionFailed(output)) => Err(Error::Git(utilities::output_to_message(&output))),
@@ -70,8 +66,7 @@ pub fn checkout(commit_hash: &str, cmd_dir: &path::PathBuf) -> Result<(), Error>
 pub fn get_origin_url(cmd_dir: &path::PathBuf) -> Result<String, Error> {
     match utilities::run_command(vec!["git", "remote", "get-url", "origin"],
                                  cmd_dir,
-                                 format!("get origin in {}", cmd_dir.to_str().unwrap()).as_str(),
-                                 true)
+                                 format!("get origin in {}", cmd_dir.to_str().unwrap()).as_str())
         {
             Ok(output) => Ok(str::replace(String::from_utf8(output.stdout).unwrap().as_str(), "\n", "")),
             Err(Error::ExecutionFailed(output)) => Err(Error::Git(utilities::output_to_message(&output))),
@@ -83,8 +78,7 @@ pub fn get_origin_url(cmd_dir: &path::PathBuf) -> Result<String, Error> {
 pub fn add_submodule(sm_url: &str, name: &str, cmd_dir: &path::PathBuf) -> Result<(), Error> {
     match utilities::run_command(vec!["git", "submodule", "add", sm_url, name],
                                  cmd_dir,
-                                 format!("add submodule {} in {}", sm_url, cmd_dir.to_str().unwrap()).as_str(),
-                                 false)
+                                 format!("add submodule {} in {}", sm_url, cmd_dir.to_str().unwrap()).as_str())
         {
             Ok(_) => Ok(()),
             Err(Error::ExecutionFailed(output)) => Err(Error::Git(utilities::output_to_message(&output))),
@@ -96,8 +90,7 @@ pub fn add_submodule(sm_url: &str, name: &str, cmd_dir: &path::PathBuf) -> Resul
 pub fn update_submodule(cmd_dir: &path::PathBuf) -> Result<(), Error> {
     match utilities::run_command(vec!["git", "submodule", "update", "--remote", "--merge"],
                                  cmd_dir,
-                                 format!("update submodule in {}", cmd_dir.to_str().unwrap()).as_str(),
-                                 false)
+                                 format!("update submodule in {}", cmd_dir.to_str().unwrap()).as_str())
         {
             Ok(_) => Ok(()),
             Err(Error::ExecutionFailed(output)) => Err(Error::Git(utilities::output_to_message(&output))),
@@ -109,8 +102,7 @@ pub fn update_submodule(cmd_dir: &path::PathBuf) -> Result<(), Error> {
 pub fn get_staged_files(cmd_dir: &path::PathBuf) -> Result<Vec<path::PathBuf>, Error> {
     match utilities::run_command(vec!["git", "diff", "--name-only", "--cached"],
                                  cmd_dir,
-                                 format!("get staged files in {}", cmd_dir.to_str().unwrap()).as_str(),
-                                 true)
+                                 format!("get staged files in {}", cmd_dir.to_str().unwrap()).as_str())
         {
             Ok(output) => Ok(String::from_utf8(output.stdout)
                 .unwrap()
@@ -125,8 +117,7 @@ pub fn get_staged_files(cmd_dir: &path::PathBuf) -> Result<Vec<path::PathBuf>, E
 pub fn stage(stage_path: &path::PathBuf, cmd_dir: &path::PathBuf) -> Result<(), Error> {
     match utilities::run_command(vec!["git", "add", stage_path.to_str().unwrap()],
                                  cmd_dir,
-                                 format!("stage {} in {}", stage_path.to_str().unwrap(), cmd_dir.to_str().unwrap()).as_str(),
-                                 false)
+                                 format!("stage {} in {}", stage_path.to_str().unwrap(), cmd_dir.to_str().unwrap()).as_str())
         {
             Ok(_) => Ok(()),
             Err(Error::ExecutionFailed(output)) => Err(Error::Git(utilities::output_to_message(&output))),
@@ -138,8 +129,7 @@ pub fn stage(stage_path: &path::PathBuf, cmd_dir: &path::PathBuf) -> Result<(), 
 pub fn commit(commit_message: &str, cmd_dir: &path::PathBuf) -> Result<(), Error> {
     match utilities::run_command(vec!["git", "commit", "-m", commit_message],
                                  cmd_dir,
-                                 format!("commit {} in {}", commit_message, cmd_dir.to_str().unwrap()).as_str(),
-                                 false)
+                                 format!("commit {} in {}", commit_message, cmd_dir.to_str().unwrap()).as_str())
         {
             Ok(_) => Ok(()),
             Err(Error::ExecutionFailed(output)) => Err(Error::Git(utilities::output_to_message(&output))),
@@ -153,8 +143,7 @@ pub fn push(set_upstream: Option<&str>, cmd_dir: &path::PathBuf) -> Result<(), E
         Some(remote) => {
             match utilities::run_command(vec!["git", "push", "-u", remote, "--all"],
                                          cmd_dir,
-                                         format!("push to {} in {}", remote, cmd_dir.to_str().unwrap()).as_str(),
-                                         false)
+                                         format!("push to {} in {}", remote, cmd_dir.to_str().unwrap()).as_str())
                 {
                     Ok(_) => Ok(()),
                     Err(Error::ExecutionFailed(output)) => Err(Error::Git(utilities::output_to_message(&output))),
@@ -164,8 +153,7 @@ pub fn push(set_upstream: Option<&str>, cmd_dir: &path::PathBuf) -> Result<(), E
         None => {
             match utilities::run_command(vec!["git", "push"],
                                          cmd_dir,
-                                         format!("push in {}", cmd_dir.to_str().unwrap()).as_str(),
-                                         false)
+                                         format!("push in {}", cmd_dir.to_str().unwrap()).as_str())
                 {
                     Ok(_) => Ok(()),
                     Err(Error::ExecutionFailed(output)) => Err(Error::Git(utilities::output_to_message(&output))),
@@ -177,10 +165,9 @@ pub fn push(set_upstream: Option<&str>, cmd_dir: &path::PathBuf) -> Result<(), E
 
 /// Pull changes from remote. Note that submodules are not affected by this command.
 pub fn pull(cmd_dir: &path::PathBuf) -> Result<(), Error> {
-    match utilities::run_command(vec!["git", "pull", "--rebase", "--no-edit", "origin", "master"],
+    match utilities::run_command(vec!["git", "pull", "--no-edit", "origin", "master"],
                                  cmd_dir,
-                                 format!("pull in {}", cmd_dir.to_str().unwrap()).as_str(),
-                                 false)
+                                 format!("pull in {}", cmd_dir.to_str().unwrap()).as_str())
         {
             Ok(_) => Ok(()),
             Err(Error::ExecutionFailed(output)) => Err(Error::Git(utilities::output_to_message(&output))),
@@ -192,8 +179,7 @@ pub fn pull(cmd_dir: &path::PathBuf) -> Result<(), Error> {
 pub fn fetch(origin: &str, cmd_dir: &path::PathBuf) -> Result<(), Error> {
     match utilities::run_command(vec!["git", "fetch", origin],
                                  cmd_dir,
-                                 format!("fetch {} in {}", origin, cmd_dir.to_str().unwrap()).as_str(),
-                                 false)
+                                 format!("fetch {} in {}", origin, cmd_dir.to_str().unwrap()).as_str())
         {
             Ok(_) => Ok(()),
             Err(Error::ExecutionFailed(output)) => Err(Error::Git(utilities::output_to_message(&output))),
@@ -205,8 +191,7 @@ pub fn fetch(origin: &str, cmd_dir: &path::PathBuf) -> Result<(), Error> {
 pub fn get_last_commit(branch: &str, cmd_dir: &path::PathBuf) -> Result<String, Error> {
     match utilities::run_command(vec!["git", "log", "-n", "1", "--pretty=format:\"%H\"", branch],
                                  cmd_dir,
-                                 format!("get last commit of {} in {}", branch, cmd_dir.to_str().unwrap()).as_str(),
-                                 true)
+                                 format!("get last commit of {} in {}", branch, cmd_dir.to_str().unwrap()).as_str())
         {
             Ok(output) => Ok(str::replace(String::from_utf8(output.stdout).unwrap().as_str(), "\"", "")),
             Err(Error::ExecutionFailed(output)) => Err(Error::Git(utilities::output_to_message(&output))),
@@ -218,8 +203,7 @@ pub fn get_last_commit(branch: &str, cmd_dir: &path::PathBuf) -> Result<String, 
 pub fn get_all_commits(cmd_dir: &path::PathBuf) -> Result<Vec<String>, Error> {
     match utilities::run_command(vec!["git", "log", "--pretty=format:\"%H\""],
                                  cmd_dir,
-                                 format!("get all commits in {}", cmd_dir.to_str().unwrap()).as_str(),
-                                 true)
+                                 format!("get all commits in {}", cmd_dir.to_str().unwrap()).as_str())
         {
             Ok(output) => Ok(String::from_utf8(output.stdout)
                 .unwrap()
@@ -235,8 +219,7 @@ pub fn get_all_commits(cmd_dir: &path::PathBuf) -> Result<Vec<String>, Error> {
 pub fn clean(cmd_dir: &path::PathBuf) -> Result<(), Error> {
     match utilities::run_command(vec!["git", "clean", "-dxf"],
                                  cmd_dir,
-                                 format!("clean in {}", cmd_dir.to_str().unwrap()).as_str(),
-                                 false)
+                                 format!("clean in {}", cmd_dir.to_str().unwrap()).as_str())
         {
             Ok(_) => Ok(()),
             Err(Error::ExecutionFailed(output)) => Err(Error::Git(utilities::output_to_message(&output))),
@@ -248,8 +231,7 @@ pub fn clean(cmd_dir: &path::PathBuf) -> Result<(), Error> {
 pub fn add_remote(name: &str, url: &str, cmd_dir: &path::PathBuf) -> Result<(), Error> {
     match utilities::run_command(vec!["git", "remote", "add", name, url],
                                  cmd_dir,
-                                 format!("adding remote {} {} in {}", name, url, cmd_dir.to_str().unwrap()).as_str(),
-                                 false)
+                                 format!("adding remote {} {} in {}", name, url, cmd_dir.to_str().unwrap()).as_str())
         {
             Ok(_) => Ok(()),
             Err(Error::ExecutionFailed(output)) => Err(Error::Git(utilities::output_to_message(&output))),
@@ -261,8 +243,7 @@ pub fn add_remote(name: &str, url: &str, cmd_dir: &path::PathBuf) -> Result<(), 
 pub fn init(cmd_dir: &path::PathBuf) -> Result<(), Error> {
     match utilities::run_command(vec!["git", "init"],
                                  cmd_dir,
-                                 format!("initialize in {}", cmd_dir.to_str().unwrap()).as_str(),
-                                 false)
+                                 format!("initialize in {}", cmd_dir.to_str().unwrap()).as_str())
         {
             Ok(_) => Ok(()),
             Err(Error::ExecutionFailed(output)) => Err(Error::Git(utilities::output_to_message(&output))),

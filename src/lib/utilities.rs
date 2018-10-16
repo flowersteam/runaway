@@ -15,22 +15,17 @@ use super::{DATA_RPATH, SEND_ARCH_RPATH, SEND_IGNORE_RPATH};
 /// `cmd_dir`. An string `action` explaining the command must be provided for logging purpose.
 /// Depending on `capture_streams` the command streams are either piped captured or outputted to the
 /// program streams.
-pub fn run_command(args: Vec<&str>, cmd_dir: &path::PathBuf, action: &str, capture_streams: bool) -> Result<process::Output, Error> {
+pub fn run_command(args: Vec<&str>, cmd_dir: &path::PathBuf, action: &str) -> Result<process::Output, Error> {
     debug!("Start to {}", action);
-    // We retrieve the stdio function
-    let stdio_func = match capture_streams {
-        true => process::Stdio::piped,
-        false => process::Stdio::inherit,
-    };
     // We split the arguments
     let (command, arguments) = args.split_first().unwrap();
     // We perform the command
     let output = process::Command::new(command)
         .args(arguments)
         .current_dir(cmd_dir)
-        .stdin(stdio_func())
-        .stdout(stdio_func())
-        .stderr(stdio_func())
+        .stdin(process::Stdio::inherit())
+        .stdout(process::Stdio::piped())
+        .stderr(process::Stdio::piped())
         .output()?;
     // Depending on the output, we return the corresponding
     match output.status.success() {
