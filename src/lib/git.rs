@@ -167,7 +167,7 @@ pub fn push(set_upstream: Option<&str>, cmd_dir: &path::PathBuf) -> Result<(), E
 pub fn abort_rebase(cmd_dir: &path::PathBuf) -> Result<(), Error> {
     match utilities::run_command(vec!["git", "rebase", "--abort"],
                                  cmd_dir,
-                                 format!("pull in {}", cmd_dir.to_str().unwrap()).as_str())
+                                 format!("abort rebase in {}", cmd_dir.to_str().unwrap()).as_str())
         {
             Ok(_) => Ok(()),
             Err(Error::ExecutionFailed(output)) => Err(Error::Git(utilities::output_to_message(&output))),
