@@ -405,7 +405,6 @@ mod api {
 
     /// Handles POST "/api/reschedule_executions"
     pub fn reschedule_executions((state, req): (State<ApplicationState>, Form<RescheduleExecutionsRequest>)) -> HttpResponse {
-        println!("{:?}", req);
         // We retrieve data
         let campaign = state.get_campaign();
         let execution_ids = req.identifiers.split("¤").collect::<Vec<_>>();
@@ -493,6 +492,6 @@ pub fn launch_orchestra(campaign:repository::Campaign, port: u32, n_workers: u32
     })
     .bind(format!("127.0.0.1:{}", port).as_str())
     .unwrap()
-    .workers(10)
+    .workers(20)
     .run();
 }
