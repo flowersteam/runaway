@@ -148,7 +148,7 @@ fn main() {
     // We initialize the logger.
     if matches.is_present("verbose") {
         pretty_logger::init(pretty_logger::Destination::Stdout,
-                            log::LogLevelFilter::Debug,
+                            log::LogLevelFilter::Info,
                             pretty_logger::Theme::default()).unwrap();
     }
 
