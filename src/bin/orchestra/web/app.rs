@@ -447,6 +447,19 @@ mod api {
         // We return a OK
         return HttpResponse::build(http::StatusCode::OK).finish();
     }
+
+    /// Handles GET "/api/synchronize_campaign"
+    pub fn synchronize_campaign(state: State<ApplicationState>) -> HttpResponse{
+        let campaign = state.get_campaign();
+        if campaign.pull().is_err() || campaign.push().is_err() || campaign.fetch_experiment().is_err(){
+            return HttpResponse::build(http::StatusCode::INTERNAL_SERVER_ERROR).finish();
+        }
+        else{
+            return HttpResponse::build(http::StatusCode::OK)
+                .content_type("text/html")
+                .body("");
+        }
+    }
 }
 
 /// Helper to load handlebars templates
@@ -467,6 +480,9 @@ pub fn load_handlebar_templates() -> handlebars::Handlebars{
 /// Function that launche the orchestra application on a given campaign. The number of workers for
 /// the executions can be parameterized through `n_workers`.
 pub fn launch_orchestra(campaign:repository::Campaign, port: u32, n_workers: u32) {
+    // We update the campaign
+    campaign.pull();
+    // We proceed
     let campaign = Arc::new(Mutex::new(campaign));
     let taskqueue = Arc::new(Mutex::new(tasks::TaskQueue::new(n_workers)));
     server::new(move || {
@@ -488,6 +504,7 @@ pub fn launch_orchestra(campaign:repository::Campaign, port: u32, n_workers: u32
             .resource("/api/get_executions", |r| {r.method(http::Method::GET).with(api::get_executions)})
             .resource("/api/delete_executions", |r| {r.method(http::Method::POST).with(api::delete_execution)})
             .resource("/api/reschedule_executions", |r| {r.method(http::Method::POST).with(api::reschedule_executions)})
+            .resource("/api/synchronize_campaign", |r| {r.method(http::Method::GET).with(api::synchronize_campaign)})
             .handler("/static", StaticFiles::new(campaign.lock().unwrap().get_executions_path()).unwrap())
     })
     .bind(format!("127.0.0.1:{}", port).as_str())

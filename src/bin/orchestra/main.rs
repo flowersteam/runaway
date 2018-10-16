@@ -205,7 +205,7 @@ fn main() {
         }
     }
 
-    // Orchestra-Push
+    // Orchestra-Sync
     if matches.subcommand_matches("sync").is_some() {
         eprintln!("orchestra: syncing local with remote ...");
         let cmp_path = match misc::search_expegit_root(&path::PathBuf::from(".")) {
