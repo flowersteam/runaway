@@ -106,6 +106,11 @@ fn main(){
                     .short("p")
                     .long("push")
                     .help("Pushes the modifications to distant branch")))
+            .subcommand(clap::SubCommand::with_name("params")
+                .about("Retrieves the parameters of an execution")
+                .arg(clap::Arg::with_name("IDENTIFIER")
+                    .help("Identifier of the execution")
+                    .required(true)))
             .subcommand(clap::SubCommand::with_name("finish")
                 .about("Finishes an execution")
                 .arg(clap::Arg::with_name("IDENTIFIER")
@@ -375,7 +380,7 @@ fn main(){
                     std::process::exit(11);
                 }
                 Ok(exc)=>{
-                    eprintln!("expegit: execution {} successfully created", exc);
+                    eprintln!("expegit: execution {} successfully loaded", exc);
                     exc
                 }
             };
@@ -428,7 +433,7 @@ fn main(){
                     std::process::exit(11);
                 }
                 Ok(exc)=>{
-                    eprintln!("expegit: execution {} successfully created", exc);
+                    eprintln!("expegit: execution {} successfully loaded", exc);
                     exc
                 }
             };
@@ -453,6 +458,39 @@ fn main(){
                     }
                 }
             }
+        }
+    }
+
+    // Expegit-Exec-Params
+    if let Some(matches) = matches.subcommand_matches("exec"){
+        if let Some(matches) = matches.subcommand_matches("params"){
+            eprintln!("expegit: retrieving parameters");
+            let cmp_path = match misc::search_expegit_root(&path::PathBuf::from(".")){
+                Err(_) => {
+                    eprintln!("expegit: unable to find an expegit repository in parent folders. Are you in an expegit repository?");
+                    std::process::exit(21);
+                },
+                Ok(cmp_path)=> cmp_path,
+            };
+            let campaign = match repository::Campaign::from_path(&cmp_path) {
+                Err(err) => {
+                    eprintln!("expegit: an error occured while opening the expegit configuration: {}", err);
+                    std::process::exit(22);
+                },
+                Ok(cmp) => cmp,
+            };
+            let exc_path = campaign.get_executions_path().join(matches.value_of("IDENTIFIER").unwrap());
+            let execution = match repository::Execution::from_path(&exc_path){
+                Err(err)=>{
+                    eprintln!("expegit: an error occurred while creating the execution: {}", err);
+                    std::process::exit(23);
+                }
+                Ok(exc)=>{
+                    eprintln!("expegit: execution {} successfully loaded", exc);
+                    exc
+                }
+            };
+            println!("{}", execution.get_parameters());
         }
     }
 
