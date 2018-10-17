@@ -29,11 +29,11 @@ fn main(){
         .about("Execute code on remote hosts")
         .arg(clap::Arg::with_name("SCRIPT")
             .help("File name of the script to be executed")
-            .index(1)
+            .index(2)
             .required(true))
         .arg(clap::Arg::with_name("REMOTE")
             .help("Name of remote profile to execute script with")
-            .index(2)
+            .index(1)
             .required(true))
         .arg(clap::Arg::with_name("verbose")
             .short("v")
@@ -95,11 +95,11 @@ fn main(){
             eprintln!("runaway: failed to fetch data");
             std::process::exit(7);
         },
-        Err(error) => {
-            eprintln!("runaway: error occured: {}", error);
-            std::process::exit(8);
+        Err(liborchestra::Error::ExecutionFailed(output)) => {
+            eprintln!("runaway: error occured: {}", output);
+            std::process::exit(output.status.code().unwrap_or(8));
         }
-        Ok(_) => std::process::exit(0),
+        Ok(output) => std::process::exit(output.status.code().unwrap_or(0)),
     }
 }
 
