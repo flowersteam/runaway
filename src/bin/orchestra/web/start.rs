@@ -53,14 +53,6 @@ mod ui {
             .content_type("text/html")
             .body(html)
     }
-
-    /// Handles redirections
-    pub fn redirect(req: HttpRequest<StartState>) -> HttpResponse {
-        // We return the response
-        HttpResponse::build(http::StatusCode::PERMANENT_REDIRECT)
-            .header("LOCATION", "/")
-            .body("")
-    }
 }
 
 // API
@@ -230,7 +222,6 @@ pub fn launch_start(port: u32) -> repository::Campaign{
                 .resource("/api/open_campaign", |r| {
                     r.method(http::Method::POST).with(api::open_campaign)
                 })
-                .default_resource(|r| {r.method(http::Method::GET).with(ui::redirect)})
             })
             .bind(format!("127.0.0.1:{}", port).as_str())
             .unwrap()

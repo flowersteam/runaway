@@ -219,14 +219,6 @@ mod ui {
             .content_type("text/html")
             .body(html)
     }
-
-    /// Handles redirections
-    pub fn redirect(req: HttpRequest<ApplicationState>) -> HttpResponse {
-        // We return the response
-        HttpResponse::build(http::StatusCode::PERMANENT_REDIRECT)
-            .header("LOCATION", "/home")
-            .body("")
-    }
 }
 
 // API
@@ -513,7 +505,6 @@ pub fn launch_orchestra(campaign:repository::Campaign, port: u32, n_workers: u32
             .resource("/api/delete_executions", |r| {r.method(http::Method::POST).with(api::delete_execution)})
             .resource("/api/reschedule_executions", |r| {r.method(http::Method::POST).with(api::reschedule_executions)})
             .resource("/api/synchronize_campaign", |r| {r.method(http::Method::GET).with(api::synchronize_campaign)})
-            .default_resource(|r| {r.method(http::Method::GET).with(ui::redirect)})
             .handler("/static", StaticFiles::new(campaign.lock().unwrap().get_executions_path()).unwrap())
     })
     .bind(format!("127.0.0.1:{}", port).as_str())
