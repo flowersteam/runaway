@@ -20,7 +20,7 @@ extern crate clap;
 // IMPORTS
 use std::{fs, env, path};
 use std::sync::{Arc, Mutex};
-use liborchestra::{misc, repository, tasks};
+use liborchestra::{misc, repository, tasks, git};
 
 // MODULES
 mod web;
@@ -109,10 +109,10 @@ fn main() {
                     .required(true))
                 .arg(clap::Arg::with_name("COMMIT")
                     .help("The experiment commit to use for execution")
-                    .default_value(""))
+                    .required(true))
                 .arg(clap::Arg::with_name("PARAMETERS")
                     .help("The parameters generator to use to generate jobs. Separate parameters variations with ; and parameters with ¤. Example '--param¤1;2¤--flag;'.")
-                    .default_value(""))
+                    .required(true))
                 .arg(clap::Arg::with_name("repeat")
                     .short("r")
                     .long("repeat")
@@ -203,6 +203,40 @@ fn main() {
                 eprintln!("orchestra: campaign {} successfully cloned", cmp);
             }
         }
+    }
+
+    // Orchestra-Init
+    if let Some(matches) = matches.subcommand_matches("init") {
+        eprintln!("orchestra: initializing campaign {}", matches.value_of("CAMPAIGN-URL").unwrap());
+        let campaign_url = matches.value_of("CAMPAIGN-URL").unwrap();
+        let expe_url = matches.value_of("EXPE-URL").unwrap();
+        let local_path = path::PathBuf::from(matches.value_of("PATH").unwrap());
+        let reg = regex::Regex::new(r"^.*/([^/]+)\.git$").unwrap();
+        let name = &reg.captures(campaign_url).unwrap()[1];
+        if let Err(error) = fs::create_dir_all(local_path.join(name)) {
+            eprintln!("orchestra: failed to create directory: {}", error);
+            std::process::exit(20);
+        }
+        if let Err(error) = git::init(&local_path.join(name)) {
+            eprintln!("Failed to initialize git repo: {}", error);
+            std::process::exit(21);
+        }
+        if let Err(error) = git::add_remote("origin", campaign_url, &local_path.join(name)){
+            eprintln!("Failed to add origin remote: {}", error);
+            std::process::exit(22);
+        }
+        let campaign = match repository::Campaign::init(&local_path.join(name), expe_url) {
+                Ok(cmp) => cmp,
+                Err(error) => {
+                    eprintln!("Failed to initialize expegit repo: {}", error);
+                    std::process::exit(23);
+                }
+        };
+        if let Err(error) = git::push(Some("origin"), &campaign.get_path()) {
+            eprintln!("Failed to set-upstream: {}", error);
+            std::process::exit(24);
+        }
+        eprintln!("orchestra: campaign {} successfully initialized", campaign_url);
     }
 
     // Orchestra-Sync
@@ -304,6 +338,7 @@ fn main() {
             let mut taskqueue = tasks::TaskQueue::new(workers as u32);
             parameters
                 .into_iter()
+                .inspect(|p| eprintln!("orchestra: start run with arguments '{}'", p))
                 .map(|s| {
                     tasks::Task::new(
                         campaign.clone(),
@@ -312,7 +347,10 @@ fn main() {
                         profile.clone(),
                     )
                 }).for_each(|t| taskqueue.push(t));
+            eprintln!("orchestra: waiting for tasks completion");
             taskqueue.wait();
+            eprintln!("orchestra: tasks completed");
+
         }
     }
 
