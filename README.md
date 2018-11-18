@@ -263,11 +263,6 @@ To install orchestra tools, simply go to the [release page]() of the wiki. There
 of the three tools, which you only need to make available in your PATH. As of today, only linux and osx binaries are 
 available. 
 
-### Troubleshoot:
-
-Depending on the version of LFS used by your repository manager, it may not accept LFS files with content-types. You can 
-set this off with `git config --global lfs.contenttype false`.
-
 ## Todo
 
 Orchestra is far from being complete. Here are some ideas which may be implemented in the future:
