@@ -47,7 +47,7 @@ fn main(){
             .possible_value("code")
             .possible_value("everything")
             .required(true)
-            .default_value("everything")
+            .default_value("nothing")
             .help("What to leave on the remote host after execution"))
         .arg(clap::Arg::with_name("parameters")
                     .help("Script parameters written as they would for the program to execute")
@@ -67,8 +67,12 @@ fn main(){
     let config = liborchestra::run::RunConfig{
         script_path: path::PathBuf::from(matches.value_of("SCRIPT").unwrap()),
         profile: matches.value_of("REMOTE").unwrap().to_owned(),
-        parameters: match matches.value_of("parameters"){
-            Some(s) => String::from(s),
+        parameters: match matches.values_of("parameters"){
+            Some(s) => s.fold(String::new(), |mut s, x| {
+                s.push(' ');
+                s.push_str(x);
+                s}
+            ),
             None => String::new(),
         }
     };
@@ -96,8 +100,12 @@ fn main(){
             std::process::exit(7);
         },
         Err(liborchestra::Error::ExecutionFailed(output)) => {
-            eprintln!("runaway: error occured: {}", output);
+            eprintln!("runaway: error occured: {:?}", output);
             std::process::exit(output.status.code().unwrap_or(8));
+        },
+        Err(error) => {
+            eprintln!("runaway: uknown error occured {:?}", error);
+            std::process::exit(9);
         }
         Ok(output) => std::process::exit(output.status.code().unwrap_or(0)),
     }
