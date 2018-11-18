@@ -110,10 +110,9 @@ pub fn execute_command_on_remote(ssh_config: &str, command: &str, capture_stream
     };
     // We perform the command
     let output = process::Command::new("ssh")
-        //.arg("-t")
         .arg(ssh_config)
         .arg(command)
-        .stdin(process::Stdio::inherit())
+        .stdin(stdio_func())
         .stdout(stdio_func())
         .stderr(stdio_func())
         .output()?;
@@ -168,19 +167,20 @@ pub fn unpack_archive(archive_path: &path::PathBuf) -> Result<(), Error> {
     }
 }
 
-/// Computes sha1
-pub fn compute_file_hash(file_path: &path::PathBuf) -> Result<String, Error>{
-    // We compute the hash with subprocess
-    let output = run_command(vec!["sha1sum", file_path.to_str().unwrap()],
-                            &path::PathBuf::from("/"),
-                            format!("computes hash of {}", file_path.to_str().unwrap()).as_str())?;
-    let hash: String = String::from_utf8(output.stdout)
-        .unwrap()
-        .split(" ")
-        .nth(0)
-        .unwrap()
-        .to_owned();
-    return Ok(hash);
+/// Computes SHA2-256 hash of a file
+pub fn compute_file_hash(file_path: &path::PathBuf) -> Result<String, Error> {
+    debug!("Computing hash of {}", file_path.to_str().unwrap());
+    // We open the file
+    let mut file = fs::File::open(file_path)?;
+    // We instantiate hasher
+    let mut hasher = crypto::sha2::Sha256::new();
+    // We read file
+    let mut file_content = Vec::new();
+    file.read_to_end(&mut file_content)?;
+    // We hash
+    hasher.input(&file_content);
+    // We return
+    return Ok(hasher.result_str());
 }
 
 /// Sends a file to a remote host
