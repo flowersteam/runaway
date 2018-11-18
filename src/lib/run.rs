@@ -99,30 +99,13 @@ impl HostProfile {
         })
     }
     
-    /// Returns the complete execution string.
+    /// Returns the execution string.
     fn get_complete_execution_string(&self)-> String{
         let mut complete: Vec<String> = Vec::new();
-        complete.push(self.get_before_execution_string());
-        complete.push(String::from(" && "));
-        complete.push(self.get_execution_string());
-        complete.push(String::from(" ; "));
-        complete.push(self.get_after_execution_string());
-        return complete.join(" ");
-    }
-
-    /// Returns the "before-execution" string.
-    fn get_before_execution_string(&self) -> String{
-        return self.before_execution.clone().join(" && ");
-    }
-
-    /// Returns the execution string
-    fn get_execution_string(&self) -> String{
-        return self.execution.clone().join(" ; ");
-    }
-
-    /// Returns the "after-execution" string.
-    fn get_after_execution_string(&self) -> String{
-        return self.after_execution.clone().join(" && ");
+        complete.extend(self.before_execution.clone());
+        complete.extend(self.execution.clone());
+        complete.extend(self.after_execution.clone());
+        return complete.join(" && ");
     }
 
     /// Returns the ssh config string.
@@ -226,7 +209,6 @@ impl RunConfig{
         let profile_path = profile_path.canonicalize()?;
         let host_profile = HostProfile::import(&profile_path)?;
         // If they do not exist, we create sendignore and fetchignore
-        info!("Checking for ignore files");
         if !directory_path.join(SEND_IGNORE_RPATH).exists(){
             let mut sendignore = fs::File::create(directory_path.join(SEND_IGNORE_RPATH)).unwrap();
             write!(sendignore, "# Created by Runaway\n\
@@ -239,7 +221,6 @@ impl RunConfig{
             # Files that match globs pattern written here will not be fetch from remote host.").unwrap();
         }
         // We pack the files
-        info!("Packing folder");
         match pack_directory(&directory_path){
             Ok(_) => {},
             Err(err) =>{
@@ -247,7 +228,6 @@ impl RunConfig{
                 return Err(err);
             }
         };
-        info!("Retrieving hash");
         // We retrieve archive hash
         let hash = match compute_file_hash(&send_archive_path){
             Ok(hash) => hash,
@@ -264,7 +244,6 @@ impl RunConfig{
         let host_script_path = host_id_path.join(script_path.file_name().unwrap());
         let exists = execute_command_on_remote(&host_profile.get_ssh_config(),format!("mkdir {}",host_path.to_str().unwrap()).as_str(), false).is_err();
         if !exists{
-            info!("Hash not found on remote. Sending file.");
             match send_file(&send_archive_path, &host_profile.get_ssh_config(), &host_path){
                 Ok(_) => {},
                 Err(err) => {
@@ -273,11 +252,7 @@ impl RunConfig{
                 }
             }
         }
-        else{
-            info!("Hash found on remote. Resuming");
-        }
         // We construct the command
-        info!("Constructing the command");
         let command = host_profile.get_complete_execution_string()
             .replace("$SCRIPT_NAME", host_script_path.to_str().unwrap())
             .replace("$SCRIPT_ARGS", self.parameters.as_str());
@@ -291,7 +266,6 @@ impl RunConfig{
                               host_id_path.join(FETCH_IGNORE_RPATH).to_str().unwrap()));
         let complete_command = complete.join(" && ");
         // We execute the command
-        info!("Executing the command");
         let output = match execute_command_on_remote(host_profile.get_ssh_config().as_str(), complete_command.as_str(), capture_streams){
             Ok(output) => output,
             Err(err) => {
@@ -300,7 +274,6 @@ impl RunConfig{
             }
         };
         // We fetch the data
-        info!("Fetching data");
         let host_fetchable_tar_path = host_id_path.join(FETCH_ARCH_RPATH);
         let local_fetch_path = directory_path.join(FETCH_ARCH_RPATH);
         match fetch_file(&local_fetch_path, host_profile.get_ssh_config().as_str(), &host_fetchable_tar_path){
@@ -311,7 +284,6 @@ impl RunConfig{
             }
         }
         // We unpack the data
-        info!("Unpacking data");
         match unpack_archive(&local_fetch_path){
             Ok(_)=>{},
             Err(err)=>{
@@ -322,7 +294,6 @@ impl RunConfig{
         // Clean up things depending on --leave parameter
         match leave{
             LeaveConfig::Nothing => {
-                info!("Removing all remote data.");
                 match execute_command_on_remote(&host_profile.get_ssh_config(),format!("rm -rf {}", host_path.to_str().unwrap()).as_str(), false){
                     Ok(_)=> {},
                     Err(err)=>{
@@ -332,7 +303,6 @@ impl RunConfig{
                 }
             },
             LeaveConfig::Code => {
-                info!("Removing remote experiment data. Keeping code.");
                 match execute_command_on_remote(&host_profile.get_ssh_config(),format!("rm -rf {}", host_id_path.to_str().unwrap()).as_str(), false){
                     Ok(_)=> {},
                     Err(err)=>{
@@ -341,9 +311,7 @@ impl RunConfig{
                     }
                 }
             },
-            LeaveConfig::Everything => {
-                info!("Leaving everything on remote.");
-            },
+            LeaveConfig::Everything => { },
         }; 
         // We end the runaway!
         return Ok(output);
