@@ -224,13 +224,11 @@ pub fn fetch_file(local_file_path: &path::PathBuf, ssh_config: &str, host_file_p
 mod test {
     use std::fs;
     use std::path;
-    use std::collections::HashSet;
-    use std::iter::FromIterator;
     use super::*;
 
     // Modify the files with the variables that suits your setup to run the test.
-    static TEST_PATH: &str = include_str!("../../test/constants/test_path");
-    static TEST_HOSTNAME: &str = include_str!("../../test/constants/test_hostname");
+    static TEST_PATH: &str = env!("ORCHESTRA_TEST_PATH");
+    static TEST_HOSTNAME: &str = env!("ORCHESTRA_TEST_HOSTNAME");
 
     #[test]
     fn test_write_lfs_gitattributes() {
@@ -311,7 +309,7 @@ mod test {
     fn test_hash() {
         let test_path = path::PathBuf::from(TEST_PATH).join("liborchestra/utilities/hash");
         let hash = compute_file_hash(&test_path.join("file")).unwrap();
-        assert_eq!(hash, "32a5bd248fcbe43faf368367176e6818b432d418f5ebdf98f1c256371bc6316f");
+        assert_eq!(hash, "35a47e40856406c650fa5d9de1b16f6eac9688a0e0ee46985267c70fc6a49e67");
     }
 
     #[test]

@@ -238,9 +238,9 @@ mod tests {
     use super::super::git;
     use super::super::repository;
 
-    static TEST_PATH: &str = include_str!("../../test/constants/test_path");
-    static CAMPAIGN_REPOSITORY_NAME: &str = include_str!("../../test/constants/campaign_repository_name");
-    static CAMPAIGN_REPOSITORY_URL: &str = include_str!("../../test/constants/campaign_repository_url");
+    static TEST_PATH: &str = env!("ORCHESTRA_TEST_PATH");
+    static CAMPAIGN_REPOSITORY_NAME: &str = env!("ORCHESTRA_TEST_CAMPAIGN_REPOSITORY_NAME");
+    static CAMPAIGN_REPOSITORY_URL: &str = env!("ORCHESTRA_TEST_CAMPAIGN_REPOSITORY_URL");
 
 
     #[test]

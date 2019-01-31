@@ -322,11 +322,10 @@ impl RunConfig{
 #[cfg(test)]
 mod tests {
     extern crate pretty_logger;
-    use std::fs;
     use super::*;
 
     // CONSTANTS
-    static TEST_PATH: &str = include_str!("../../test/constants/test_path");
+    static TEST_PATH: &str = env!("ORCHESTRA_TEST_PATH");
 
     #[test]
     fn test_host_profile_import() {
@@ -335,9 +334,9 @@ mod tests {
         assert_eq!(a.name, "localhost");
         assert_eq!(a.ssh_config, "localhost");
         assert_eq!(a.host_directory.to_str().unwrap(), "~/");
-        assert_eq!(a.before_execution, vec!["echo 'Preparing Execution'", "echo 'Executed on $HOSTNAME'"]);
-        assert_eq!(a.execution, vec!["echo 'Starting Execution'", "./$SCRIPT_NAME $SCRIPT_ARGS"]);
-        assert_eq!(a.after_execution, vec!["echo 'Cleaning Execution'"]);
+        assert_eq!(a.before_execution, vec!["echo Preparing Execution", "echo Executed on $HOSTNAME"]);
+        assert_eq!(a.execution, vec!["echo Starting Execution", "./$SCRIPT_NAME $SCRIPT_ARGS"]);
+        assert_eq!(a.after_execution, vec!["echo Cleaning Execution"]);
 
         let a = HostProfile::import(&test_path.join("emptysection.yml")).unwrap();
         assert_eq!(a.name, "emptysection");
@@ -345,16 +344,16 @@ mod tests {
         assert_eq!(a.host_directory.to_str().unwrap(), "~/");
         let empty_vec: Vec<String> = Vec::new();
         assert_eq!(a.before_execution, empty_vec);
-        assert_eq!(a.execution, vec!["echo 'Starting Execution'", "./$SCRIPT_NAME $SCRIPT_ARGS"]);
-        assert_eq!(a.after_execution, vec!["echo 'Cleaning Execution'"]);
+        assert_eq!(a.execution, vec!["echo Starting Execution", "./$SCRIPT_NAME $SCRIPT_ARGS"]);
+        assert_eq!(a.after_execution, vec!["echo Cleaning Execution"]);
     }
 
     #[test]
     fn test_host_profile_get_complete_execution_string() {
         let test_path = path::PathBuf::from(TEST_PATH).join("liborchestra/run/hostprofile");
         let a = HostProfile::import(&test_path.join("localhost.yml")).unwrap();
-        assert_eq!(a.get_complete_execution_string(), "echo 'Preparing Execution' && echo 'Executed on $HOSTNAME' && \
-        echo 'Starting Execution' && ./$SCRIPT_NAME $SCRIPT_ARGS && echo 'Cleaning Execution'");
+        assert_eq!(a.get_complete_execution_string(), "echo Preparing Execution && echo Executed on $HOSTNAME && \
+        echo Starting Execution && ./$SCRIPT_NAME $SCRIPT_ARGS && echo Cleaning Execution");
     }
 
     #[test]

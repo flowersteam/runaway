@@ -267,19 +267,17 @@ pub fn init(cmd_dir: &path::PathBuf) -> Result<(), Error> {
 #[cfg(test)]
 mod test {
     use std::fs;
-    use std::collections::HashSet;
-    use std::iter::FromIterator;
     use uuid;
     use super::*;
 
     // Modify the files with the variables that suits your setup to run the test.
-    static TEST_PATH: &str = include_str!("../../test/constants/test_path");
-    static SIMPLE_REPOSITORY_NAME: &str = include_str!("../../test/constants/simple_repository_name");
-    static SIMPLE_REPOSITORY_URL: &str = include_str!("../../test/constants/simple_repository_url");
-    static SIMPLE_REPOSITORY_HEAD: &str = include_str!("../../test/constants/simple_repository_head");
-    static SIMPLE_REPOSITORY_COMMIT: &str = include_str!("../../test/constants/simple_repository_commit");
-    static PUSH_PULL_REPOSITORY_NAME: &str = include_str!("../../test/constants/push_pull_repository_name");
-    static PUSH_PULL_REPOSITORY_URL: &str = include_str!("../../test/constants/push_pull_repository_url");
+    static TEST_PATH: &str = env!("ORCHESTRA_TEST_PATH");
+    static SIMPLE_REPOSITORY_NAME: &str = env!("ORCHESTRA_TEST_SIMPLE_REPOSITORY_NAME");
+    static SIMPLE_REPOSITORY_URL: &str = env!("ORCHESTRA_TEST_SIMPLE_REPOSITORY_URL");
+    static SIMPLE_REPOSITORY_HEAD: &str = env!("ORCHESTRA_TEST_SIMPLE_REPOSITORY_HEAD");
+    static SIMPLE_REPOSITORY_COMMIT: &str = env!("ORCHESTRA_TEST_SIMPLE_REPOSITORY_COMMIT");
+    static PUSH_PULL_REPOSITORY_NAME: &str = env!("ORCHESTRA_TEST_PUSH_PULL_REPOSITORY_NAME");
+    static PUSH_PULL_REPOSITORY_URL: &str = env!("ORCHESTRA_TEST_PUSH_PULL_REPOSITORY_URL");
 
     #[test]
     fn test_clone_remote_repo() {

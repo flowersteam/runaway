@@ -10,7 +10,7 @@
 /// and as such, avoid races condition on the file system.
 
 // IMPORTS
-use std::{fmt, fs, io, path, str, thread, time};
+use std::{fmt, fs, io, path, str};
 use serde_yaml;
 use regex;
 use chrono;
@@ -723,25 +723,21 @@ impl fmt::Display for Execution {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::collections::HashSet;
-    use std::env;
     use std::fs;
-    use std::iter::FromIterator;
     use std::thread;
-    use std::time;
 
     // Modify the files with the variables that suits your setup to run the test.
-    static TEST_PATH: &str = include_str!("../../test/constants/test_path");
-    static EXPERIMENT_REPOSITORY_URL: &str = include_str!("../../test/constants/experiment_repository_url");
-    static EXPERIMENT_REPOSITORY_HEAD: &str = include_str!("../../test/constants/experiment_repository_head");
-    static INITIAL_CAMPAIGN_REPOSITORY_NAME: &str = include_str!("../../test/constants/initial_campaign_repository_name");
-    static INITIAL_CAMPAIGN_REPOSITORY_URL: &str = include_str!("../../test/constants/initial_campaign_repository_url");
-    static CAMPAIGN_REPOSITORY_NAME: &str = include_str!("../../test/constants/campaign_repository_name");
-    static CAMPAIGN_REPOSITORY_URL: &str = include_str!("../../test/constants/campaign_repository_url");
-    static CHANGING_EXPERIMENT_REPOSITORY_URL: &str = include_str!("../../test/constants/changing_experiment_repository_url");
-    static CHANGING_EXPERIMENT_REPOSITORY_NAME: &str = include_str!("../../test/constants/changing_experiment_repository_name");
-    static EMPTY_REPOSITORY_URL: &str = include_str!("../../test/constants/empty_repository_url");
-    static EMPTY_REPOSITORY_NAME: &str = include_str!("../../test/constants/empty_repository_name");
+    static TEST_PATH: &str = env!("ORCHESTRA_TEST_PATH");
+    static EXPERIMENT_REPOSITORY_URL: &str = env!("ORCHESTRA_TEST_EXPERIMENT_REPOSITORY_URL");
+    static EXPERIMENT_REPOSITORY_HEAD: &str = env!("ORCHESTRA_TEST_EXPERIMENT_REPOSITORY_HEAD");
+    static INITIAL_CAMPAIGN_REPOSITORY_NAME: &str = env!("ORCHESTRA_TEST_INITIAL_CAMPAIGN_REPOSITORY_NAME");
+    static INITIAL_CAMPAIGN_REPOSITORY_URL: &str = env!("ORCHESTRA_TEST_INITIAL_CAMPAIGN_REPOSITORY_URL");
+    static CAMPAIGN_REPOSITORY_NAME: &str = env!("ORCHESTRA_TEST_CAMPAIGN_REPOSITORY_NAME");
+    static CAMPAIGN_REPOSITORY_URL: &str = env!("ORCHESTRA_TEST_CAMPAIGN_REPOSITORY_URL");
+    static CHANGING_EXPERIMENT_REPOSITORY_URL: &str = env!("ORCHESTRA_TEST_CHANGING_EXPERIMENT_REPOSITORY_URL");
+    static CHANGING_EXPERIMENT_REPOSITORY_NAME: &str = env!("ORCHESTRA_TEST_CHANGING_EXPERIMENT_REPOSITORY_NAME");
+    static EMPTY_REPOSITORY_URL: &str = env!("ORCHESTRA_TEST_EMPTY_REPOSITORY_URL");
+    static EMPTY_REPOSITORY_NAME: &str = env!("ORCHESTRA_TEST_EMPTY_REPOSITORY_NAME");
 
     // UNIT TESTS
     #[test]

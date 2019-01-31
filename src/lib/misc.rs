@@ -94,8 +94,8 @@ mod test {
     use super::*;
 
     // Modify the files with the variables that suits your setup to run the test.
-    static TEST_PATH: &str = include_str!("../../test/constants/test_path");
-    static TEST_HOSTNAME: &str = include_str!("../../test/constants/test_hostname");
+    static TEST_PATH: &str = env!("ORCHESTRA_TEST_PATH");
+    static TEST_HOSTNAME: &str = env!("ORCHESTRA_TEST_HOSTNAME");
 
     #[test]
     fn test_check_git_lfs_versions() {
