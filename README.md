@@ -1,22 +1,22 @@
 # Orchestra
 
-Ochestra is a set of tools meant to help in performing experimental campaigns in computer science. It provides you with 
+Ochestra is a set of tools meant to help in performing experimental campaigns in computer science. It provides you with
 simple tools to:
-+ Organize your clumsy experimental workflow, leveraging our beloved `git` and `lfs` through a simple interface.
-+ Collaborate with other peoples on a single experimental campaign. 
+
++ Organize a manual experimental workflow, leveraging git and lfs through a simple interface.
++ Collaborate with other people on a single experimental campaign.
 + Execute pieces of code on remote hosts such as clusters or clouds, in one line.
 + Automate the execution of batches of experiments and the presentation of the results through a clean web ui.
 
-A lot of advanced tools exists on the net to handle similar situations. Most of them target very complicated workflows, 
-e.g. DAGs of tasks. Those tools are very powerful but lack the simplicity needed by newcomers. Here, we propose a 
-limited but very simple tool to handle one of the most common situation of experimental campaigns: the repeated 
+A lot of advanced tools exists on the net to handle similar situations. Most of them target very complicated workflows,
+e.g. DAGs of tasks. Those tools are very powerful but lack the simplicity needed by newcomers. Here, we propose a
+limited but very simple tool to handle one of the most common situation of experimental campaigns: the repeated
 execution of an experiment on variations of parameters.
 
-What do you need to use orchestra tools?
-+ Git, [Lfs](https://git-lfs.github.com/), and Openssh-client installed on your computer
-+ An instance of a [git-repository manager that supports LFS](https://docs.gitlab.com/ee/workflow/lfs/manage_large_binaries_with_git_lfs.html)
-
-Need an example? 
+In particular, we include three tools:
++ expegit: a tool to organize your experimental campaign results in a git repository using git-lfs (large file storage).
++ runaway: a tool to execute code on distant hosts parameterized with easy to use file templates.
++ orchestra: a tool to automate the use of the two previous tools on large campaigns. 
 
 ## Quick Start
 
