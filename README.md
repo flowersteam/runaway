@@ -259,9 +259,9 @@ the computers of the different people working on your campaign.
 
 ## Install
 
-To install orchestra tools, simply go to the [release page]() of the wiki. There you'll be able to download the binaries 
-of the three tools, which you only need to make available in your PATH. As of today, only linux and osx binaries are 
-available. 
+To install orchestra tools, simply go to the [release page](https://gitlab.inria.fr/apere/orchestra/wikis/home) of the wiki. 
+There you'll be able to download the binaries of the three tools, which you only need to make available in your PATH. As of
+today, only linux and osx binaries are available. 
 
 ## Todo
 
