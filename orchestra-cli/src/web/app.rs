@@ -1,4 +1,4 @@
-// orchestra/web/app.rs
+// orchestra-cli/web/app.rs
 // Author: Alexandre Péré
 ///
 /// This module contains a web application that allows the user to act on a campaign. It allows to
@@ -465,19 +465,19 @@ mod api {
 /// Helper to load handlebars templates
 pub fn load_handlebar_templates() -> handlebars::Handlebars{
     let mut hdbr = handlebars::Handlebars::new();
-    hdbr.register_partial("sidebar", include_str!("../../../../assets/templates/sidebar.hbs")).unwrap();
-    hdbr.register_partial("topbar", include_str!("../../../../assets/templates/topbar.hbs")).unwrap();
-    hdbr.register_partial("home_content", include_str!("../../../../assets/templates/home_content.hbs"),).unwrap();
-    hdbr.register_partial("start_content", include_str!("../../../../assets/templates/start_content.hbs")).unwrap();
-    hdbr.register_partial("execution_content", include_str!("../../../../assets/templates/execution_content.hbs")).unwrap();
-    hdbr.register_partial("tasks_overview_content", include_str!("../../../../assets/templates/tasks_overview_content.hbs")).unwrap();
-    hdbr.register_partial("manual_generation_content",include_str!("../../../../assets/templates/manual_generation_content.hbs"),).unwrap();
-    hdbr.register_partial("executions_overview_content", include_str!("../../../../assets/templates/executions_overview_content.hbs"),).unwrap();
-    hdbr.register_template_string("page", include_str!("../../../../assets/templates/page.hbs")).unwrap();
+    hdbr.register_partial("sidebar", include_str!("../../assets/templates/sidebar.hbs")).unwrap();
+    hdbr.register_partial("topbar", include_str!("../../assets/templates/topbar.hbs")).unwrap();
+    hdbr.register_partial("home_content", include_str!("../../assets/templates/home_content.hbs"),).unwrap();
+    hdbr.register_partial("start_content", include_str!("../../assets/templates/start_content.hbs")).unwrap();
+    hdbr.register_partial("execution_content", include_str!("../../assets/templates/execution_content.hbs")).unwrap();
+    hdbr.register_partial("tasks_overview_content", include_str!("../../assets/templates/tasks_overview_content.hbs")).unwrap();
+    hdbr.register_partial("manual_generation_content",include_str!("../../assets/templates/manual_generation_content.hbs"),).unwrap();
+    hdbr.register_partial("executions_overview_content", include_str!("../../assets/templates/executions_overview_content.hbs"),).unwrap();
+    hdbr.register_template_string("page", include_str!("../../assets/templates/page.hbs")).unwrap();
     hdbr
 }
 
-/// Function that launche the orchestra application on a given campaign. The number of workers for
+/// Function that launche the orchestra-cli application on a given campaign. The number of workers for
 /// the executions can be parameterized through `n_workers`.
 pub fn launch_orchestra(campaign:repository::Campaign, port: u32, n_workers: u32) {
     // We update the campaign

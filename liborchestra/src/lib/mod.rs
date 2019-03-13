@@ -23,10 +23,11 @@ extern crate regex;
 extern crate yaml_rust;
 extern crate pretty_logger;
 extern crate uuid;
-extern crate clap;
 extern crate serde;
 extern crate serde_yaml;
 extern crate crypto;
+extern crate rpassword;
+
 
 // IMPORTS
 use std::{io, process, fmt, error};
@@ -42,6 +43,7 @@ use std::{io, process, fmt, error};
 /// + `utilities`: Few miscellaneous meant for private use of the different modules
 mod async;
 mod utilities;
+pub mod ssh;
 pub mod git;
 pub mod tasks;
 pub mod run;
@@ -87,6 +89,7 @@ pub enum Error {
     ExecutionFailed(process::Output),
     InvalidCommit(String),
     InvalidIdentifier(String),
+    Ssh(String),
     ProfileError,
     Packing,
     Unpacking,
@@ -108,6 +111,7 @@ impl fmt::Display for Error {
             Error::NotImplemented => write!(f, "Not Implemented"),
             Error::InvalidCommit(ref com) => write!(f, "Commit {} not found", com),
             Error::InvalidIdentifier(ref id) => write!(f, "Execution {} not found", id),
+            Error::Ssh(ref s) => write!(f, "Ssh error occured: {}", s),
             Error::YamlScanError(ref err) => write!(f, "Yaml Error: {}", err),
             Error::ExecutionFailed(ref o) => write!(f, "Remote execution failed. Process output: {:?}", o),
             Error::InvalidRepository => write!(f, "Not an expegit repository"),
@@ -134,6 +138,7 @@ impl error::Error for Error {
             Error::NotImplemented => "Feature not yet implemented",
             Error::InvalidCommit(_) => "Commit not found in experiment repo commits",
             Error::InvalidIdentifier(_) => "Execution not found",
+            Error::Ssh(_) => "Error in ssh",
             Error::InvalidRepository => "Not an expegit repository",
             Error::AlreadyRepository => "Already a repository",
             Error::ProfileError => "Malformed Profile",
@@ -156,6 +161,7 @@ impl error::Error for Error {
             Error::InvalidCommit(_) => None,
             Error::InvalidRepository => None,
             Error::InvalidIdentifier(_) => None,
+            Error::Ssh(_) => None,
             Error::AlreadyRepository => None,
             Error::ProfileError => None,
             Error::Packing => None,

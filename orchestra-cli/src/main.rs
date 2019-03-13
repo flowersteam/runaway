@@ -1,4 +1,4 @@
-// orchestra/main.rs
+// orchestra-cli/main.rs
 // Author: Alexandre Péré
 ///
 /// Higher level command line tool, allowing to open, create, clone a campaign, and generate and
@@ -26,7 +26,7 @@ use liborchestra::{misc, repository, tasks};
 mod web;
 
 // CONSTANTS
-const NAME: &str = "orchestra";
+const NAME: &str = "orchestra-cli";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const AUTHOR: &str = env!("CARGO_PKG_AUTHORS");
 const DESC: &str = "Automate experimental campaigns";
@@ -79,7 +79,7 @@ fn main() {
                 .index(1)
                 .required(true))
             .arg(clap::Arg::with_name("CAMPAIGN-URL")
-                .help("Url of the campaign. To be created by orchestra.")
+                .help("Url of the campaign. To be created by orchestra-cli.")
                 .index(2)
                 .required(true))
             .arg(clap::Arg::with_name("PATH")
@@ -155,11 +155,11 @@ fn main() {
     // We check for git/lfs versions
     match misc::check_git_lfs_versions() {
         Err(err) => {
-            eprintln!("orchestra: failed to find Git or Lfs. {}.", err);
+            eprintln!("orchestra-cli: failed to find Git or Lfs. {}.", err);
             std::process::exit(1);
         }
         Ok(gl) => {
-            eprintln!("orchestra: using git {} and lfs {}", gl.0, gl.1);
+            eprintln!("orchestra-cli: using git {} and lfs {}", gl.0, gl.1);
         }
     };
 
@@ -168,21 +168,21 @@ fn main() {
         let port: u32 = matches.value_of("port").unwrap().parse().unwrap();
         let workers: u32 = matches.value_of("workers").unwrap().parse().unwrap();
         let path = matches.value_of("PATH").unwrap();
-        eprintln!("orchestra: starting gui ...");
+        eprintln!("orchestra-cli: starting gui ...");
         let campaign = match path.as_ref() {
             "" => {
-                eprintln!("orchestra: launching start application");
+                eprintln!("orchestra-cli: launching start application");
                 web::start::launch_start(port)
             }
             _ => {
                 let path = fs::canonicalize(env::current_dir().unwrap().join(path)).unwrap();
                 match repository::Campaign::from_path(&path) {
                     Err(err) => {
-                        eprintln!("orchestra: an error occured while opening the expegit configuration: {}", err);
+                        eprintln!("orchestra-cli: an error occured while opening the expegit configuration: {}", err);
                         std::process::exit(2);
                     }
                     Ok(cmp) => {
-                        eprintln!("orchestra: campaign {} successfully initialized", cmp);
+                        eprintln!("orchestra-cli: campaign {} successfully initialized", cmp);
                         cmp
                     }
                 }
@@ -193,63 +193,63 @@ fn main() {
 
     // Orchestra-Clone
     if let Some(matches) = matches.subcommand_matches("clone") {
-        eprintln!("orchestra: cloning repository from {}", matches.value_of("URL").unwrap());
+        eprintln!("orchestra-cli: cloning repository from {}", matches.value_of("URL").unwrap());
         match repository::Campaign::from_url(matches.value_of("URL").unwrap(), &path::PathBuf::from(matches.value_of("PATH").unwrap())) {
             Err(err) => {
-                eprintln!("orchestra: an error occurred during campaign cloning: {}", err);
+                eprintln!("orchestra-cli: an error occurred during campaign cloning: {}", err);
                 std::process::exit(3);
             }
             Ok(cmp) => {
-                eprintln!("orchestra: campaign {} successfully cloned", cmp);
+                eprintln!("orchestra-cli: campaign {} successfully cloned", cmp);
             }
         }
     }
 
     // Orchestra-Sync
     if matches.subcommand_matches("sync").is_some() {
-        eprintln!("orchestra: syncing local with remote ...");
+        eprintln!("orchestra-cli: syncing local with remote ...");
         let cmp_path = match misc::search_expegit_root(&path::PathBuf::from(".")) {
             Err(_) => {
-                eprintln!("orchestra: unable to find an expegit repository in parent folders. Are you in an expegit repository?");
+                eprintln!("orchestra-cli: unable to find an expegit repository in parent folders. Are you in an expegit repository?");
                 std::process::exit(8);
             }
             Ok(cmp_path) => cmp_path,
         };
         let campaign = match repository::Campaign::from_path(&cmp_path) {
             Err(err) => {
-                eprintln!("orchestra: an error occured while opening the expegit configuration: {}", err);
+                eprintln!("orchestra-cli: an error occured while opening the expegit configuration: {}", err);
                 std::process::exit(9);
             }
             Ok(cmp) => cmp,
         };
-        eprintln!("orchestra: pulling remote changes...");
+        eprintln!("orchestra-cli: pulling remote changes...");
         match campaign.pull() {
             Err(err) => {
-                eprintln!("orchestra: an error occurred while pulling changes from remote: {}", err);
+                eprintln!("orchestra-cli: an error occurred while pulling changes from remote: {}", err);
                 std::process::exit(10);
             }
             Ok(_) => {
-                eprintln!("orchestra: campaign successfully pulled");
+                eprintln!("orchestra-cli: campaign successfully pulled");
             }
         }
-        eprintln!("orchestra: pushing local changes...");
+        eprintln!("orchestra-cli: pushing local changes...");
         match campaign.push() {
             Err(err) => {
-                eprintln!("orchestra: an error occurred while pushing changes to remote: {}", err);
+                eprintln!("orchestra-cli: an error occurred while pushing changes to remote: {}", err);
                 std::process::exit(11);
             }
             Ok(_) => {
-                eprintln!("orchestra: campaign successfully pushed");
+                eprintln!("orchestra-cli: campaign successfully pushed");
             }
         }
-        eprintln!("orchestra: fetching experiment...");
+        eprintln!("orchestra-cli: fetching experiment...");
         match campaign.fetch_experiment() {
             Err(err) => {
-                eprintln!("orchestra: an error occurred while fetchinig experiment changes: {}", err);
+                eprintln!("orchestra-cli: an error occurred while fetchinig experiment changes: {}", err);
                 std::process::exit(12);
             }
             Ok(_) => {
-                eprintln!("orchestra: experiment successfully fetched");
+                eprintln!("orchestra-cli: experiment successfully fetched");
             }
         }
     }
@@ -257,10 +257,10 @@ fn main() {
     // Orchestra-jobs-generate
     if let Some(matches) = matches.subcommand_matches("jobs") {
         if let Some(matches) = matches.subcommand_matches("run") {
-            eprintln!("orchestra: generating jobs");
+            eprintln!("orchestra-cli: generating jobs");
             let cmp_path = match misc::search_expegit_root(&path::PathBuf::from(".")) {
                 Err(_) => {
-                    eprintln!("orchestra: unable to find an expegit repository in parent folders. Are you in an expegit repository?");
+                    eprintln!("orchestra-cli: unable to find an expegit repository in parent folders. Are you in an expegit repository?");
                     std::process::exit(13);
                 }
                 Ok(cmp_path) => cmp_path,
@@ -268,11 +268,11 @@ fn main() {
             let profile = String::from(matches.value_of("PROFILE").unwrap());
             let commit = match matches.value_of("COMMIT").unwrap() {
                 "" => {
-                    eprintln!("orchestra: no commit hash encountered. Continuing with HEAD ...");
+                    eprintln!("orchestra-cli: no commit hash encountered. Continuing with HEAD ...");
                     None
                 }
                 s => {
-                    eprintln!("orchestra: commit {} encountered", s);
+                    eprintln!("orchestra-cli: commit {} encountered", s);
                     Some(s.to_owned())
                 }
             };
@@ -282,11 +282,11 @@ fn main() {
                 .unwrap();
             let parameters = match matches.value_of("PARAMETERS").unwrap() {
                 "" => {
-                    eprintln!("orchestra: parameters encountered ...");
+                    eprintln!("orchestra-cli: parameters encountered ...");
                     (0..repeat).map(|_| String::new()).collect()
                 }
                 p => {
-                    eprintln!("orchestra: parameters {} encountered", p);
+                    eprintln!("orchestra-cli: parameters {} encountered", p);
                     misc::parse_parameters(p, repeat)
                 }
             };
@@ -296,7 +296,7 @@ fn main() {
                 .unwrap();
             let campaign = match repository::Campaign::from_path(&cmp_path) {
                 Err(err) => {
-                    eprintln!("orchestra: an error occured while opening the expegit configuration: {}", err);
+                    eprintln!("orchestra-cli: an error occured while opening the expegit configuration: {}", err);
                     std::process::exit(14);
                 }
                 Ok(cmp) => Arc::new(Mutex::new(cmp)),
@@ -319,7 +319,7 @@ fn main() {
     // Orchestra-jobs-reschedule
     if let Some(matches) = matches.subcommand_matches("jobs") {
         if let Some(matches) = matches.subcommand_matches("reschedule") {
-            eprintln!("orchestra: rescheduling executions");
+            eprintln!("orchestra-cli: rescheduling executions");
             let cmp_path = match misc::search_expegit_root(&path::PathBuf::from(".")) {
                 Err(_) => {
                     eprintln!("ochestra: unable to find an expegit repository in parent folders. Are you in an expegit repository?");
@@ -329,7 +329,7 @@ fn main() {
             };
             let campaign = match repository::Campaign::from_path(&cmp_path) {
                 Err(err) => {
-                    eprintln!("orchestra: an error occured while opening the expegit configuration: {}", err);
+                    eprintln!("orchestra-cli: an error occured while opening the expegit configuration: {}", err);
                     std::process::exit(15);
                 }
                 Ok(cmp) => Arc::new(Mutex::new(cmp)),
@@ -340,7 +340,7 @@ fn main() {
                 .map(|s| {
                     match repository::Execution::from_path(&excs_path.join(s)) {
                         Err(_) => {
-                            eprintln!("orchestra: failed to open {} execution.", s);
+                            eprintln!("orchestra-cli: failed to open {} execution.", s);
                             std::process::exit(16);
                         }
                         Ok(e) => e,
@@ -352,7 +352,7 @@ fn main() {
                 .collect();
             executions.iter_mut()
                 .for_each(|e| {
-                    eprintln!("orchestra: resetting execution {}", e);
+                    eprintln!("orchestra-cli: resetting execution {}", e);
                     campaign.lock().unwrap().reset_execution(e).unwrap()
                 });
             let workers = matches.value_of("workers")
@@ -377,7 +377,7 @@ fn main() {
     // Orchestra-jobs-delete
     if let Some(matches) = matches.subcommand_matches("jobs") {
         if let Some(matches) = matches.subcommand_matches("delete") {
-            eprintln!("orchestra: deleting executions");
+            eprintln!("orchestra-cli: deleting executions");
             let cmp_path = match misc::search_expegit_root(&path::PathBuf::from(".")) {
                 Err(_) => {
                     eprintln!("ochestra: unable to find an expegit repository in parent folders. Are you in an expegit repository?");
@@ -387,7 +387,7 @@ fn main() {
             };
             let campaign = match repository::Campaign::from_path(&cmp_path) {
                 Err(err) => {
-                    eprintln!("orchestra: an error occured while opening the expegit configuration: {}", err);
+                    eprintln!("orchestra-cli: an error occured while opening the expegit configuration: {}", err);
                     std::process::exit(18);
                 }
                 Ok(cmp) => Arc::new(Mutex::new(cmp)),
@@ -398,7 +398,7 @@ fn main() {
                 .map(|s| {
                     match repository::Execution::from_path(&excs_path.join(s)) {
                         Err(_) => {
-                            eprintln!("orchestra: failed to open {} execution.", s);
+                            eprintln!("orchestra-cli: failed to open {} execution.", s);
                             std::process::exit(19);
                         }
                         Ok(e) => e,
@@ -407,7 +407,7 @@ fn main() {
                 .collect();
             executions.into_iter()
                 .for_each(|e| {
-                    eprintln!("orchestra: deleting execution {}", e);
+                    eprintln!("orchestra-cli: deleting execution {}", e);
                     campaign.lock().unwrap().remove_execution(e).unwrap()
                 });
         }

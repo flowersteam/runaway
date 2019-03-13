@@ -96,8 +96,12 @@ fn main(){
             std::process::exit(7);
         },
         Err(liborchestra::Error::ExecutionFailed(output)) => {
-            eprintln!("runaway: error occured: {}", output);
+            eprintln!("runaway: error occured: {:?}", output);
             std::process::exit(output.status.code().unwrap_or(8));
+        }
+        Err(err) => {
+            eprintln!("runaway: unknown erro occured: {:?}", err);
+            std::process::exit(9);
         }
         Ok(output) => std::process::exit(output.status.code().unwrap_or(0)),
     }

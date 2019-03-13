@@ -1,0 +1,12 @@
+[package]
+name = "runaway-cli"
+version = "0.0.2"
+authors = ["Alexandre Péré <alexandre.pere@protonmail.com>"]
+
+[dependencies]
+log = "0.3"
+pretty_logger = "0.1"
+clap="2.31"
+yaml-rust="0.4"
+uuid = { version = "0.6", features = ["v4"] }
+liborchestra = { path = "../liborchestra"}
