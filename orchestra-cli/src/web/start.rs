@@ -1,4 +1,4 @@
-// orchestra/web/start.rs
+// orchestra-cli/web/start.rs
 // Author: Alexandre Péré
 ///
 /// This module contains a one-page web application that allows the user to select a campaign,
@@ -186,15 +186,15 @@ mod api {
 /// Helper function to load the handlebars templates
 fn load_handlebar_templates() -> handlebars::Handlebars{
     let mut hdbr = handlebars::Handlebars::new();
-    hdbr.register_partial("sidebar", include_str!("../../../../assets/templates/sidebar.hbs")).unwrap();
-    hdbr.register_partial("topbar", include_str!("../../../../assets/templates/topbar.hbs")).unwrap();
-    hdbr.register_partial("home_content", include_str!("../../../../assets/templates/home_content.hbs"),).unwrap();
-    hdbr.register_partial("start_content", include_str!("../../../../assets/templates/start_content.hbs")).unwrap();
-    hdbr.register_partial("execution_content", include_str!("../../../../assets/templates/execution_content.hbs"),).unwrap();
-    hdbr.register_partial("tasks_overview_content", include_str!("../../../../assets/templates/tasks_overview_content.hbs"),).unwrap();
-    hdbr.register_partial("manual_generation_content", include_str!("../../../../assets/templates/manual_generation_content.hbs"),).unwrap();
-    hdbr.register_partial("executions_overview_content",include_str!("../../../../assets/templates/executions_overview_content.hbs"),).unwrap();
-    hdbr.register_template_string("page", include_str!("../../../../assets/templates/page.hbs")).unwrap();
+    hdbr.register_partial("sidebar", include_str!("../../assets/templates/sidebar.hbs")).unwrap();
+    hdbr.register_partial("topbar", include_str!("../../assets/templates/topbar.hbs")).unwrap();
+    hdbr.register_partial("home_content", include_str!("../../assets/templates/home_content.hbs"),).unwrap();
+    hdbr.register_partial("start_content", include_str!("../../assets/templates/start_content.hbs")).unwrap();
+    hdbr.register_partial("execution_content", include_str!("../../assets/templates/execution_content.hbs"),).unwrap();
+    hdbr.register_partial("tasks_overview_content", include_str!("../../assets/templates/tasks_overview_content.hbs"),).unwrap();
+    hdbr.register_partial("manual_generation_content", include_str!("../../assets/templates/manual_generation_content.hbs"),).unwrap();
+    hdbr.register_partial("executions_overview_content",include_str!("../../assets/templates/executions_overview_content.hbs"),).unwrap();
+    hdbr.register_template_string("page", include_str!("../../assets/templates/page.hbs")).unwrap();
     hdbr
 }
 

@@ -1,7 +1,7 @@
-// orchestra/web/mod.rs
+// orchestra-cli/web/mod.rs
 // Author: Alexandre Péré
 ///
-/// Contains two web applications to control orchestra from a gui:
+/// Contains two web applications to control orchestra-cli from a gui:
 /// + A start application which allows to create, clone, or open a campaign
 /// + An application which allows to create jobs and observe results.
 ///
