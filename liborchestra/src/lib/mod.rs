@@ -27,6 +27,8 @@ extern crate serde;
 extern crate serde_yaml;
 extern crate crypto;
 extern crate rpassword;
+extern crate ssh2;
+extern crate dirs;
 
 
 // IMPORTS
@@ -60,6 +62,8 @@ pub static SEND_IGNORE_RPATH: &str = ".sendignore";
 pub static FETCH_IGNORE_RPATH: &str = ".fetchignore";
 // folder containing execution profiles in $HOME
 pub static PROFILES_FOLDER_RPATH: &str = ".runaway";
+// file containing known hosts keys, present in the profiles folder. 
+pub static KNOWN_HOSTS_RPATH: &str = "known_hosts";
 // file name of tar archive to send
 pub static SEND_ARCH_RPATH: &str = ".send.tar";
 // file name of tar to fetch
