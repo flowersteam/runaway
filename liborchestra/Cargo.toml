@@ -16,6 +16,8 @@ yaml-rust="0.4"
 rust-crypto = "0.2"
 uuid = { version = "0.6", features = ["v4"] }
 rpassword = "0.0.4"
+ssh2 = "0.3"
+dirs = "1.0"
 
 [lib]
 name="liborchestra"
