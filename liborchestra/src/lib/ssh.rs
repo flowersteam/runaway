@@ -587,7 +587,8 @@ impl RemoteConnection {
     // Handles the scp fetch operation. See the spawn_thread function. 
     fn handle_scp_fetch_operation(session: &Session, remote_path: &PathBuf, local_path: &PathBuf) -> Result<(), Error>{
         debug!("Fetching remote file {:?} to {:?}", remote_path, local_path); 
-        let mut local_file = OpenOptions::new().write(true).open(local_path)
+        std::fs::remove_file(&local_path);
+        let mut local_file = OpenOptions::new().write(true).create_new(true).open(local_path)
             .map_err(|e| {
                 error!("Error opening the local file to fetch: {}", e);
                 return Error::NoSuchFile})?;
@@ -693,7 +694,7 @@ mod test {
     fn setup() {
         pretty_logger::init(pretty_logger::Destination::Stdout,
                             log::LogLevelFilter::Trace,
-                            pretty_logger::Theme::default()).unwrap();
+                            pretty_logger::Theme::default());
     }
 
     #[test]
@@ -713,7 +714,7 @@ mod test {
 
     #[test]
     fn test_remote_from_proxy_command() {
-        let remote = RemoteConnection::from_proxy_command("localhost", "apere", "ssh -A -l apere localhost -W localhost:22").unwrap();
+        let remote = RemoteConnection::from_addr( "127.0.0.1:22", "localhost", "apere" ).unwrap();
     }
 
     #[test]
@@ -721,8 +722,8 @@ mod test {
         setup();
         use futures::executor::block_on;
         async fn connect_and_ls() {
-            let remote = RemoteConnection::from_proxy_command("plafrim-ext", "apere", "ssh -A -l apere ssh.plafrim.fr -W plafrim:22").unwrap();
-            let (remote, output) = await!(remote.async_exec("sleep 10 & ls")).unwrap();
+            let remote = RemoteConnection::from_addr("127.0.0.1:22", "localhost", "apere").unwrap();
+            let (remote, output) = await!(remote.async_exec("sleep 1 & ls")).unwrap();
             println!("Executed and resulted in {:?}", String::from_utf8(output.stdout).unwrap());
         }
         block_on(connect_and_ls());
@@ -733,7 +734,7 @@ mod test {
         setup();
         use futures::executor::block_on;
         async fn connect_and_scp_send() {
-            let remote = RemoteConnection::from_proxy_command("localhost", "apere", "ssh -A -l apere localhost -W localhost:22").unwrap();
+            let remote = RemoteConnection::from_addr("127.0.0.1:22", "localhost", "apere").unwrap();
             let output = std::process::Command::new("dd")
                 .args(&["if=/dev/urandom", "of=/tmp/local.txt", "bs=1M", "count=1"])
                 .output()
@@ -760,7 +761,7 @@ mod test {
         setup();
         use futures::executor::block_on;
         async fn connect_and_scp_fetch() {
-            let remote = RemoteConnection::from_proxy_command("localhost", "apere", "ssh -A -l apere localhost -W localhost:22").unwrap();
+            let remote = RemoteConnection::from_addr("127.0.0.1:22", "localhost", "apere").unwrap();
             let output = std::process::Command::new("dd")
                 .args(&["if=/dev/urandom", "of=/tmp/remote.txt", "bs=1M", "count=1"])
                 .output()
