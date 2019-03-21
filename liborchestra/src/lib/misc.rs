@@ -5,11 +5,27 @@
 /// A few miscellaneous functions publicly available.
 
 // IMPORTS
-use std::{process, path, fs};
+use std::{process, path, fs, error, fmt};
 use regex;
-use super::Error;
 use super::EXPEGIT_RPATH;
 
+// ERRORS
+#[derive(Debug)]
+pub enum Error {
+    InvalidRepository,
+    Unknown,
+}
+
+impl error::Error for Error {}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            InvalidRepository => write!(f, "Invalid expegit repository"),
+            Unknown => write!(f, "Unknown error occured"),
+        }
+    }
+}
 
 // FUNCTIONS
 

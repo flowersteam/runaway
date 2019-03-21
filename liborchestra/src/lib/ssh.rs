@@ -34,7 +34,6 @@ use std::{
     thread,
     pin::Pin,
     task::{Poll, Waker},
-    future::Future,
     io::{prelude::*, BufReader, copy},
     process::{Stdio, Command, Output},
     os::unix::process::ExitStatusExt,
@@ -47,6 +46,9 @@ use std::{
 };
 use dirs;
 use crate::{PROFILES_FOLDER_RPATH, KNOWN_HOSTS_RPATH};
+use uuid::Uuid;
+use futures::future::Future;
+use chashmap::CHashMap;
 
 // ERRORS
 #[derive(Debug)]
@@ -222,7 +224,8 @@ enum RemoteOperations {
 /// command on the remote host. Ultimately resolves in a result over a process output.
 pub struct RemoteExecFuture {
     state: RemoteExecFutureState,
-    connection: Option<RemoteConnection>,
+    connection: RemoteConnection,
+    uuid: Uuid,
 }
 
 enum RemoteExecFutureState {
@@ -232,20 +235,18 @@ enum RemoteExecFutureState {
 }
 
 impl Future for RemoteExecFuture {
-    type Output = Result<(RemoteConnection, Output), Error>;
-    fn poll(mut self: Pin<&mut Self>, wake: &Waker) -> Poll<Result<(RemoteConnection, Output), Error>> {
+    type Output = Result<Output, Error>;
+    fn poll(mut self: Pin<&mut Self>, wake: &Waker) -> Poll<Result<Output, Error>> {
         debug!("Remote execution Future is being polled ...");
         loop {
             match &self.state {
                 RemoteExecFutureState::Starting(command) => {
                     trace!("Sending ssh execution operation");
                     let (state, ret) = self.connection
-                        .as_ref()
-                        .unwrap()
                         .op_tx
                         .as_ref()
                         .unwrap()
-                        .send((RemoteOperations::Exec(command.to_string()), wake.clone()))
+                        .send((RemoteOperations::Exec(command.to_string()), wake.clone(), self.uuid.clone()))
                         .map_or_else(
                             |_| {(RemoteExecFutureState::Finished, Poll::Ready(Err(Error::ChannelClosed)))},
                             |_| {(RemoteExecFutureState::Waiting, Poll::Pending)});
@@ -255,19 +256,12 @@ impl Future for RemoteExecFuture {
                 RemoteExecFutureState::Waiting => {
                     trace!("Retrieving ssh execution results");
                     let ret = self.connection
-                        .as_ref()
-                        .unwrap()
-                        .exc_rx
-                        .try_recv()
-                        .unwrap_or_else(|e| {
-                            match e {
-                                mpsc::TryRecvError::Empty => Err(Error::ReceiverCalledOnEmptyChannel),
-                                mpsc::TryRecvError::Disconnected => Err(Error::ChannelClosed),
-                            }
-                        })
+                        .exc_results
+                        .remove(&self.uuid)
+                        .unwrap_or(Err(Error::ExecutionFailed))
                         .map_or_else(
-                            |e| { Poll::Ready(Err(Error::ExecutionFailed))},
-                            |output| { Poll::Ready(Ok((self.connection.take().unwrap(), output)))});
+                            |_| { Poll::Ready(Err(Error::ExecutionFailed))},
+                            |output| { Poll::Ready(Ok( output))});
                     self.state = RemoteExecFutureState::Finished;
                     return ret;
                 }
@@ -283,7 +277,8 @@ impl Future for RemoteExecFuture {
 /// This future allows to send a file via SCP. Ultimately resolves to a result over an empty type.
 pub struct ScpSendFuture {
     state: ScpSendFutureState,
-    connection: Option<RemoteConnection>,
+    connection: RemoteConnection,
+    uuid: Uuid,
 }
 
 enum ScpSendFutureState {
@@ -293,21 +288,19 @@ enum ScpSendFutureState {
 }
 
 impl Future for ScpSendFuture {
-    type Output = Result<RemoteConnection, Error>;
-    fn poll(mut self: Pin<&mut Self>, wake: &Waker) -> Poll<Result<RemoteConnection, Error>> {
+    type Output = Result<(), Error>;
+    fn poll(mut self: Pin<&mut Self>, wake: &Waker) -> Poll<Result<(), Error>> {
         debug!("Scp Send Future is being polled ...");
         loop {
             match &self.state {
                 ScpSendFutureState::Starting((local_path, remote_path)) => {
                     trace!("Sending scp send operation");
                     let (state, ret) = self.connection
-                        .as_ref()
-                        .unwrap()
                         .op_tx
                         .as_ref()
                         .unwrap()
                         .send((RemoteOperations::ScpSend((local_path.to_owned(), remote_path.to_owned())),
-                               wake.clone()))
+                               wake.clone(), self.uuid.clone()))
                         .map_or_else(
                             |_| {(ScpSendFutureState::Finished, Poll::Ready(Err(Error::ChannelClosed)))},
                             |_| {(ScpSendFutureState::Waiting, Poll::Pending)});
@@ -317,19 +310,12 @@ impl Future for ScpSendFuture {
                 ScpSendFutureState::Waiting => {
                     trace!("Retrieving scp send result");
                     let ret = self.connection
-                        .as_ref()
-                        .unwrap()
-                        .scps_rx
-                        .try_recv()
-                        .unwrap_or_else(|e| {
-                            match e {
-                                mpsc::TryRecvError::Empty => Err(Error::ReceiverCalledOnEmptyChannel),
-                                mpsc::TryRecvError::Disconnected => Err(Error::ChannelClosed),
-                            }
-                        })
+                        .scps_results
+                        .remove(&self.uuid)
+                        .unwrap_or(Err(Error::ScpSendFailed))
                         .map_or_else(
                             |e|{Poll::Ready(Err(e))},
-                            |_|{Poll::Ready(Ok(self.connection.take().unwrap()))}
+                            |_|{Poll::Ready(Ok(()))}
                         );
                     self.state = ScpSendFutureState::Finished;
                     return ret;
@@ -347,7 +333,8 @@ impl Future for ScpSendFuture {
 /// type. 
 pub struct ScpFetchFuture {
     state: ScpFetchFutureState,
-    connection: Option<RemoteConnection>,
+    connection: RemoteConnection,
+    uuid: Uuid,
 }
 
 enum ScpFetchFutureState {
@@ -357,21 +344,19 @@ enum ScpFetchFutureState {
 }
 
 impl Future for ScpFetchFuture {
-    type Output = Result<RemoteConnection, Error>;
-    fn poll(mut self: Pin<&mut Self>, wake: &Waker) -> Poll<Result<RemoteConnection, Error>> {
+    type Output = Result<(), Error>;
+    fn poll(mut self: Pin<&mut Self>, wake: &Waker) -> Poll<Result<(), Error>> {
         debug!("Scp Fetch Future is being polled ...");
         loop {
             match &self.state {
                 ScpFetchFutureState::Starting((remote_path, local_path)) => {
                     trace!("Sending scp Fetch operation");
                     let (state, ret) = self.connection
-                        .as_ref()
-                        .unwrap()
                         .op_tx
                         .as_ref()
                         .unwrap()
                         .send((RemoteOperations::ScpFetch((remote_path.to_owned(), local_path.to_owned())),
-                               wake.clone()))
+                               wake.clone(), self.uuid.clone()))
                         .map_or_else(
                             |_| {(ScpFetchFutureState::Finished, Poll::Ready(Err(Error::ChannelClosed)))},
                             |_| {(ScpFetchFutureState::Waiting, Poll::Pending)});
@@ -381,19 +366,12 @@ impl Future for ScpFetchFuture {
                 ScpFetchFutureState::Waiting => {
                     trace!("Retrieving scp fetch result");
                     let ret = self.connection
-                        .as_ref()
-                        .unwrap()
-                        .scpf_rx
-                        .try_recv()
-                        .unwrap_or_else(|e| {
-                            match e {
-                                mpsc::TryRecvError::Empty => Err(Error::ReceiverCalledOnEmptyChannel),
-                                mpsc::TryRecvError::Disconnected => Err(Error::ChannelClosed),
-                            }
-                        })
+                        .scpf_results
+                        .remove(&self.uuid)
+                        .unwrap_or(Err(Error::ScpFetchFailed))
                         .map_or_else(
                             |e|{Poll::Ready(Err(e))},
-                            |_|{Poll::Ready(Ok(self.connection.take().unwrap()))}
+                            |_|{Poll::Ready(Ok(()))}
                         );
                     self.state = ScpFetchFutureState::Finished;
                     return ret;
@@ -411,17 +389,17 @@ impl Future for ScpFetchFuture {
 /// different tasks. As such, operations are represented by futures, which sends operations to
 /// perform to the connection thread through a channel. The connection thread performs the
 /// operation and notifies the waker when the operation is done.
+#[derive(Clone)]
 pub struct RemoteConnection {
-    proxy_command: Option<ProxyCommandForwarder>,
-    thread_handle: Option<thread::JoinHandle<()>>,
-    scps_rx: mpsc::Receiver<Result<(), Error>>,
-    scpf_rx: mpsc::Receiver<Result<(), Error>>,
-    exc_rx: mpsc::Receiver<Result<Output, Error>>,
-    op_tx: Option<mpsc::Sender<(RemoteOperations, Waker)>>,
+    proxy_command: Arc<Mutex<Option<ProxyCommandForwarder>>>,
+    thread_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
+    scps_results: Arc<CHashMap<Uuid, Result<(), Error>>>, 
+    scpf_results: Arc<CHashMap<Uuid, Result<(), Error>>>,
+    exc_results: Arc<CHashMap<Uuid, Result<Output, Error>>>,
+    op_tx: Option<mpsc::Sender<(RemoteOperations, Waker, Uuid)>>,
 }
 
 impl RemoteConnection {
-
     // Authenticate the ssh session. 
     fn start_session(stream: &TcpStream, host: &str, user: &str) -> Result<Session, Error> {
         debug!("Opening remote connection to host {} as user {}", host, user);
@@ -488,30 +466,30 @@ impl RemoteConnection {
     // Spawn the operation handling thread. This thread dispatch operation to other functions.
     fn spawn_thread(session: Session,
                     stream: TcpStream, 
-                    op_rx: mpsc::Receiver<(RemoteOperations, Waker)>,
-                    exc_tx: mpsc::Sender<Result<Output, Error>>,
-                    scps_tx: mpsc::Sender<Result<(), Error>>,
-                    scpf_tx: mpsc::Sender<Result<(), Error>>,
+                    op_rx: mpsc::Receiver<(RemoteOperations, Waker, Uuid)>,
+                    exc_results: Arc<CHashMap<Uuid, Result<Output, Error>>>,
+                    scps_results: Arc<CHashMap<Uuid, Result<(), Error>>>,
+                    scpf_results: Arc<CHashMap<Uuid, Result<(), Error>>>,
                     ) -> thread::JoinHandle<()> {
         debug!("Start connection thread");
         let thread_handle = thread::spawn(move || {
             trace!("In thread; starting operation loop");
-            let stream = stream;
+            let stream = stream; // Keep the stream around
             let mut session = session;
-            while let Ok((operation, waker)) = op_rx.recv() {
+            while let Ok((operation, waker, uuid)) = op_rx.recv() {
                 trace!("Received operation to perform: {:?}", operation);
                 match operation {
                     RemoteOperations::Exec(command) => {
-                        let to_send = RemoteConnection::handle_exec_operation(&session, &command);
-                        exc_tx.send(to_send).unwrap();
+                        let res = RemoteConnection::handle_exec_operation(&session, &command);
+                        exc_results.insert_new(uuid, res);
                     }
                     RemoteOperations::ScpSend((local_path, remote_path)) => {
-                        let to_send = RemoteConnection::handle_scp_send_operation(&session, &local_path, &remote_path);
-                        scps_tx.send(to_send).unwrap();
+                        let res = RemoteConnection::handle_scp_send_operation(&session, &local_path, &remote_path);
+                        scps_results.insert_new(uuid, res);
                     }
                     RemoteOperations::ScpFetch((remote_path, local_path)) => { 
-                        let to_send = RemoteConnection::handle_scp_fetch_operation(&session, &remote_path, &local_path);
-                        scpf_tx.send(to_send).unwrap();
+                        let res = RemoteConnection::handle_scp_fetch_operation(&session, &remote_path, &local_path);
+                        scpf_results.insert_new(uuid, res);
                     }
                 }
                 trace!("Operation performed ===> Calling waker");
@@ -624,12 +602,12 @@ impl RemoteConnection {
         trace!("Connection tcp stream");
         let stream = TcpStream::connect(addr).map_err(|_| Error::ConnectionFailed)?;
         let session = RemoteConnection::start_session(&stream, host, user)?;
-        let (op_tx, op_rx) = mpsc::channel::<(RemoteOperations, Waker)>();
-        let (scpf_tx, scpf_rx) = mpsc::channel();
-        let (scps_tx, scps_rx) = mpsc::channel();
-        let (exc_tx, exc_rx) = mpsc::channel();
-        let thread_handle = RemoteConnection::spawn_thread(session, stream, op_rx, exc_tx, scps_tx, scpf_tx);
-        return Ok(RemoteConnection { proxy_command: None, thread_handle: Some(thread_handle), op_tx: Some(op_tx), scps_rx, scpf_rx, exc_rx });
+        let (op_tx, op_rx) = mpsc::channel::<(RemoteOperations, Waker, Uuid)>();
+        let exc_results = Arc::new(CHashMap::new());
+        let scps_results = Arc::new(CHashMap::new());
+        let scpf_results = Arc::new(CHashMap::new());
+        let thread_handle = RemoteConnection::spawn_thread(session, stream, op_rx, exc_results.clone(), scps_results.clone(), scpf_results.clone());
+        return Ok(RemoteConnection { proxy_command: Arc::new(Mutex::new(None)), thread_handle: Arc::new(Mutex::new(Some(thread_handle))), op_tx: Some(op_tx), scps_results, scpf_results, exc_results });
     }
     
     /// Build, authenticate and starts an ssh session from a proxycommand. 
@@ -637,17 +615,18 @@ impl RemoteConnection {
                               -> Result<RemoteConnection, Error> {
         let (proxy_command, addr) = ProxyCommandForwarder::from_command(command)?;
         let mut remote = RemoteConnection::from_addr(addr, host, user)?;
-        remote.proxy_command.replace(proxy_command);
+        remote.proxy_command.lock().unwrap().replace(proxy_command);
         return Ok(remote);
     }
 
     /// Creates a RemoteExecFuture that will resolve to a Result giving the session back as well as
     /// the output of the command. The future takes ownership of the session to avoid sharing the 
     /// inner ssh2 session object to different threads at the same time. 
-    pub fn async_exec(self, command: &str) -> RemoteExecFuture {
+    pub fn async_exec(&self, command: &str) -> RemoteExecFuture {
         return RemoteExecFuture {
             state: RemoteExecFutureState::Starting(command.to_string()),
-            connection: Some(self),
+            connection: self.clone(),
+            uuid: Uuid::new_v4(),
         };
     }
     
@@ -657,7 +636,8 @@ impl RemoteConnection {
     pub fn async_scp_send(self, local_path: &PathBuf, remote_path: &PathBuf) -> ScpSendFuture {
         return ScpSendFuture {
             state: ScpSendFutureState::Starting((local_path.to_owned(), remote_path.to_owned())),
-            connection: Some(self),
+            connection: self.clone(),
+            uuid: Uuid::new_v4(),
         };
     }
 
@@ -667,7 +647,8 @@ impl RemoteConnection {
     pub fn async_scp_fetch(self, remote_path: &PathBuf, local_path: &PathBuf) -> ScpFetchFuture {
         return ScpFetchFuture {
             state: ScpFetchFutureState::Starting((remote_path.to_owned(), local_path.to_owned())),
-            connection: Some(self),
+            connection: self.clone(),
+            uuid: Uuid::new_v4(),
         };
     }
 }
@@ -675,12 +656,21 @@ impl RemoteConnection {
 // We take care of closing the enclosed thread before dropping the connection. 
 impl Drop for RemoteConnection {
     fn drop(&mut self) {
-        let op_tx = self.op_tx.take().unwrap();
-        drop(op_tx);
-        let thread_handle = self.thread_handle.take().unwrap();
-        thread_handle.join().unwrap();
-        let pxc = self.proxy_command.take();
-        drop(pxc);
+        if Arc::strong_count(&self.thread_handle) == 1 {
+            let op_tx = self.op_tx.take().unwrap();
+            drop(op_tx);
+            let thread_handle = self.thread_handle
+                .lock()
+                .unwrap()
+                .take() 
+                .unwrap();
+            thread_handle.join().unwrap();
+            let pxc = self.proxy_command
+                .lock()
+                .unwrap()
+                .take();
+            drop(pxc);
+        }
     }
 }
 
@@ -723,7 +713,7 @@ mod test {
         use futures::executor::block_on;
         async fn connect_and_ls() {
             let remote = RemoteConnection::from_addr("127.0.0.1:22", "localhost", "apere").unwrap();
-            let (remote, output) = await!(remote.async_exec("sleep 1 & ls")).unwrap();
+            let output = await!(remote.async_exec("sleep 1 & ls")).unwrap();
             println!("Executed and resulted in {:?}", String::from_utf8(output.stdout).unwrap());
         }
         block_on(connect_and_ls());
@@ -780,9 +770,27 @@ mod test {
             std::fs::remove_file("/tmp/local.txt").unwrap();
             std::fs::remove_file("/tmp/remote.txt").unwrap();
         }
-        block_on(connect_and_scp_fetch());
+        block_on(connect_and_scp_fetch());        
+    }
 
-        
+    #[test]
+    fn test_async_concurrent_exec(){
+        setup();
+        let remote = RemoteConnection::from_addr("127.0.0.1:22", "localhost", "apere").unwrap();
+        async fn connect_and_ls(remote: RemoteConnection) {
+            let output = await!(remote.async_exec("sleep 1 & ls")).unwrap();
+            println!("Executed and resulted in {:?}", String::from_utf8(output.stdout).unwrap());
+        }
+        use futures::executor;
+        use futures::task::SpawnExt;
+        let mut executor = executor::ThreadPool::new().unwrap();
+        let mut handles = Vec::new();
+        for i in (1..10){
+            handles.push(executor.spawn_with_handle(connect_and_ls(remote.clone())).unwrap())
+        }
+        for handle in handles{
+            executor.run(handle);
+        }
     }
 }
 

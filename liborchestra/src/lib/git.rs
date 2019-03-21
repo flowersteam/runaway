@@ -8,12 +8,32 @@
 // IMPORTS
 use std::path;
 use std::str;
-use super::Error;
+use std::error;
+use std::fmt;
 use super::utilities;
+
+// ERRORS
+#[derive(Debug)]
+pub enum Error {
+    Git(String),
+    Unknown,
+}
+
+impl error::Error for Error {}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Error::Git(ref s) => write!(f, "Git error occured"),
+            Error::Unknown => write!(f, "Unknown error occured"),
+        }
+    }
+}
+
+
 
 
 // FUNCTIONS
-
 /// Clone repository from a url. Also clone submodules.
 pub fn clone_remote_repo(git_url: &str, cmd_dir: &path::PathBuf) -> Result<(), Error> {
     match utilities::run_command(vec!["git", "clone", "--recurse-submodule", git_url],

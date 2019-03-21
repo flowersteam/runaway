@@ -4,11 +4,37 @@
 /// Some utilities meant for private use of the library.
 
 // IMPORTS
-use std::{str, path, fs, process, io::prelude::*};
+use std::{str, path, fs, process, io::prelude::*, error, fmt};
 use crypto;
 use crypto::digest::Digest;
-use super::Error;
+use crate::error as craterr;
 use super::{DATA_RPATH, SEND_ARCH_RPATH, SEND_IGNORE_RPATH};
+
+// ERRORS
+#[derive(Debug)]
+pub enum Error {
+    ExecutionFailed(process::Output),
+    Packing,
+    Unpacking,
+    ScpSend,
+    ScpFetch,
+    Unknown,
+}
+
+impl error::Error for Error {}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Error::ExecutionFailed(_) => write!(f, "Execution failed"),
+            Error::Packing => write!(f, "Files packing failed"),
+            Error::Unpacking => write!(f, "Files unpacking failed"),
+            Error::ScpSend => write!(f, "failed to send file via scp"),
+            Error::ScpFetch => write!(f, "failed to fetch file via scp"),
+            Error::Unknown => write!(f, "Unknown error occured"),
+        }
+    }
+}
 
 // FUNCTIONS
 /// Allows to run a system command represented by `args` as a process, under a given directory
@@ -44,7 +70,7 @@ pub fn output_to_message(output: &process::Output) -> String {
 }
 
 /// Writes lfs gitattributes at a given location
-pub fn write_lfs_gitattributes(wpath: &path::PathBuf) -> Result<(), Error> {
+pub fn write_lfs_gitattributes(wpath: &path::PathBuf) -> Result<(), craterr::Error> {
     debug!("Writing lfs gitattributes in {}", wpath.to_str().unwrap());
     // We append gitattributes file
     let mut gitattributes_file = fs::File::create(wpath.join(".gitattributes"))?;
@@ -56,7 +82,7 @@ pub fn write_lfs_gitattributes(wpath: &path::PathBuf) -> Result<(), Error> {
 }
 
 /// Writes the execution gitignore at a given location
-pub fn write_exc_gitignore(wpath: &path::PathBuf) -> Result<(), Error> {
+pub fn write_exc_gitignore(wpath: &path::PathBuf) -> Result<(), craterr::Error> {
     debug!("Writing executions gitignore in {}", wpath.to_str().unwrap());
     // We append gitignore file
     let mut gitignore_file = fs::File::create(wpath.join(".gitignore"))?;
@@ -74,7 +100,7 @@ pub fn write_exc_gitignore(wpath: &path::PathBuf) -> Result<(), Error> {
 }
 
 /// Writes a gitkeep file at a given location
-pub fn write_gitkeep(wpath: &path::PathBuf) -> Result<(), Error> {
+pub fn write_gitkeep(wpath: &path::PathBuf) -> Result<(), craterr::Error> {
     debug!("Writing executions gitkeep in {}", wpath.to_str().unwrap());
     // We append gitkeep file
     let mut gitkeep_file = fs::File::create(wpath.join(".gitkeep"))?;
@@ -84,7 +110,7 @@ pub fn write_gitkeep(wpath: &path::PathBuf) -> Result<(), Error> {
 }
 
 /// Returns the current hostname
-pub fn get_hostname() -> Result<String, Error> {
+pub fn get_hostname() -> Result<String, craterr::Error> {
     debug!("Retrieving hostname");
     // We retrieve hostname
     let user = str::replace(&String::from_utf8(process::Command::new("id")
@@ -101,7 +127,7 @@ pub fn get_hostname() -> Result<String, Error> {
 }
 
 /// Execute a given command on a remote host using ssh.
-pub fn execute_command_on_remote(ssh_config: &str, command: &str, capture_streams: bool) -> Result<process::Output, Error> {
+pub fn execute_command_on_remote(ssh_config: &str, command: &str, capture_streams: bool) -> Result<process::Output, craterr::Error> {
     debug!("Executing command on {}", ssh_config);
     // We retrieve the stdio function
     let stdio_func = match capture_streams {
@@ -127,7 +153,7 @@ pub fn execute_command_on_remote(ssh_config: &str, command: &str, capture_stream
 }
 
 /// Pack the files of a directory into a `.tar` archive
-pub fn pack_directory(dir_path: &path::PathBuf) -> Result<(), Error> {
+pub fn pack_directory(dir_path: &path::PathBuf) -> Result<(), craterr::Error> {
     debug!("Packing directory {}", dir_path.to_str().unwrap());
     // We perform the command
     let tar_output = process::Command::new("tar")
@@ -182,6 +208,7 @@ pub fn compute_file_hash(file_path: &path::PathBuf) -> Result<String, Error> {
     // We return
     return Ok(hasher.result_str());
 }
+
 
 /// Sends a file to a remote host
 pub fn send_file(local_file_path: &path::PathBuf, ssh_config: &str, host_file_path: &path::PathBuf) -> Result<(), Error> {

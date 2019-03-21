@@ -10,12 +10,32 @@
 /// put something in your `.fetchignore`, mind to not ignore the `.fetchignore` in the `.sendignore`.
 
 // IMPORTS
-use std::{path, process, fs, io, str, io::prelude::*, env};
+use std::{path, process, fs, io, str, io::prelude::*, env, error, fmt};
+use crate::error as craterr;
 use utilities::*;
 use uuid;
 use yaml_rust;
-use super::Error;
 use super::{SEND_ARCH_RPATH, PROFILES_FOLDER_RPATH, SEND_IGNORE_RPATH, FETCH_IGNORE_RPATH, FETCH_ARCH_RPATH};
+
+// ERRORS
+#[derive(Debug)]
+pub enum Error {
+    ProfileError,
+    Unknown,
+}
+
+impl error::Error for Error {}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ProfileError => write!(f, "The profile is ill formed"),
+            Unknown => write!(f, "Unknown error occured"),
+        }
+    }
+}
+
+
 
 // STRUCTURES
 /// Represents an host on which a run can be executed. Those can be parsed from a `yaml` file following this convention:
@@ -57,10 +77,10 @@ struct HostProfile {
 impl HostProfile {
 
     /// Imports a host configuration from the path of a compatible `yaml` file.
-    fn import(yml_path: &path::PathBuf) -> Result<HostProfile, Error>{
+    fn import(yml_path: &path::PathBuf) -> Result<HostProfile, craterr::Error>{
         // We check if the yaml file exists
         if !yml_path.exists(){
-            return Err(Error::from(io::Error::new(io::ErrorKind::NotFound, yml_path.to_str().unwrap().to_owned())))
+            return Err(craterr::Error::from(io::Error::new(io::ErrorKind::NotFound, yml_path.to_str().unwrap().to_owned())))
         }
         // We read the yaml file
         let mut yml_file = fs::File::open(yml_path)?;
@@ -194,7 +214,7 @@ impl RunConfig{
         let script_path = path::PathBuf::from(&self.script_path).canonicalize()?;
         if !script_path.is_file(){
             warn!("Failed to find the script path to execute.");
-            return Err(Error::from(io::Error::new(io::ErrorKind::NotFound, script_path.to_str().unwrap())));
+            return Err(craterr::Error::from(io::Error::new(io::ErrorKind::NotFound, script_path.to_str().unwrap())));
         }
         let directory_path = script_path.parent().unwrap().to_path_buf();
         let send_archive_path = directory_path.join(SEND_ARCH_RPATH);
@@ -203,7 +223,7 @@ impl RunConfig{
                 .join(format!("{}.yml", self.profile)),
             None => {
                 warn!("Failed to retrieve the home directory");
-                return Err(Error::from(io::Error::new(io::ErrorKind::NotFound, "~")));
+                return Err(craterr::Error::from(io::Error::new(io::ErrorKind::NotFound, "~")));
             }
         };
         let profile_path = profile_path.canonicalize()?;
