@@ -7,7 +7,7 @@
 // IMPORTS
 use std::{process, path, fs, error, fmt};
 use regex;
-use super::EXPEGIT_RPATH;
+use super::CMPCONF_RPATH;
 
 // ERRORS
 #[derive(Debug)]
@@ -30,7 +30,7 @@ impl fmt::Display for Error {
 // FUNCTIONS
 
 /// Returns a tuple containing the git and git-lfs versions.
-pub fn check_git_lfs_versions() -> Result<(String, String), Error> {
+pub fn check_git_lfs_versions() -> Result<(String, String), crate::Error> {
     debug!("Checking git and lfs versions");
     let git_version = String::from_utf8(process::Command::new("git")
         .args(&["--version"])
@@ -52,20 +52,20 @@ pub fn check_git_lfs_versions() -> Result<(String, String), Error> {
 }
 
 /// Returns the absolute path to the higher expegit folder starting from `start_path`.
-pub fn search_expegit_root(start_path: &path::PathBuf) -> Result<path::PathBuf, Error> {
+pub fn search_expegit_root(start_path: &path::PathBuf) -> Result<path::PathBuf, crate::Error> {
     debug!("Searching expegit repository root from {}", fs::canonicalize(start_path).unwrap().to_str().unwrap());
     let start_path = fs::canonicalize(start_path)?;
     if start_path.is_file() { panic!("Should provide a folder path.") };
     // We add a dummy folder that will be popped directly to check for .
     let mut start_path = start_path.join("dummy_folder");
     while start_path.pop() {
-        if start_path.join(EXPEGIT_RPATH).exists() {
+        if start_path.join(CMPCONF_RPATH).exists() {
             debug!("Expegit root found at {}", start_path.to_str().unwrap());
             return Ok(start_path);
         }
     }
     warn!("Unable to find .expegit file in parents folders");
-    Err(Error::InvalidRepository)
+    Err(crate::Error::Misc(Error::InvalidRepository))
 }
 
 /// Parses a parameters string with a number of repetitions and generate a vector of parameters
@@ -100,6 +100,24 @@ pub fn parse_parameters(param_string: &str, repeats: usize) -> Vec<String> {
     parameters_generator(param_string.split("¤").collect(), repeats)
 }
 
+/// Returns the current hostname
+pub fn get_hostname() -> Result<String, crate::Error> {
+    debug!("Retrieving hostname");
+    // We retrieve hostname
+    let user = str::replace(&String::from_utf8(process::Command::new("id")
+        .arg("-u")
+        .arg("-n")
+        .output()?
+        .stdout)
+        .unwrap(), "\n", "");
+    let host = str::replace(&String::from_utf8(process::Command::new("hostname")
+        .output()?
+        .stdout)
+        .unwrap(), "\n", "");
+    Ok(format!("{}@{}", user, host))
+}
+
+
 // TESTS
 #[cfg(test)]
 mod test {
@@ -110,8 +128,8 @@ mod test {
     use super::*;
 
     // Modify the files with the variables that suits your setup to run the test.
-    static TEST_PATH: &str = env!("ORCHESTRA_TEST_PATH");
-    static TEST_HOSTNAME: &str = env!("ORCHESTRA_TEST_HOSTNAME");
+    static TEST_PATH: &str = "/tmp";
+    static TEST_HOSTNAME: &str = "";
 
     #[test]
     fn test_check_git_lfs_versions() {

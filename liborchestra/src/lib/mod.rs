@@ -45,14 +45,13 @@ use std::{io, process, fmt};
 /// + `git`: Utilities to perform classic operations on git repositories
 /// + `misc`: Few miscellaneous functions publicly available
 /// + `utilities`: Few miscellaneous meant for private use of the different modules
-//mod async;
 //mod utilities;
 pub mod ssh;
 //pub mod git;
 //pub mod tasks;
 //pub mod run;
 pub mod repository;
-//pub mod misc;
+pub mod misc;
 pub mod error;
 
 
@@ -65,8 +64,8 @@ pub static SEND_IGNORE_RPATH: &str = ".sendignore";
 pub static FETCH_IGNORE_RPATH: &str = ".fetchignore";
 // folder containing execution profiles in $HOME
 pub static PROFILES_FOLDER_RPATH: &str = ".runaway";
-// file containing known hosts keys, present in the profiles folder. 
-pub static KNOWN_HOSTS_RPATH: &str = "known_hosts";
+// file containing known hosts keys
+pub static KNOWN_HOSTS_RPATH: &str = ".runaway/known_hosts";
 // file name of tar archive to send
 pub static SEND_ARCH_RPATH: &str = ".send.tar";
 // file name of tar to fetch
@@ -79,7 +78,8 @@ pub static EXCS_RPATH: &str = "excs";
 pub static EXCCONF_RPATH: &str = ".excconf";
 // folder containing the output data in an execution folder
 pub static DATA_RPATH: &str = "data";
-// folder containing lfs managed data in a data folder
-pub static LFS_RPATH: &str = "lfs";
 // file containing expegit configuration
-pub static EXPEGIT_RPATH: &str = ".expegit";             
+pub static CMPCONF_RPATH: &str = ".cmpconf";             
+
+
+use error::Error;

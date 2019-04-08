@@ -109,23 +109,6 @@ pub fn write_gitkeep(wpath: &path::PathBuf) -> Result<(), craterr::Error> {
     Ok(())
 }
 
-/// Returns the current hostname
-pub fn get_hostname() -> Result<String, craterr::Error> {
-    debug!("Retrieving hostname");
-    // We retrieve hostname
-    let user = str::replace(&String::from_utf8(process::Command::new("id")
-        .arg("-u")
-        .arg("-n")
-        .output()?
-        .stdout)
-        .unwrap(), "\n", "");
-    let host = str::replace(&String::from_utf8(process::Command::new("hostname")
-        .output()?
-        .stdout)
-        .unwrap(), "\n", "");
-    Ok(format!("{}@{}", user, host))
-}
-
 /// Execute a given command on a remote host using ssh.
 pub fn execute_command_on_remote(ssh_config: &str, command: &str, capture_streams: bool) -> Result<process::Output, craterr::Error> {
     debug!("Executing command on {}", ssh_config);
