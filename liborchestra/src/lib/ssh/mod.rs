@@ -1,4 +1,4 @@
-// liborchestra/ssh.rs
+// liborchestra/mod.rs
 // Author: Alexandre Péré
 /// This module contains structures that wraps the ssh2 session object to provide ways to handle 
 /// ssh configurations, authentications, and proxy-commands. In particular, since libssh2
@@ -54,6 +54,9 @@ use crate::KNOWN_HOSTS_RPATH;
 use uuid::Uuid;
 use futures::future::Future;
 use chashmap::CHashMap;
+
+///////////////////////////////////////////////////////////////////////////////////////////// MODULE
+pub mod config;
 
 ///////////////////////////////////////////////////////////////////////////////////////////// ERRORS
 #[derive(Debug, Clone)]
@@ -418,16 +421,21 @@ impl RemoteConnection{
     }
 
     /// Creates a scpsendfuture that will resolve to a result giving the session back.
-    pub fn async_scp_send(self, local_path: &PathBuf, remote_path: &PathBuf) -> ScpSendFuture {
+    pub fn async_scp_send(&self, local_path: &PathBuf, remote_path: &PathBuf) -> ScpSendFuture {
         let ope = ScpSendOp::from_input((local_path.to_owned(), remote_path.to_owned()));
         return ScpSendFuture::new(ope, self.clone());
     }
 
 
     /// Creates a scpsendfuture that will resolve to a result giving the session back.
-    pub fn async_scp_fetch(self, remote_path: &PathBuf, local_path: &PathBuf) -> ScpFetchFuture {
+    pub fn async_scp_fetch(&self, remote_path: &PathBuf, local_path: &PathBuf) -> ScpFetchFuture {
         let ope = ScpFetchOp::from_input((remote_path.to_owned(), local_path.to_owned()));
         return ScpFetchFuture::new(ope, self.clone());
+    }
+
+    /// Returns the number of handles over connection
+    pub fn strong_count(&self) -> usize{
+        return Arc::strong_count(&self.thread_handle);
     }
 
     // Authenticate the ssh session. 
@@ -945,14 +953,6 @@ make_operation_future!(ScpFetchFuture, ScpFetchOp, ScpFetch, Result<(), Error>);
 #[cfg(test)]
 mod test {
     use super::*;
-    use pretty_logger;
-    use log;
-
-    fn setup() {
-        pretty_logger::init(pretty_logger::Destination::Stdout,
-                            log::LogLevelFilter::Trace,
-                            pretty_logger::Theme::default());
-    }
 
     #[test]
     fn test_proxy_command_forwarder() {
@@ -966,7 +966,6 @@ mod test {
 
     #[test]
     fn test_remote_from_addr() {
-        setup();
         let remote = RemoteConnection::from_addr("127.0.0.1:22", "localhost", "apere").unwrap();
     }
 
@@ -977,7 +976,6 @@ mod test {
 
     #[test]
     fn test_async_exec() {
-        setup();
         use futures::executor::block_on;
         async fn connect_and_ls() {
             //let remote = RemoteConnection::from_addr("127.0.0.1:22", "localhost", "apere").unwrap();
@@ -990,7 +988,6 @@ mod test {
 
     #[test]
     fn test_async_scp_send() {
-        setup();
         use futures::executor::block_on;
         async fn connect_and_scp_send() {
             //let remote = RemoteConnection::from_addr("127.0.0.1:22", "localhost", "apere").unwrap();
@@ -1022,7 +1019,6 @@ mod test {
 
     #[test]
     fn test_async_scp_fetch(){
-        setup();
         use futures::executor::block_on;
         async fn connect_and_scp_fetch() {
             //let remote = RemoteConnection::from_addr("127.0.0.1:22", "localhost", "apere").unwrap();
@@ -1054,7 +1050,6 @@ mod test {
 
     #[test]
     fn test_async_concurrent_exec(){
-        setup();
         let remote = RemoteConnection::from_addr("127.0.0.1:22", "localhost", "apere").unwrap();
         async fn connect_and_ls(remote: RemoteConnection) -> std::process::Output{
             return await!(remote.async_exec("echo 1 && sleep 1 && echo 2")).unwrap()
