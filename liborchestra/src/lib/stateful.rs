@@ -11,7 +11,7 @@ use std::fmt::Debug;
 /// A type is a State if it is Debug and implement the `as_any` method. This last point allows
 /// Stateful to cast the trait object into concrete type. There is a custom derive proc macro in
 /// liborchestra_derive. Note that State implementors must also be Clone to be casted into by stateful.
-pub trait State where Self: Debug {
+pub trait State where Self: Debug + Send{
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -101,7 +101,7 @@ mod tests {
     fn test_derive(){
 
         #[derive(Clone, Debug, State)]
-        struct St<A>(A) where A: Clone + Debug + 'static;
+        struct St<A>(A) where A: Clone + Debug + Send + 'static;
         let a = St(44);
         a.as_any();
 
