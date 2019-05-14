@@ -16,7 +16,7 @@
 ///
 /// To see how everything fits, check the test.
 //////////////////////////////////////////////////////////////////////////////////////////// IMPORTS
-use crate::stateful::{Stateful, State, TransitTo};
+use crate::stateful::{Stateful, State, TransitionsTo};
 use crossbeam::channel::{unbounded, Sender, Receiver, TryRecvError};
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -29,11 +29,15 @@ use std::pin::Pin;
 use std::task::Waker;
 use std::error;
 use core::borrow::BorrowMut;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+
 
 ///////////////////////////////////////////////////////////////////////////////////////////// ERRORS
 #[derive(Debug, Clone)]
 pub enum Error {
     FuturePoll(String),
+    Operation(String),
 }
 
 impl error::Error for Error {}
@@ -42,7 +46,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::FuturePoll(s) =>
-                write!(f, "An error occurred while polling a future: \n{}", s),
+                write!(f, "An error occurred while polling a future:\n{}", s),
+            Error::Operation(s) =>
+                write!(f, "An error occurred while performing the operation:\n{}", s),
         }
     }
 }
@@ -56,9 +62,9 @@ impl fmt::Display for Error {
 /// An operation is a Trait object (via its state), which is marked by an operation type M. This
 /// marker type allows to differentiate between the different operations, when creating aliases.
 pub struct Operation<M>{
-    state: Stateful,
-    sender: Sender<Operation<M>>,
-    waker: Option<Waker>,
+    pub state: Stateful,
+    pub sender: Sender<Operation<M>>,
+    pub waker: Option<Waker>,
     op_marker_phantom: PhantomData<M>
 }
 impl<T> Operation<T>{
@@ -80,7 +86,7 @@ pub trait OperationsBound = Debug + Send + 'static;
 
 /// Type representing an operation in a Starting state.
 #[derive(Clone, Debug, State)]
-pub struct StartingOperation<A>(A) where A: OperationsBound;
+pub struct StartingOperation<A>(pub A) where A: OperationsBound;
 impl<A> StartingOperation<A> where A: OperationsBound {
     // Starts a new operation from a given input.
     fn from_input(input: A) -> StartingOperation<A>{
@@ -89,48 +95,69 @@ impl<A> StartingOperation<A> where A: OperationsBound {
 }
 /// Type representing an operation in a Progressing state.
 #[derive(Clone, Debug, State)]
-pub struct ProgressingOperation<B>(B) where B: OperationsBound;
+pub struct ProgressingOperation<B>(pub B) where B: OperationsBound;
 /// Type representing an operation in a Finished state.
 #[derive(Clone, Debug, State)]
-pub struct FinishedOperation<A>(A) where A: OperationsBound;
+pub struct FinishedOperation<A>(pub Result<A, Error>) where A: OperationsBound;
 
 // Allowed transition between operation states
-impl<A, B> TransitTo<ProgressingOperation<B>> for StartingOperation<A>
+impl<A, B> TransitionsTo<ProgressingOperation<B>> for StartingOperation<A>
     where A: OperationsBound, B: OperationsBound {}
-impl<B> TransitTo<ProgressingOperation<B>> for ProgressingOperation<B>
+impl<B> TransitionsTo<ProgressingOperation<B>> for ProgressingOperation<B>
     where B: OperationsBound {}
-impl<B,C> TransitTo<FinishedOperation<C>> for ProgressingOperation<B>
+impl<B,C> TransitionsTo<FinishedOperation<C>> for ProgressingOperation<B>
     where B: OperationsBound, C: OperationsBound {}
+impl<A, C> TransitionsTo<FinishedOperation<C>> for StartingOperation<A>
+    where A: OperationsBound, C:OperationsBound {}
 
-///////////////////////////////////////////////////////////////////////////////////////// HANDLED BY
-/// The HandledBy trait must be implemented by operations to specify how they will use the resource
+/////////////////////////////////////////////////////////////////////////////////////// USE RESOURCE
+/// The UseResource trait must be implemented by operations to specify how they will use the resource
 /// to progress.
-pub trait HandledBy<R> where Self: Send{
-    fn get_handled(mut self: Box<Self>, resource: &mut R);
+pub trait UseResource<R> where Self: Send{
+    fn progress(mut self: Box<Self>, resource: &mut R);
 }
 
+//////////////////////////////////////////////////////////////////////////////////////////// DROPPER
+/// A helper structure that allows to wait for threads to exit. Always put after the channel sender
+/// so that the dropping works. See https://github.com/rust-lang/rfcs/blob/246ff86b320a72f98ed2df928
+/// 05e8e3d48b402d6/text/1857-stabilize-drop-order.md .
+#[derive(Clone)]
+pub struct Dropper<M>(Arc<Mutex<Option<JoinHandle<M>>>>);
+impl<M> Dropper<M>{
+    pub fn from_handle(other: JoinHandle<M>) -> Dropper<M>{
+        return Dropper(Arc::new(Mutex::new(Some(other))));
+    }
+}
+impl<M> Drop for Dropper<M>{
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.0) == 1{
+            self.0.lock().unwrap().take().unwrap().join().unwrap();
+        }
+    }
+}
 //////////////////////////////////////////////////////////////////////////////////////////// FUTURES
-
 // Represents the future state.
-enum OperationFutureState<M, R> where Operation<M>: HandledBy<R>, M: 'static{
-    Starting((Operation<M>, Sender<Box<dyn HandledBy<R>>>, Receiver<Operation<M>>)),
+enum OperationFutureState<M, R> where Operation<M>: UseResource<R>, M: 'static{
+    Starting((Operation<M>, Sender<Box<dyn UseResource<R>>>, Receiver<Operation<M>>)),
     Waiting(Receiver<Operation<M>>),
     Finished,
     Hazardous
 }
 
 /// A generic future that allows to drive an operation to completion on a resource.
-pub struct OperationFuture<M,R,O> where Operation<M>: HandledBy<R>, M: 'static{
+pub struct OperationFuture<M,R,O> where Operation<M>: UseResource<R>, M: 'static{
     state: Rc<RefCell<OperationFutureState<M,R>>>,
     output_phantom: PhantomData<O>
 }
-impl<M, R, O> OperationFuture<M, R, O> where Operation<M>: HandledBy<R>, M: 'static{
+impl<M, R, O> OperationFuture<M, R, O> where Operation<M>: UseResource<R>, M: 'static{
     /// Creates a new future.
     pub fn new(ope: Operation<M>,
-           sender: Sender<Box<dyn HandledBy<R>>>,
-           receiver: Receiver<Operation<M>>) -> OperationFuture<M, R, O>{
+               sender: Sender<Box<dyn UseResource<R>>>,
+               receiver: Receiver<Operation<M>>) -> OperationFuture<M, R, O>{
         return OperationFuture {
-            state: Rc::new(RefCell::new(OperationFutureState::Starting((ope, sender, receiver)))),
+            state: Rc::new(RefCell::new(OperationFutureState::Starting((ope,
+                                                                        sender,
+                                                                        receiver)))),
             output_phantom: PhantomData,
         }
     }
@@ -139,11 +166,11 @@ impl<M, R, O> OperationFuture<M, R, O> where Operation<M>: HandledBy<R>, M: 'sta
 // Generic implementation of the Operation future.
 impl<M, R, O> Future for OperationFuture<M, R, O>
     where
-        Operation<M>: HandledBy<R>,
+        Operation<M>: UseResource<R>,
         O:OperationsBound + Clone,
         M: 'static
 {
-    type Output = Result<O, crate::Error>;
+    type Output = Result<O, Error>;
 
     fn poll(mut self: Pin<&mut Self>, wake: &Waker) -> Poll<Self::Output> {
         loop {
@@ -155,9 +182,7 @@ impl<M, R, O> Future for OperationFuture<M, R, O>
                         .map_or_else(
                             |_| {
                                 (OperationFutureState::Finished,
-                                 Poll::Ready(Err(crate::Error::from(
-                                     Error::FuturePoll(format!("Failed to send operation."))))
-                                 )
+                                 Poll::Ready(Err(Error::FuturePoll(format!("Failed to send operation."))))
                                 )
                             },
                             |_| {
@@ -170,13 +195,11 @@ impl<M, R, O> Future for OperationFuture<M, R, O>
                     let ope = match receiver.recv() {
                         Ok(ope) => ope,
                         Err(e) => {
-                            return Poll::Ready(Err(crate::Error::from(
-                                Error::FuturePoll(format!("Failed to receive operation: {}", e))))
-                            )
+                            return Poll::Ready(Err(Error::FuturePoll(format!("Failed to receive operation: {}", e))))
                         }
                     };
                     if let Some(FinishedOperation(o)) = ope.state.to_state::<FinishedOperation<O>>(){
-                        return Poll::Ready(Ok(o))
+                        return Poll::Ready(o.map_err(|e|{Error::Operation(format!("{}", e))}))
                     } else {
                         panic!("Operation retrieved in a the wrong state.");
                     }
@@ -200,22 +223,22 @@ mod tests {
 
         // First we implement a resource as an asynchronous handling object.
         struct MyResource {
-            queue: Vec<Box<dyn HandledBy<MyResource>>>
+            queue: Vec<Box<dyn UseResource<MyResource>>>
         }
         impl MyResource{
             fn spawn() -> MyResourceHandle{
-                type OpTraitObj = Box<dyn HandledBy<MyResource>>;
+                type OpTraitObj = Box<dyn UseResource<MyResource>>;
                 let (sender, receiver): (Sender<OpTraitObj>, Receiver<OpTraitObj>) = unbounded();
                 std::thread::spawn(move ||{
                     let mut res = MyResource{queue: Vec::new()};
                     loop{
-                        while let Some(s) = res.queue.pop(){
-                            s.get_handled(&mut res);
-                        }
                         match receiver.try_recv(){
                             Ok(o) => res.queue.push(o),
-                            Err(TryRecvError::Empty) => continue,
+                            Err(TryRecvError::Empty) => {},
                             Err(TryRecvError::Disconnected) => break,
+                        }
+                        if let Some(s) = res.queue.pop(){
+                            s.progress(&mut res);
                         }
                     }
                 });
@@ -226,7 +249,7 @@ mod tests {
         // We implement a (probably Clone/Send/Sync) handle to the resource, which allows to create
         // futures.
         struct MyResourceHandle{
-            sender: Sender<Box<dyn HandledBy<MyResource>>>
+            sender: Sender<Box<dyn UseResource<MyResource>>>
         }
         impl MyResourceHandle{
             fn async_op_1(&self) -> MyOp1Fut{
@@ -242,15 +265,19 @@ mod tests {
         // We declare the two types of operations we will perform.
         struct MyOp1Marker {};
         type MyOp1 = Operation<MyOp1Marker>;
-        impl HandledBy<MyResource> for MyOp1 {
-            fn get_handled(mut self: Box<Self>, resource: &mut MyResource) {
+        impl UseResource<MyResource> for MyOp1 {
+            fn progress(mut self: Box<Self>, resource: &mut MyResource) {
                 if let Some(s) = self.state.to_state::<StartingOperation<String>>() {
                     println!("Op1 received in state Starting: {:?}", s);
-                    self.state = Stateful::from(s.transit_to(ProgressingOperation("Progressing".to_owned())));
+                    self.state
+                        .transition::<StartingOperation<String>, ProgressingOperation<_>>
+                        (ProgressingOperation("Progressing".to_owned()));
                     resource.queue.push(self);
                 } else if let Some(s) = self.state.to_state::<ProgressingOperation<String>>() {
                     println!("Op1 received in state Progressing: {:?}", s);
-                    self.state = Stateful::from(s.transit_to(FinishedOperation("Succeeded".to_owned())));
+                    self.state
+                        .transition::<ProgressingOperation<String>, FinishedOperation<_>>
+                        (FinishedOperation(Ok("Succeeded".to_owned())));
                     resource.queue.push(self);
                 } else if let Some(s) = self.state.to_state::<FinishedOperation<String>>() {
                     println!("Op1 received in state Finished: {:?}", s);
@@ -269,15 +296,19 @@ mod tests {
 
         struct MyOp2Marker {};
         type MyOp2 = Operation<MyOp2Marker>;
-        impl HandledBy<MyResource> for MyOp2 {
-            fn get_handled(mut self: Box<Self>, resource: &mut MyResource) {
+        impl UseResource<MyResource> for MyOp2 {
+            fn progress(mut self: Box<Self>, resource: &mut MyResource) {
                 if let Some(s) = self.state.to_state::<StartingOperation<u32>>() {
                     println!("Op2 received in state Starting: {:?}", s);
-                    self.state = Stateful::from(s.transit_to(ProgressingOperation(1 as u32)));
+                    self.state
+                        .transition::<StartingOperation<u32>, ProgressingOperation<_>>
+                        (ProgressingOperation(1 as u32));
                     resource.queue.push(self);
                 } else if let Some(s) = self.state.to_state::<ProgressingOperation<u32>>() {
                     println!("Op2 received in state Progressing: {:?}", s);
-                    self.state = Stateful::from(s.transit_to(FinishedOperation(2 as u32)));
+                    self.state
+                        .transition::<ProgressingOperation<u32>, FinishedOperation<_>>
+                        (FinishedOperation(Ok(2 as u32)));
                     resource.queue.push(self);
                 } else if let Some(s) = self.state.to_state::<FinishedOperation<u32>>() {
                     println!("Op2 received in state Finished: {:?}", s);
