@@ -1,8 +1,11 @@
-// liborchestra/mod.rs
+// liborchestra/repository/mod.rs
 // Author: Alexandre Péré
-/// This module contains a `Repository` structure representing a campaign repository. It is built as
-/// a `Future` __resource__, i.e. a structure that provides futures, and takes care about waking the
-/// tasks when the computation can carry on.
+/// This module contains a `Campaign` structure representing a campaign repository, and providing the
+/// main methods to act on it. An asynchronous interface `CampaignResourceHandle` allows to act on
+/// the repository using futures. It communicates with a `CampaignResource` that manages the operations
+/// executions on the actual `Campaign`. If you have difficulties with the asynchronous design, check
+/// the primitives module.
+
 //////////////////////////////////////////////////////////////////////////////////////////// IMPORTS
 use super::{CMPCONF_RPATH, DATA_RPATH, EXCCONF_RPATH, EXCS_RPATH, XPRP_RPATH};
 use crate::misc;
@@ -121,7 +124,7 @@ pub struct CampaignConf {
 }
 
 impl CampaignConf {
-    /// Read campaign from file.
+    /// Reads campaign from file.
     pub fn from_file(conf_path: &path::PathBuf) -> Result<CampaignConf, crate::Error> {
         debug!(
             "Reading campaign configuration from file {}",
@@ -158,7 +161,7 @@ impl CampaignConf {
         self.get_path().join(EXCS_RPATH)
     }
 
-    // Get a list of executions from the available files (Slow).
+    /// Gets a list of executions from the available files (Slow).
     fn get_executions_from_files(&self) -> Vec<ExecutionConf> {
         fs::read_dir(self.get_executions_path())
             .unwrap()
@@ -206,7 +209,7 @@ impl fmt::Display for ExecutionState {
     }
 }
 
-// Newtype representing a commit string.
+/// Newtype representing a commit string.
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
 pub struct ExperimentCommit(String);
 impl fmt::Display for ExperimentCommit {
@@ -215,15 +218,15 @@ impl fmt::Display for ExperimentCommit {
     }
 }
 
-// Newtype representing parameters string.
+/// Newtype representing parameters string.
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
 pub struct ExecutionParameters(String);
 
-// Newtype representing tag string.
+/// Newtype representing tag string.
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
 pub struct ExecutionTag(String);
 
-// Newtype representing an execution identifier.
+/// Newtype representing an execution identifier.
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone, Hash)]
 pub struct ExecutionId(Uuid);
 impl fmt::Display for ExecutionId {
@@ -232,7 +235,7 @@ impl fmt::Display for ExecutionId {
     }
 }
 
-/// Represents the configuration and results of an execution of the experiment
+/// Represents the configuration and results of an execution of the experiment.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct ExecutionConf {
     identifier: ExecutionId,
@@ -264,7 +267,7 @@ impl ExecutionConf {
         Ok(())
     }
 
-    /// Load an execution from its path
+    /// Reads execution from file
     pub fn from_file(exc_path: &path::PathBuf) -> Result<ExecutionConf, Error> {
         trace!("Loading Execution from {}", exc_path.to_str().unwrap());
         let file = fs::File::open(exc_path).map_err(|_| Error::ReadExecution)?;
@@ -291,7 +294,7 @@ impl fmt::Display for ExecutionConf {
     }
 }
 
-// Represents the update of an execution.
+/// Represents the update of an execution.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct ExecutionUpdate {
     executor: Option<String>,
@@ -304,7 +307,8 @@ pub struct ExecutionUpdate {
 }
 
 impl ExecutionUpdate {
-    // Consumes the update and an execution to generate a new execution.
+
+    /// Consumes the update and an execution to generate a new execution.
     fn apply(self, conf: ExecutionConf) -> ExecutionConf {
         let mut conf = conf;
         if let Some(s) = self.executor {
@@ -332,6 +336,7 @@ impl ExecutionUpdate {
     }
 }
 
+/// The inner synchronous resource. Contains the different basic methods to manipulate a repository.
 struct Campaign {
     conf: CampaignConf,
     cache: HashMap<ExecutionId, ExecutionConf>,
@@ -339,7 +344,8 @@ struct Campaign {
 }
 
 impl Campaign {
-    // Opens a Campaign from a local path.
+
+    /// Opens a Campaign from a local path.
     fn from(conf: CampaignConf) -> Result<Campaign, Error> {
         debug!("Campaign: Open campaign from conf {}", conf);
         let cache: HashMap<ExecutionId, ExecutionConf> = conf
@@ -357,7 +363,7 @@ impl Campaign {
         })
     }
 
-    // Opens a new repository at the local path, using the experiment repository url.
+    /// Opens a new repository at the local path, using the experiment repository url.
     fn new(local_path: &path::PathBuf, experiment_url: Url) -> Result<Campaign, Error> {
         debug!(
             "Campaign: Initializing campaign on experiment {} in {}",
@@ -377,6 +383,7 @@ impl Campaign {
         return Campaign::from(campaign);
     }
 
+    /// Fetches the last experiment from its remote repository.
     fn fetch_experiment(&mut self) -> Result<CampaignConf, Error> {
         debug!("Campaign: Fetch experiment");
         let experiment_repo = git2::Repository::open(self.conf.get_experiment_path()).unwrap();
@@ -432,6 +439,7 @@ impl Campaign {
         }
     }
 
+    /// Creates a new execution.
     fn create_execution(
         &mut self,
         commit: ExperimentCommit,
@@ -505,7 +513,7 @@ impl Campaign {
         return Ok(exc_conf);
     }
 
-    // Function called by the thread to handle the update execution operation.
+    /// Updates an execution.
     fn update_execution(
         &mut self,
         id: ExecutionId,
@@ -534,7 +542,7 @@ impl Campaign {
         Ok(exc_conf)
     }
 
-    // Function called by the thread to handle the finishing of an execution.
+    /// Finishes an execution.
     fn finish_execution(&mut self, id: ExecutionId) -> Result<ExecutionConf, Error> {
         debug!("Campaign: Finishing Execution {}", id.0);
         let conf_path = self
@@ -576,7 +584,7 @@ impl Campaign {
         Ok(exc_conf)
     }
 
-    // Function called by the thread to handle the removal of an execution.
+    /// Deletes an execution.
     fn delete_execution(&mut self, id: ExecutionId) -> Result<(), Error> {
         debug!("Campaign: Delete Execution {}", id.0);
         let conf_path = self
@@ -598,6 +606,7 @@ impl Campaign {
         Ok(())
     }
 
+    /// Fetches possibly distant executions. Fetches executions or not depending on the synchronizer.
     fn fetch_executions(&mut self) -> Result<Vec<ExecutionConf>, Error> {
         debug!("Campaign: Fetching Executions");
         let before: HashSet<path::PathBuf> = fs::read_dir(self.conf.get_executions_path())
@@ -623,6 +632,7 @@ impl Campaign {
         }
     }
 
+    /// Returns a list of the executions.
     fn get_executions(&self) -> Result<Vec<ExecutionConf>, Error> {
         debug!("Campaign: Getting executions");
         Ok(self.cache.iter().map(|(id, conf)| conf.clone()).collect())
@@ -630,15 +640,17 @@ impl Campaign {
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////// RESOURCE
-
-// The type alias for the Repository resource operations.
+/// Type alias for the Repository resource operations.
 type CampaignOp = Box<dyn UseResource<CampaignResource>>;
 
+/// Resource handling operations sent by the futures, using the synchronous Campaign.
 struct CampaignResource {
     campaign: Campaign,
     queue: Vec<CampaignOp>,
 }
 
+/// Asynchronous handle to the campaign resource. Allows to perform operations on the campaign, in
+/// an asynchronous fashion.
 #[derive(Clone)]
 pub struct CampaignResourceHandle {
     sender: Sender<CampaignOp>,
@@ -646,7 +658,9 @@ pub struct CampaignResourceHandle {
 }
 
 impl CampaignResourceHandle {
-    // This function spawns the thread that will handle all the repository operations.
+
+    /// This function spawns the thread that will handle all the repository operations using the
+    /// CampaignResource, and returns a handle to it.
     pub fn spawn_resource(camp_conf: CampaignConf) -> Result<CampaignResourceHandle, Error> {
         debug!("RepositoryResourceHandle: Start Repository Thread");
         let campaign = Campaign::from(camp_conf)?;
@@ -751,6 +765,11 @@ impl CampaignResourceHandle {
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////// OPERATIONS
+// Check the primitives module for more info on the way the following works.
+
+/// A Future resolving in a Result over a Campaign conf after the experiment was fetched from remote.
+pub type FetchExperimentFuture =
+    OperationFuture<FetchExperimentMarker, CampaignResource, CampaignConf>;
 struct FetchExperimentMarker {}
 type FetchExperimentOp = Operation<FetchExperimentMarker>;
 impl UseResource<CampaignResource> for FetchExperimentOp {
@@ -781,9 +800,10 @@ impl UseResource<CampaignResource> for FetchExperimentOp {
         trace!("FetchExperimentOp: Progress over.");
     }
 }
-pub type FetchExperimentFuture =
-    OperationFuture<FetchExperimentMarker, CampaignResource, CampaignConf>;
 
+/// A Future that resolves to a Result on an ExecutionConf after the execution was created.
+pub type CreateExecutionFuture =
+    OperationFuture<CreateExecutionMarker, CampaignResource, ExecutionConf>;
 struct CreateExecutionMarker {}
 type CreateExecutionOp = Operation<CreateExecutionMarker>;
 type CreateExecutionInput = (ExperimentCommit, ExecutionParameters, Vec<ExecutionTag>);
@@ -820,9 +840,10 @@ impl UseResource<CampaignResource> for CreateExecutionOp {
         trace!("CreateExecutionOp: Progress over.");
     }
 }
-pub type CreateExecutionFuture =
-    OperationFuture<CreateExecutionMarker, CampaignResource, ExecutionConf>;
 
+/// A Future that resolves in a Result on an ExecutionConf after the execution was updated.
+pub type UpdateExecutionFuture =
+    OperationFuture<UpdateExecutionMarker, CampaignResource, ExecutionConf>;
 struct UpdateExecutionMarker {}
 type UpdateExecutionOp = Operation<UpdateExecutionMarker>;
 type UpdateExecutionInput = (ExecutionId, ExecutionUpdate);
@@ -857,9 +878,10 @@ impl UseResource<CampaignResource> for UpdateExecutionOp {
         trace!("UpdateExecutionOp: Progress over.");
     }
 }
-pub type UpdateExecutionFuture =
-    OperationFuture<UpdateExecutionMarker, CampaignResource, ExecutionConf>;
 
+/// A Future that resolves in a Result on an ExecutionConf after the execution was finished.
+pub type FinishExecutionFuture =
+    OperationFuture<FinishExecutionMarker, CampaignResource, ExecutionConf>;
 struct FinishExecutionMarker {}
 type FinishExecutionOp = Operation<FinishExecutionMarker>;
 impl UseResource<CampaignResource> for FinishExecutionOp {
@@ -890,9 +912,9 @@ impl UseResource<CampaignResource> for FinishExecutionOp {
         trace!("FinishExecutionOp: Progress over.");
     }
 }
-pub type FinishExecutionFuture =
-    OperationFuture<FinishExecutionMarker, CampaignResource, ExecutionConf>;
 
+/// A Future that resolves in a Result on an empty type after the execution was deleted.
+pub type DeleteExecutionFuture = OperationFuture<DeleteExecutionMarker, CampaignResource, ()>;
 struct DeleteExecutionMarker {}
 type DeleteExecutionOp = Operation<DeleteExecutionMarker>;
 impl UseResource<CampaignResource> for DeleteExecutionOp {
@@ -923,8 +945,11 @@ impl UseResource<CampaignResource> for DeleteExecutionOp {
         trace!("DeleteExecutionOp: Progress over.");
     }
 }
-pub type DeleteExecutionFuture = OperationFuture<DeleteExecutionMarker, CampaignResource, ()>;
 
+/// A Future that resolves in a Result over a vector of ExecutionConf after the new executions were
+/// fetched.
+pub type FetchExecutionsFuture =
+    OperationFuture<FetchExecutionsMarker, CampaignResource, Vec<ExecutionConf>>;
 struct FetchExecutionsMarker {}
 type FetchExecutionsOp = Operation<FetchExecutionsMarker>;
 impl UseResource<CampaignResource> for FetchExecutionsOp {
@@ -958,9 +983,11 @@ impl UseResource<CampaignResource> for FetchExecutionsOp {
         trace!("FetchExecutionsOp: Progress over.");
     }
 }
-pub type FetchExecutionsFuture =
-    OperationFuture<FetchExecutionsMarker, CampaignResource, Vec<ExecutionConf>>;
 
+/// A Future that resolves in a Result over a vector of ExecutionConf, after the current executions
+/// were collected.
+pub type GetExecutionsFuture =
+    OperationFuture<GetExecutionsMarker, CampaignResource, Vec<ExecutionConf>>;
 struct GetExecutionsMarker {}
 type GetExecutionsOp = Operation<GetExecutionsMarker>;
 impl UseResource<CampaignResource> for GetExecutionsOp {
@@ -994,8 +1021,6 @@ impl UseResource<CampaignResource> for GetExecutionsOp {
         trace!("GetExecutionsOp: Progress over.");
     }
 }
-pub type GetExecutionsFuture =
-    OperationFuture<GetExecutionsMarker, CampaignResource, Vec<ExecutionConf>>;
 
 ////////////////////////////////////////////////////////////////////////////////////////////// TESTS
 #[cfg(test)]
