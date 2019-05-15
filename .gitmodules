@@ -1,3 +1,0 @@
-[submodule "ssh2-rs"]
-	path = ssh2-rs
-	url = git@github.com:alexcrichton/ssh2-rs.git
