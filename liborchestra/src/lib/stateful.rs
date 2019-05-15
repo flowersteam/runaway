@@ -15,12 +15,12 @@ pub trait State where Self: Debug + Send{
     fn as_any(&self) -> &dyn Any;
 }
 
-/// A trait that allows to transit from one state (self:Self) to another (init:A). It is a marker
-/// trait that unlock the transit_to method, which itself allows to transit to another state. It
-/// replaces the From<T> trait which is usually used for state machines and allows to transit to
+/// A trait that allows to transition from one state (self:Self) to another (init:A). It is a marker
+/// trait that unlock the transition_to method, which itself allows to transition to another state.
+/// It replaces the From<T> trait which is usually used for state machines and allows to transition to
 /// value based states.
-pub trait TransitTo<A> where Self: Sized{
-    fn transit_to(self, init:A) -> A{
+pub trait TransitionsTo<A> where Self: Sized{
+    fn transition_to(self, init:A) -> A{
        init
     }
 }
@@ -40,14 +40,22 @@ impl Stateful{
     pub fn to_state<A: 'static + Clone>(&self) -> Option<A>{
         self.state.as_any().downcast_ref::<A>().map(|a| a.to_owned())
     }
+    /// Transitions from one state to another.
+    pub fn transition<F:State+TransitionsTo<T>+Clone+'static, T:State+'static>(&mut self, other:T){
+        if let Some(f) = self.to_state::<F>() {
+            self.state = Box::new(other);
+        } else {
+            panic!("Wrong transition occurred!")
+        }
+    }
 }
-
 
 impl<A> From<A> for Stateful where A: State + 'static{
     fn from(other: A) -> Stateful{
         return Stateful{state: Box::new(other)}
     }
 }
+
 
 /////////////////////////////////////////////////////////////////////////////////////////////// TEST
 #[cfg(test)]
@@ -68,16 +76,8 @@ mod tests {
         }
 
         // Transitions
-        impl From<StateB> for StateA{
-            fn from(other: StateB) -> StateA{
-                return StateA{integer: other.string.parse::<i32>().unwrap()}
-            }
-        }
-        impl From<StateA> for StateB{
-            fn from(other: StateA) -> StateB{
-                return StateB{string: format!("{}", other.integer +1)}
-            }
-        }
+        impl TransitionsTo<StateB> for StateA{}
+        impl TransitionsTo<StateA> for StateB{}
 
         // Using the state machine
         let mut machine: Stateful = Stateful::from(StateA{integer:0});
@@ -86,11 +86,9 @@ mod tests {
             println!("Machine state is: {:?}", machine);
             // We transition depending on the state. This is not far from a match statement.
             if let Some(state_a) = machine.to_state::<StateA>(){
-                let state_b: StateB = From::<StateA>::from(state_a);
-                machine = Stateful::from(state_b);
+                machine.transition::<StateA, StateB>(StateB{string:format!("{}", state_a.integer+1)});
             } else if let Some(state_b) = machine.to_state::<StateB>(){
-                let state_a: StateA = From::<StateB>::from(state_b);
-                machine = Stateful::from(state_a);
+                machine.transition::<StateB, StateA>(StateA{integer:state_b.string.parse::<i32>().unwrap()});
             } else {
                 panic!("No transition occurred");
             }
