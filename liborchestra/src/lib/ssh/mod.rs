@@ -10,8 +10,7 @@
 /// the operations that may be required by the user. Most importantly, particular care is taken to
 /// wake the futures when the operations are over. This means that the session object is a pure
 /// resource, and does not need any other care. The operations are made in a totally asynchronous
-/// fashion: if a command blocks, it will
-///
+/// fashion: If a command blocks, it will be parked, until further data is available.
 ///
 /// Note: Though ssh operations are handled asynchronously, the connection and the handshake are 
 /// made in a synchronous and blocking manner.
@@ -19,6 +18,7 @@
 //////////////////////////////////////////////////////////////////////////////////////////// IMPORTS
 use ssh2::{
     Session,
+    Channel,
     KnownHosts,
     KnownHostFileKind,
     CheckResult,
@@ -54,6 +54,15 @@ use crate::KNOWN_HOSTS_RPATH;
 use uuid::Uuid;
 use futures::future::Future;
 use chashmap::CHashMap;
+use crate::derive_from_error;
+use crate::primitives::{
+    Dropper, Finished, Operation, OperationFuture, Progressing,
+    Starting, UseResource,
+};
+use crossbeam::channel::{unbounded, Receiver, Sender, TryRecvError};
+use crate::stateful::Stateful;
+use std::borrow::Cow::Owned;
+use std::intrinsics::transmute;
 
 ///////////////////////////////////////////////////////////////////////////////////////////// MODULE
 pub mod config;
@@ -61,30 +70,17 @@ pub mod config;
 ///////////////////////////////////////////////////////////////////////////////////////////// ERRORS
 #[derive(Debug, Clone)]
 pub enum Error {
-    ProxySocketNotFound,
-    ProxyCommandReturned,
-    NoSuchFile,
-    ConnectionFailed,
-    PreferenceSettingFailed,
-    HandshakeFailed,
-    HomeNotFound,
-    KnownHostsUnreachable,
-    CouldntRegisterHost,
-    CouldntSaveKnownHosts,
-    HostKeyMismatch,
-    HostNotKnown,
-    HostCheckFailed,
-    SshAgentUnavailable,
-    ClientAuthFailed,
-    ReceiverCalledOnEmptyChannel,
-    ChannelClosed,
+    // Leaf Errors
+    WouldBlock,
+    ConnectionFailed(String),
+    ProxyCommandStartup(String),
     ExecutionFailed(String),
-    PollExecutionFailed(String),
     ScpSendFailed(String),
     ScpFetchFailed(String),
-    Future(String),
-    WouldBlock,
-    Unknown,
+    PollExecutionFailed(String),
+    FuturePoll(String),
+    // Chaining Errors
+    Config(config::Error),
 }
 
 impl error::Error for Error {}
@@ -92,31 +88,34 @@ impl error::Error for Error {}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Error::ProxySocketNotFound => write!(f, "Failed to find a socket to bind the proxy command on."),
-            Error::ProxyCommandReturned => write!(f, "The proxy command returned. Check command and connection"),
-            Error::NoSuchFile => write!(f, "The given file could not be found"),
-            Error::ConnectionFailed => write!(f, "Failed to connect to the provided host."),
-            Error::PreferenceSettingFailed => write!(f, "Failed to set ssh preferences for handshake"),
-            Error::HandshakeFailed => write!(f, "Failed to handshake with remote host."),
-            Error::HomeNotFound => write!(f, "Home folder could not be found through the $HOME variable"),
-            Error::KnownHostsUnreachable => write!(f, "Failed to read runaway known_hosts file."),
-            Error::CouldntRegisterHost => write!(f, "Failed to register host"),
-            Error::CouldntSaveKnownHosts => write!(f, "Failed to save the runaway known_hosts file"),
-            Error::Unknown => write!(f, "Unknown error occurred"),
-            Error::HostKeyMismatch => write!(f, "Host was found but the key does not match!"),
-            Error::HostNotKnown => write!(f, "Host was not found in the known hosts."),
-            Error::HostCheckFailed => write!(f, "Host key check failed somehow."),
-            Error::SshAgentUnavailable => write!(f, "Ssh Agent could not be found. Is there an ssh agent on $SSH_AUTH_SOCK ?"),
-            Error::ClientAuthFailed => write!(f, "Client authentication failed. Is the necessary identity available in the ssh agent ?"),
-            Error::ReceiverCalledOnEmptyChannel => write!(f, "A receiver was called on an empty channel"),
-            Error::ChannelClosed => write!(f, "A channel was used but was closed"),
-            Error::ExecutionFailed(s) => write!(f, "The execution of a command failed: {}", s),
-            Error::PollExecutionFailed(s) => write!(f, "The polling of a command failed: {}", s),
-            Error::ScpSendFailed(s) => write!(f, "The sending of the file failed: {}", s),
-            Error::ScpFetchFailed(s) => write!(f, "The fetching of the file failed: {}", s),
-            Error::Future(s) => write!(f, "An error occured when polling the future: {}", s),
-            Error::WouldBlock => write!(f, "Blocking operation"),
+            Error::WouldBlock =>
+                write!(f, "Blocking operation."),
+            Error::ConnectionFailed(ref s) =>
+                write!(f, "An error occurred while trying to connect to connect to a remote \
+                host: \n{}", s),
+            Error::ProxyCommandStartup(ref s) =>
+                write!(f, "An error occurred when starting a proxycommand: \n{}", s),
+            Error::ExecutionFailed(s) =>
+                write!(f, "An error occurred while running a command on a remote host: \n{}", s),
+            Error::ScpSendFailed(s) =>
+                write!(f, "An error occurred while sending a file to a remote host: \n{}", s),
+            Error::ScpFetchFailed(s) =>
+                write!(f, "An error occurred while fetching a file from a remote host: \n{}", s),
+            Error::PollExecutionFailed(s) =>
+                write!(f, "An error occurred while polling a command: \n{}", s),
+            Error::FuturePoll(s) =>
+                write!(f, "An error occurred while polling a future: \n{}", s),
+            Error::Config(e) =>
+                write!(f, "An ssh config-related error occurred: {}", e),
         }
+    }
+}
+
+derive_from_error!(Error, config::Error, Config);
+
+impl From<Error> for crate::primitives::Error{
+    fn from(other: Error) -> crate::primitives::Error{
+        return crate::primitives::Error::Operation(format!("{}", other));
     }
 }
 
@@ -132,6 +131,7 @@ pub struct ProxyCommandForwarder {
     handle: Option<thread::JoinHandle<(thread::JoinHandle<()>,
                                        thread::JoinHandle<()>,
                                        thread::JoinHandle<()>)>>,
+    repr: String,
 }
 
 impl ProxyCommandForwarder {
@@ -142,8 +142,11 @@ impl ProxyCommandForwarder {
         trace!("Starting proxy command tcp listener");
         let stream = match std::net::TcpListener::bind("127.0.0.1:0") {
             Ok(s) => s,
-            Err(_) => return Err(Error::ProxySocketNotFound)
+            Err(e) => return Err(Error::ProxyCommandStartup(
+                format!("Failed to find a port to bind to: {}", e))
+            )
         };
+        let command_string = command.to_owned();
         let address = stream.local_addr().unwrap();
         let mut keep_forwarding = Arc::new(AtomicBool::new(true));
         let mut kf = keep_forwarding.clone();
@@ -206,8 +209,15 @@ impl ProxyCommandForwarder {
         return Ok((ProxyCommandForwarder {
             keep_alive: keep_forwarding,
             handle: Some(handle),
+            repr: command_string
         },
                    address));
+    }
+}
+
+impl fmt::Debug for ProxyCommandForwarder{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "ProxyCommandForwarder{}", self.repr)
     }
 }
 
@@ -229,256 +239,151 @@ impl Drop for ProxyCommandForwarder {
 }
 
 
-////////////////////////////////////////////////////////////////////////////////// REMOTE OPERATIONS
-// Remote operations are messages sent and retrieve from the future to the connection thread. The
-// remote connection will iterate over the `Progressing(progress_data)` by adding the data gathered
-// from the operation in `progress_data`.
-// See the different `handle_(some operation name)_operation)` functions of `RemoteConnection` for
-// more information.
-
-// This enumeration represents the different operations that can be done by the RemoteConnection.
-#[doc(hidden)]
-#[derive(Debug)]
-enum RemoteOperation{
-    Exec(ExecOp),
-    ScpSend(ScpSendOp),
-    ScpFetch(ScpFetchOp),
-}
-
-// This enumeration represents the different states an operation can lie in.
-#[derive(Debug, Clone)]
-enum OperationState<I, P, O, E>{
-    Starting(I),
-    Progressing(P),
-    Succeeded(O),
-    Failed(E),
-    Transitioning,
-}
-
-impl<I, P, O, E> OperationState<I, P, O, E>{
-    // Starts a new operation from a given input.
-    fn from_input(input: I) -> OperationState<I, P, O, E>{
-        return OperationState::Starting(input);
-    }
-    // Transitions from `Starting` to `Transitioning` state by taking the input values.
-    fn begin(&mut self) -> I{
-        match std::mem::replace(self, OperationState::Transitioning){
-            OperationState::Starting(input) => input,
-            _ => panic!("Operation began in a wrong state.")
-        }
-    }
-    // Transitions from `Transitioning` to `Progressing` state by saving the progress value.
-    fn save(&mut self, progress: P) {
-        match std::mem::replace(self, OperationState::Progressing(progress)){
-            OperationState::Transitioning => {},
-            _ => panic!("Operation succeeded in a wrong state.")
-        }
-    }
-    // Transitions from `Progressing` to `Transitioning` state by taking the progress value.
-    fn resume(&mut self) -> P {
-        match std::mem::replace(self, OperationState::Transitioning) {
-            OperationState::Progressing(progress) => progress,
-            _ =>panic!("Operation resumed in a wrong state.")
-        }
-    }
-    // Transitions from `Transitioning` to `Succeeded` state by saving the output value.
-    fn succeed(&mut self, output: O){
-        match std::mem::replace(self, OperationState::Succeeded(output)){
-            OperationState::Transitioning => {},
-            _ => panic!("Operation succeeded in a wrong state.")
-        }
-    }
-    // Transition from `Transitioning` to `Failed` state by saving the error value.
-    fn fail(&mut self, error: E){
-        match std::mem::replace(self, OperationState::Failed(error)){
-            OperationState::Transitioning => {},
-            _ => panic!("Operation succeeded in a wrong state.")
-        }
-    }
-    // Consumes a finished operation (either in `Succeeded` or `Failed` state) to produce a result
-    // out of the operation.
-    fn into_result(mut self) -> Result<O, E> {
-        match std::mem::replace(&mut self, OperationState::Transitioning){
-            OperationState::Succeeded(output) => Ok(output),
-            OperationState::Failed(error) => Err(error),
-            _ => panic!("Operation turned to result in a wrong state.")
-        }
-    }
-    // Returns whether the operation is in a final stage.
-    fn is_over(&self) -> bool{
-        match self{
-            OperationState::Succeeded(_) | OperationState::Failed(_) => true,
-            _ => false
-        }
-    }
-    // Returns whether the operation is progressing.
-    fn is_progressing(&self) -> bool{
-        match self{
-            OperationState::Progressing(_) => true,
-            _ => false
-        }
-    }
-    // Returns whether the operation is starting.
-    fn is_new(&self) -> bool{
-        match self{
-            OperationState::Starting(_) => true,
-            _ => false
-        }
-    }
-}
-
-// This macro allows to create an operation as a structure wrapping an inner OperationState.
-#[macro_export]
-macro_rules! make_operation {
-    ( $name:ident, $I:ty, $P:ty, $O:ty, $E:ty ) => {
-        #[derive(Debug, Clone)]
-        struct $name{
-            state: OperationState<$I, $P, $O, $E >
-        }
-        impl $name {
-            fn from_input(input: $I) -> $name { return $name{state:OperationState::from_input(input)}; }
-            fn begin(&mut self) -> $I { return self.state.begin() }
-            fn save(mut self, progress: $P) -> $name { self.state.save(progress); return self }
-            fn resume(&mut self) -> $P { return self.state.resume() }
-            fn succeed(mut self, output: $O) -> $name { self.state.succeed(output); return self }
-            fn fail(mut self, error: $E) -> $name { self.state.fail(error); return self}
-            fn into_result(mut self) -> Result<$O, $E> { return self.state.into_result() }
-            fn is_over(&self) -> bool { return self.state.is_over() }
-            fn is_progressing(&self) -> bool { return self.state.is_progressing() }
-            fn is_new(&self) -> bool { return self.state.is_new() }
-        }
-    }
-}
+////////////////////////////////////////////////////////////////////////////////// REMOTE CONNECTION
 
 // A newtype representing remaining bytes to be sent or retrieved.
 #[derive(Debug, Clone)]
 struct RemainingBytes(u64);
 
-// As channel are not `Send`, we can't requeue them for further advance in the operation channel.
-// For this reason we store them in a thread-local hash-map under a given uuid. This newtype
-// represents this uuid.
-#[derive(Debug, Hash, PartialEq, Eq, Clone)]
-struct ChannelId(Uuid);
-
-make_operation!(ExecOp, String, (ChannelId, Output), Output, Error);
-make_operation!(ScpSendOp, (PathBuf, PathBuf), (ChannelId, RemainingBytes, Arc<BufReader<File>>), (), Error);
-make_operation!(ScpFetchOp, (PathBuf, PathBuf), (ChannelId, RemainingBytes, Arc<BufWriter<File>>), (), Error);
-
-////////////////////////////////////////////////////////////////////////////////// REMOTE CONNECTION
-/// This structure allows to perform operations on a remote host. Operations are executed in a
-/// separated thread, which allows to avoid moving and synchronizing the ssh2 session between
-/// different tasks. As such, operations are represented by futures, which are driven to completion
-/// by the thread.
-// Under the hood, the future sends an operation to the connection thread which takes care about
-// running the operation to completion, and wakes the future when the result is available.
-#[derive(Clone)]
-pub struct RemoteConnection{
-    keep_alive: Arc<AtomicBool>,
-    proxy_command: Arc<Mutex<Option<ProxyCommandForwarder>>>,
-    thread_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
-    operations_results: Arc<CHashMap<Uuid, RemoteOperation>>,
-    operations_sender: mpsc::Sender<(RemoteOperation, Waker, Uuid)>,
+// A synchronous wrapper over a non-blocking Remote.
+struct Remote{
+    session: Option<&'static Session>,
+    stream: TcpStream,
+    proxycommand: Option<ProxyCommandForwarder>,
+    channels: HashMap<Uuid, Channel<'static>>,
+    progressing_outputs: HashMap<Uuid, Output>,
+    progressing_reading_files: HashMap<Uuid, (usize, BufReader<File>)>,
+    progressing_writing_files: HashMap<Uuid, (usize, File)>,
 }
 
-impl RemoteConnection{
-    /// Build, authenticate and starts an ssh session from an adress.
-    pub fn from_addr(addr: impl ToSocketAddrs,
-                     host: &str,
-                     user: &str) -> Result<RemoteConnection, Error> {
-        debug!("Creating remote connection");
-        trace!("Connection tcp stream");
-        let stream = TcpStream::connect(addr).map_err(|_| Error::ConnectionFailed)?;
-        let session = RemoteConnection::start_session(&stream, host, user)?;
-        let (op_tx, op_rx) = mpsc::channel::<(RemoteOperation, Waker, Uuid)>();
-        let operations_results = Arc::new(CHashMap::new());
-        let keep_alive = Arc::new(AtomicBool::new(true));
-        let thread_handle = RemoteConnection::spawn_thread(session,
-                                                           stream,
-                                                           op_rx,
-                                                           op_tx.clone(),
-                                                           operations_results.clone(),
-                                                            keep_alive.clone());
-        return Ok(RemoteConnection{
-            keep_alive,
-            proxy_command: Arc::new(Mutex::new(None)),
-            thread_handle: Arc::new(Mutex::new(Some(thread_handle))),
-            operations_sender: op_tx,
-            operations_results});
+impl Drop for Remote{
+    fn drop(&mut self){
+        if !self.channels.is_empty(){
+            panic!("Remote dropped, while channels were still open.");
+        } else{
+            // Unsafe trick to avoid memory leaks. Since we know that all our references to the
+            // session were dropped (those are only channels that stays in the hashmap which is
+            // now empty), we transmute the session to a Box and drop it.
+            unsafe{
+                let sess: Box<Session> = transmute(self.session.take().unwrap() as *const Session);
+                drop(sess);
+            }
+        }
     }
+}
+
+impl Remote {
+    /// Helper to avoid boilerplate.
+    fn session(&self) -> &'static Session{
+        self.session.as_ref().unwrap()
+    }
+
+    /// Build a Remote from a profile.
+    fn from_profile(profile: config::SshProfile) -> Result<Remote, Error>{
+        debug!("Remote: Creating remote connection from profile: {:?}", profile);
+        match profile{
+            config::SshProfile{
+                hostname:Some(host),
+                user: Some(user),
+                proxycommand: Some(cmd),
+                ..} => {
+                return Remote::from_proxy_command(&cmd, &host, &user);
+            }
+            config::SshProfile{
+                hostname: Some(host),
+                user:Some(user),
+                proxycommand: None,
+                port: Some(port),
+                ..
+            } => {
+                let address = format!("{}:{}", host, port);
+                return Remote::from_addr(address, &host, &user);
+            }
+            _ => return Err(Error::ConnectionFailed(format!("The encountered profile is invalid: \
+            \n{:?}\nIt should either provide a proxycommand or a port", profile)))
+        }
+    }
+
+    /// Build, authenticate and starts an ssh session from an adress.
+    fn from_addr(addr: impl ToSocketAddrs+fmt::Display,
+                     host: &str,
+                     user: &str) -> Result<Remote, Error> {
+        debug!("Remote: Creating remote connection from address");
+        trace!("Remote: Connection tcp stream");
+        let stream = TcpStream::connect(&addr)
+            .map_err(|_| Error::ConnectionFailed(format!("Failed to connect to address {}", addr)))?;
+        let session = Remote::start_session(&stream, host, user)?;
+        let session: &'static Session = Box::leak(Box::new(session));
+        return Ok(Remote {
+            session: Some(session),
+            stream: stream,
+            proxycommand: None,
+            channels: HashMap::new(),
+            progressing_outputs: HashMap::new(),
+            progressing_reading_files: HashMap::new(),
+            progressing_writing_files: HashMap::new(),
+        })
+    }
+
     /// Build, authenticate and starts an ssh session from a proxycommand.
-    pub fn from_proxy_command(command: &str, host: &str, user: &str)
-                              -> Result<RemoteConnection, Error> {
+    fn from_proxy_command(command: &str, host: &str, user: &str) -> Result<Remote, Error> {
+        debug!("Remote: Creating remote connection from proxycommand {}", command);
         let (proxy_command, addr) = ProxyCommandForwarder::from_command(command)?;
-        let mut remote = RemoteConnection::from_addr(addr, host, user)?;
-        remote.proxy_command.lock().unwrap().replace(proxy_command);
+        let mut remote = Remote::from_addr(addr, host, user)?;
+        remote.proxycommand.replace(proxy_command);
         return Ok(remote);
     }
-    /// Creates a RemoteExecFuture that will resolve to a Result giving the session back as well as
-    /// the output of the command.
-    pub fn async_exec(&self, command: &str) -> ExecFuture {
-        let ope = ExecOp::from_input(command.to_owned());
-        return ExecFuture::new(ope, self.clone());
-    }
 
-    /// Creates a scpsendfuture that will resolve to a result giving the session back.
-    pub fn async_scp_send(&self, local_path: &PathBuf, remote_path: &PathBuf) -> ScpSendFuture {
-        let ope = ScpSendOp::from_input((local_path.to_owned(), remote_path.to_owned()));
-        return ScpSendFuture::new(ope, self.clone());
-    }
-
-
-    /// Creates a scpsendfuture that will resolve to a result giving the session back.
-    pub fn async_scp_fetch(&self, remote_path: &PathBuf, local_path: &PathBuf) -> ScpFetchFuture {
-        let ope = ScpFetchOp::from_input((remote_path.to_owned(), local_path.to_owned()));
-        return ScpFetchFuture::new(ope, self.clone());
-    }
-
-    /// Returns the number of handles over connection
-    pub fn strong_count(&self) -> usize{
-        return Arc::strong_count(&self.thread_handle);
-    }
-
-    // Authenticate the ssh session. 
+    /// Authenticate the ssh session.
     fn start_session(stream: &TcpStream, host: &str, user: &str) -> Result<Session, Error> {
-        debug!("Opening remote connection to host {} as user {}", host, user); let mut session = Session::new().unwrap();
+        debug!("Remote: Opening remote connection to host {} as user {}", host, user);
+        let mut session = Session::new().unwrap();
         session.method_pref(MethodType::HostKey, "ssh-rsa")
-            .map_err(|_| Error::PreferenceSettingFailed)?;
-        trace!("Performing handshake");
-        session.handshake(stream).map_err(|_| Error::HandshakeFailed)?;
+            .map_err(|_| Error::ConnectionFailed(format!("Failed to preferences")))?;
+        trace!("Remote: Performing handshake");
+        session.handshake(stream)
+            .map_err(|e| Error::ConnectionFailed(format!("Failed to perform handshake.")))?;
         {
-            trace!("Checking host key");
+            trace!("Remote: Checking host key");
             let mut known_hosts = session.known_hosts().unwrap();
-            let mut known_hosts_path = dirs::home_dir().ok_or(Error::HomeNotFound)?;
+            let mut known_hosts_path = dirs::home_dir()
+                .ok_or(Error::ConnectionFailed(format!("Failed to find the local home directory")))?;
             known_hosts_path.push(KNOWN_HOSTS_RPATH);
             known_hosts.read_file(known_hosts_path.as_path(),
                                   KnownHostFileKind::OpenSSH)
-                .map_err(|_| Error::KnownHostsUnreachable)?;
-            let (key, key_type) = session.host_key().ok_or(Error::Unknown)?;
+                .map_err(|e| Error::ConnectionFailed(format!("Failed to reach knownhost file:\n{}", e)))?;
+            let (key, key_type) = session.host_key()
+                .ok_or(Error::ConnectionFailed(format!("Host did not provide a key.")))?;
             match known_hosts.check(host, key) {
                 CheckResult::Match => {}
                 CheckResult::Mismatch => {
-                    trace!("Host key mismatch....");
-                    return Err(Error::HostKeyMismatch);
+                    trace!("Remote: Host key mismatch....");
+                    return Err(Error::ConnectionFailed(format!("The key presented by the host \
+                    mismatches the one we know. ")));
                 }
                 CheckResult::NotFound => {
-                    trace!("Host not known. Writing the key in the registry.");
+                    trace!("Remote: Host not known. Writing the key in the registry.");
                     known_hosts.add(host,
                                     key,
                                     "",
                                     KnownHostKeyFormat::SshRsa)
-                        .map_err(|_| Error::CouldntRegisterHost)?;
+                        .map_err(|e| Error::ConnectionFailed(format!("Failed to add the host \
+                        key in the registry")))?;
                     known_hosts.write_file(known_hosts_path.as_path(), KnownHostFileKind::OpenSSH)
-                        .map_err(|_| Error::CouldntSaveKnownHosts)?;
+                        .map_err(|_| Error::ConnectionFailed(format!("Failed to write the \
+                        knownhost file")))?;
                 }
                 CheckResult::Failure => {
-                    trace!("Failed to check the host");
-                    return Err(Error::HostCheckFailed);
+                    trace!("Remote: Failed to check the host");
+                    return Err(Error::ConnectionFailed(format!("Failed to check the host.")));
                 }
             }
-            trace!("Authenticating ourselves");
+            trace!("Remote: Authenticating ourselves");
             let mut agent = session.agent().unwrap();
-            agent.connect().map_err(|_| Error::SshAgentUnavailable)?;
-            agent.list_identities().map_err(|_| Error::Unknown)?;
+            agent.connect()
+                .map_err(|e| Error::ConnectionFailed(format!("Ssh Agent was unavailable: \n{}", e)))?;
+            agent.list_identities()
+                .map_err(|e| Error::ConnectionFailed(format!("Couldn't list identities: \n{}", e)))?;
             let ids = agent.identities()
                 .into_iter()
                 .map(|id| id.unwrap().comment().to_owned())
@@ -491,324 +396,487 @@ impl RemoteConnection{
                 .map(|id| { id.unwrap().comment().to_owned() })
                 .collect::<HashSet<_>>();
             if ids == failed_ids {
-                trace!("No identities registered in the agent allowed to authenticate.");
-                return Err(Error::ClientAuthFailed);
+                trace!("RemoterResource: No identities registered in the agent allowed to authenticate.");
+                return Err(Error::ConnectionFailed(format!("No identities registered in the ssh \
+                agent allowed to connect.")));
             }
         }
-        trace!("Ssh session ready.");
+        trace!("RemoteResource: Ssh session ready.");
         return Ok(session);
     }
 
-    // Spawn the operation handling thread. This thread dispatches operations to handle_* functions.
-    fn spawn_thread(session: Session,
-                    stream: TcpStream,
-                    operations_receiver: mpsc::Receiver<(RemoteOperation, Waker, Uuid)>,
-                    operations_sender: mpsc::Sender<(RemoteOperation, Waker, Uuid)>,
-                    operations_results: Arc<CHashMap<Uuid, RemoteOperation>>,
-                    keep_alive: Arc<AtomicBool>
-                    ) -> thread::JoinHandle<()> {
-        debug!("Start connection thread");
-        let thread_handle = thread::spawn(move || {
-            trace!("In thread; starting operation loop");
-            let stream = stream; // move the stream
-            let mut session = session;
-            let mut channels_map = Rc::new(RefCell::new(HashMap::new()));
-            while keep_alive.load(Ordering::Relaxed){
-               match operations_receiver.try_recv() {
-                   Ok((operation, waker, uuid)) => {
-                       trace!("Received operation to perform: {:?}", operation);
-                       match operation {
-                           RemoteOperation::Exec(ope) => {
-                               match ope.state {
-                                   OperationState::Starting(_) => {
-                                       let ope = RemoteConnection::handle_starting_exec_operation(&session,
-                                                             ope,
-                                                             channels_map.clone());
-                                       operations_sender.send((RemoteOperation::Exec(ope), waker, uuid)).unwrap();
-                                   }
-                                   OperationState::Progressing(_) => {
-                                       let ope = RemoteConnection::handle_progressing_exec_operation(&session,
-                                                             ope,
-                                                             channels_map.clone());
-                                       operations_sender.send((RemoteOperation::Exec(ope), waker, uuid)).unwrap();
-                                   }
-                                   OperationState::Succeeded(_) | OperationState::Failed(_) =>  {
-                                       operations_results.insert_new(uuid,
-                                                                     RemoteOperation::Exec(ope));
-                                       waker.wake();
-                                   }
-                                   OperationState::Transitioning => {
-                                       panic!("Operation found in transitioning state.")
-                                   }
-                               }
-                           }
-                           RemoteOperation::ScpSend(ope) => {
-                               match ope.state {
-                                   OperationState::Starting(_) => {
-                                       let ope = RemoteConnection::
-                                       handle_starting_scp_send_operation(&session,
-                                                                          ope,
-                                                                          channels_map.clone());
-                                       operations_sender.send((RemoteOperation::ScpSend(ope), waker, uuid)).unwrap();
-                                   }
-                                   OperationState::Progressing(_) => {
-                                       let ope = RemoteConnection::
-                                       handle_progressing_scp_send_operation(&session,
-                                                                          ope,
-                                                                          channels_map.clone());
-                                       operations_sender.send((RemoteOperation::ScpSend(ope), waker, uuid)).unwrap();
-                                   }
-                                   OperationState::Succeeded(_) | OperationState::Failed(_) => {
-                                       operations_results.insert_new(uuid,
-                                                                     RemoteOperation::ScpSend(ope));
-                                       waker.wake();
-                                   }
-                                   OperationState::Transitioning => {
-                                       panic!("Operation found in transitioning state.")
-                                   }
-                               }
-                           }
-                           RemoteOperation::ScpFetch(ope) => {
-                               match ope.state {
-                                   OperationState::Starting(_) => {
-                                       let ope = RemoteConnection::
-                                       handle_starting_scp_fetch_operation(&session,
-                                                                          ope,
-                                                                          channels_map.clone());
-                                       operations_sender.send((RemoteOperation::ScpFetch(ope), waker, uuid)).unwrap();
-                                   }
-                                   OperationState::Progressing(_) => {
-                                       let ope = RemoteConnection::
-                                       handle_progressing_scp_fetch_operation(&session,
-                                                                          ope,
-                                                                          channels_map.clone());
-                                       operations_sender.send((RemoteOperation::ScpFetch(ope), waker, uuid)).unwrap();
-                                   }
-                                   OperationState::Succeeded(_) | OperationState::Failed(_) => {
-                                       operations_results.insert_new(uuid,
-                                                                     RemoteOperation::ScpFetch(ope));
-                                       waker.wake();
-                                   }
-                                   OperationState::Transitioning => {
-                                       panic!("Operation found in transitioning state.")
-                                   }
-                               }
-                           }
-                       }
-                   }
-                   _ => continue
-               }
-            }
-        });
-        trace!("Returning thread handle");
-        return thread_handle;
-    }
-
-}
-
-impl<'a> RemoteConnection{
-
-    fn handle_starting_exec_operation(session: &'a Session,
-                             ope: ExecOp,
-                             chan_map: Rc<RefCell<HashMap<ChannelId, ssh2::Channel<'a>>>>)
-        -> ExecOp {
-        let mut ope = ope;
-        let cmd = ope.begin();
-        let mut channel = match session.channel_session() {
+    fn start_exec(&mut self, command: &str) -> Result<Uuid, Error>{
+        debug!("Remote: Starting execution: {}", command);
+        let mut channel = match self.session().channel_session() {
             Ok(c) => c,
-            Err(e) => return ope.fail(Error::ExecutionFailed(format!("Failed to open channel")))
+            Err(e) => return Err(Error::ExecutionFailed(format!("Failed to open channel")))
         };
-        if channel.exec(&cmd).is_err() {
-            return return ope.fail(Error::ExecutionFailed(format!("Failed to execute command")))
-        };
+        if channel.exec(&command).is_err() {
+            return Err(Error::ExecutionFailed(format!("Failed to exec command {}", command)))
+        }
         let output = Output {
             status: ExitStatusExt::from_raw(0),
             stdout: Vec::new(),
             stderr: Vec::new(),
         };
-        let chan_id = ChannelId(Uuid::new_v4());
-        chan_map.borrow_mut().insert(chan_id.clone(), channel);
-        return ope.save((chan_id, output));
+        let id = Uuid::new_v4();
+        self.channels.insert(id.clone(), channel);
+        self.progressing_outputs.insert(id.clone(), output);
+        return Ok(id);
     }
 
-    fn handle_progressing_exec_operation(session: &'a Session,
-                             ope: ExecOp,
-                             chan_map: Rc<RefCell<HashMap<ChannelId, ssh2::Channel<'a>>>>)
-        -> ExecOp{
-        let mut ope = ope;
-        let (chan_id, mut output) = ope.resume();
-        let mut chan = chan_map.borrow_mut().remove(&chan_id).unwrap();
-        session.set_blocking(false);
+    fn continue_exec(&mut self, id: &Uuid) -> Result<Output, Error>{
+        debug!("Remote: Continuing execution {}", id);
+        self.session().set_blocking(false);
+        let mut chan = self.channels.remove(&id).unwrap();
+        let mut output = self.progressing_outputs.remove(&id).unwrap();
         let eof = chan.wait_eof(); // We read eof beforehand, to avoid leaving bytes.
         let copied = copy(&mut chan.stream(0), &mut output.stdout)
             .and(copy(&mut chan.stream(1), &mut output.stderr));
         match copied {
             Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                session.set_blocking(true);
-                chan_map.borrow_mut().insert(chan_id.clone(), chan);
-                return ope.save((chan_id, output));
+                self.session().set_blocking(true);
+                self.channels.insert(id.clone(), chan);
+                self.progressing_outputs.insert(id.clone(), output);
+                return Err(Error::WouldBlock)
             }
             Err(e) => {
-                session.set_blocking(true);
-                return ope.fail(Error::ExecutionFailed(format!("Failed to read stdout: {}", e)))
+                self.session().set_blocking(true);
+                return Err(Error::ExecutionFailed(format!("Failed to read stdout: {}", e)))
             }
             Ok(c) => {}
         }
         if let Err(e) = eof {
             if e.code() as i64 == -37 {
-                session.set_blocking(true);
-                chan_map.borrow_mut().insert(chan_id.clone(), chan);
-                return ope.save((chan_id, output));
+                self.session().set_blocking(true);
+                self.channels.insert(id.clone(), chan);
+                self.progressing_outputs.insert(id.clone(), output);
+                return Err(Error::WouldBlock)
             } else {
-                session.set_blocking(true);
-                return ope.fail(Error::ExecutionFailed(format!("Failed to acquire eof")));
+                self.session().set_blocking(true);
+                return Err(Error::ExecutionFailed(format!("Failed to acquire eof")));
             }
         }
         let eof = eof.unwrap();
-        session.set_blocking(true);
+        self.session().set_blocking(true);
         let ecode = match chan.exit_status() {
             Ok(c) => c,
-            Err(e) => return ope.fail(Error::ExecutionFailed(format!("Failed to get exit code")))
+            Err(e) => return Err(Error::ExecutionFailed(format!("Failed to get exit code")))
         };
         output.status = ExitStatusExt::from_raw(ecode);
         if let Err(e) = chan.close() {
-            return ope.fail(Error::ExecutionFailed(format!("Failed to close channel")))
+            return Err(Error::ExecutionFailed(format!("Failed to close channel")))
         }
         if let Err(_) = chan.wait_close() {
-            return ope.fail(Error::ExecutionFailed(format!("Failed to wait to close channel")));
+            return Err(Error::ExecutionFailed(format!("Failed to wait to close channel")));
         }
-        return ope.succeed(output);
+        return Ok(output);
     }
 
-    fn handle_starting_scp_send_operation(session: &'a Session,
-                                          ope: ScpSendOp,
-                                          chan_map: Rc<RefCell<HashMap<ChannelId, ssh2::Channel<'a>>>>)
-        -> ScpSendOp {
-        let mut ope = ope;
-        let (local_path, remote_path) = ope.begin();
+    fn start_scp_send(&mut self, local_path: &PathBuf, remote_path: &PathBuf) -> Result<Uuid, Error>{
+        debug!("Remote: Starting send of {} to {}",
+               local_path.to_str().unwrap(),
+               remote_path.to_str().unwrap());
         let mut local_file = match File::open(local_path) {
             Ok(f) => f,
-            Err(_) => return ope.fail(Error::ScpSendFailed(format!("Failed to open local file"))),
+            Err(_) => return Err(Error::ScpSendFailed(format!("Failed to open local file"))),
         };
         let bytes = local_file.metadata().unwrap().len();
-        let mut chan = match session.scp_send(&remote_path,0o755,bytes,None) {
+        let mut chan = match self.session().scp_send(&remote_path,0o755,bytes,None) {
             Ok(chan) => chan,
-            Err(_) => return ope.fail(Error::ScpSendFailed(format!("Failed to open scp send channel"))),
+            Err(_) => return Err(Error::ScpSendFailed(format!("Failed to open scp send channel"))),
         };
-        let chan_id = ChannelId(Uuid::new_v4());
-        chan_map.borrow_mut().insert(chan_id.clone(), chan);
-        return ope.save((chan_id,RemainingBytes(bytes),Arc::new(BufReader::new(local_file))));
+        let id = Uuid::new_v4();
+        self.channels.insert(id.clone(), chan);
+        self.progressing_reading_files.insert(id.clone(), (bytes as usize, BufReader::new(local_file)));
+        return Ok(id);
     }
 
-    fn handle_progressing_scp_send_operation(session: &'a Session,
-                                             ope: ScpSendOp,
-                                             chan_map: Rc<RefCell<HashMap<ChannelId, ssh2::Channel<'a>>>>)
-        -> ScpSendOp {
-        let mut ope = ope;
-        let (chan_id, r_bytes, mut local_file) = ope.resume();
-        let mut chan =chan_map.borrow_mut().remove(&chan_id).unwrap();
-        let mut file = Arc::get_mut(&mut local_file).unwrap();
-        session.set_blocking(false);
+    fn continue_scp_send(&mut self, id: &Uuid) -> Result<(), Error>{
+        debug!("Remote: Continuing send {}", id);
+        let mut chan = self.channels.remove(&id).unwrap();
+        let (bytes, mut file) = self.progressing_reading_files.remove(&id).unwrap();
+        self.session().set_blocking(false);
         match bufread_bufcopy(&mut file, &mut chan.stream(0)){
             (b, Err(ref e)) if e.kind() == ErrorKind::WouldBlock => {
-                session.set_blocking(true);
-                chan_map.borrow_mut().insert(chan_id.clone(), chan);
-                return ope.save((chan_id,RemainingBytes(r_bytes.0 - b as u64),local_file));
+                self.session().set_blocking(true);
+                self.channels.insert(id.clone(), chan);
+                self.progressing_reading_files.insert(id.clone(), (bytes - b as usize, file));
+                return Err(Error::WouldBlock);
             }
             (b, Ok(())) =>{
-                if r_bytes.0 != 0 {
-                    session.set_blocking(true);
-                    chan_map.borrow_mut().insert(chan_id.clone(), chan);
-                    return ope.save((chan_id,RemainingBytes(r_bytes.0 - b as u64),local_file));
+                if bytes != 0 {
+                    self.session().set_blocking(true);
+                    self.channels.insert(id.clone(), chan);
+                    self.progressing_reading_files.insert(id.clone(), (bytes - b as usize, file));
+                    return Err(Error::WouldBlock);
                 } else {
-                    session.set_blocking(true);
-                    if chan.send_eof().is_err(){ return ope.fail(Error::ScpSendFailed(format!("Failed to send eof")))};
-                    if chan.wait_eof().is_err(){ return ope.fail(Error::ScpSendFailed(format!("Failed to wait eof")))};
-                    if chan.close().is_err() { return ope.fail(Error::ScpSendFailed(format!("Failed to send channel close")))};
-                    if chan.wait_close().is_err(){return ope.fail(Error::ScpSendFailed(format!("Failed to wait channel close")))};
-                    return ope.succeed(())
+                    self.session().set_blocking(true);
+                    if chan.send_eof().is_err(){ return Err(Error::ScpSendFailed(format!("Failed to send eof")))};
+                    if chan.wait_eof().is_err(){ return Err(Error::ScpSendFailed(format!("Failed to wait eof")))};
+                    if chan.close().is_err() { return Err(Error::ScpSendFailed(format!("Failed to send channel close")))};
+                    if chan.wait_close().is_err(){return Err(Error::ScpSendFailed(format!("Failed to wait channel close")))};
+                    return Ok(())
                 }
             }
             (b, Err(e)) => {
-                session.set_blocking(true);
-                return ope.fail(Error::ScpSendFailed(format!("Failed to copy")));
+                self.session().set_blocking(true);
+                return Err(Error::ScpSendFailed(format!("Failed to copy")));
             }
         }
     }
 
-    fn handle_starting_scp_fetch_operation(session: &'a Session,
-                                  ope: ScpFetchOp,
-                                  chan_map: Rc<RefCell<HashMap<ChannelId, ssh2::Channel<'a>>>>)
-        -> ScpFetchOp {
-        let mut ope = ope;
-        let (remote_path, local_path) = ope.begin();
+    fn start_scp_fetch(&mut self, remote_path: &PathBuf, local_path: &PathBuf) -> Result<Uuid, Error>{
+        debug!("Remote: Starting fetch of {} to {}",
+               remote_path.to_str().unwrap(),
+               local_path.to_str().unwrap());
         std::fs::remove_file(&local_path);
         let mut local_file = match OpenOptions::new().write(true).create_new(true).open(local_path) {
             Ok(f) => f,
-            Err(_) => return ope.fail(Error::ScpFetchFailed(format!("Failed to open local file")))
+            Err(_) => return Err(Error::ScpFetchFailed(format!("Failed to open local file")))
         };
-        let (mut chan, stats) = match session.scp_recv(&remote_path) {
+        let (mut chan, stats) = match self.session().scp_recv(&remote_path) {
             Ok(c) => c,
-            Err(_) => return ope.fail(Error::ScpFetchFailed(format!("Failed to start scp recv")))
+            Err(_) => return Err(Error::ScpFetchFailed(format!("Failed to start scp recv")))
         };
-        let chan_id = ChannelId(Uuid::new_v4());
-        chan_map.borrow_mut().insert(chan_id.clone(), chan);
-        return ope.save((chan_id, RemainingBytes(stats.size()), Arc::new(BufWriter::new(local_file))))
+        let id = Uuid::new_v4();
+        self.channels.insert(id.clone(), chan);
+        self.progressing_writing_files.insert(id.clone(), (stats.size() as usize, local_file));
+        return Ok(id);
     }
 
-    fn handle_progressing_scp_fetch_operation(session: &'a Session,
-                                              ope: ScpFetchOp,
-                                              chan_map: Rc<RefCell<HashMap<ChannelId, ssh2::Channel<'a>>>>)
-        -> ScpFetchOp{
-        let mut ope = ope;
-        let (chan_id, r_bytes, mut local_file) = ope.resume();
-        let mut chan = chan_map.borrow_mut().remove(&chan_id).unwrap();
-        let mut file = Arc::get_mut(&mut local_file).unwrap();
-        session.set_blocking(false);
-        trace!("Copying data from stream to file");
+    fn continue_scp_fetch(&mut self, id: &Uuid) -> Result<(), Error>{
+        debug!("Remote: Continuing fetch {}", id);
+        let mut chan = self.channels.remove(&id).unwrap();
+        let (bytes, mut file) = self.progressing_writing_files.remove(&id).unwrap();
+        self.session().set_blocking(false);
         match read_bufcopy(&mut chan.stream(0), &mut file) {
             (b, Err(ref e)) if e.kind() == ErrorKind::WouldBlock => {
-                session.set_blocking(true);
-                chan_map.borrow_mut().insert(chan_id.clone(), chan);
-                return ope.save((chan_id, RemainingBytes(r_bytes.0 - b as u64), local_file));
+                self.session().set_blocking(true);
+                self.channels.insert(id.clone(), chan);
+                self.progressing_writing_files.insert(id.clone(), (bytes - b as usize, file));
+                return Err(Error::WouldBlock);
             }
             (b, Ok(())) =>{
-                if r_bytes.0 != 0{
-                   session.set_blocking(true);
-                    chan_map.borrow_mut().insert(chan_id.clone(), chan);
-                    return ope.save((chan_id, RemainingBytes(r_bytes.0 - b as u64), local_file))
+                if bytes != 0{
+                    self.session().set_blocking(true);
+                    self.channels.insert(id.clone(), chan);
+                    self.progressing_writing_files.insert(id.clone(), (bytes - b as usize, file));
+                    return Err(Error::WouldBlock);
                 } else {
-                    session.set_blocking(true);
-                    if chan.send_eof().is_err() { return ope.fail(Error::ScpFetchFailed(format!("Failed to send eof"))) };
-                    if chan.wait_eof().is_err() { return ope.fail(Error::ScpFetchFailed(format!("Failed to wait eof"))) };
-                    if chan.close().is_err() { return ope.fail(Error::ScpFetchFailed(format!("Failed to send channel close"))) };
-                    if chan.wait_close().is_err() { return ope.fail(Error::ScpFetchFailed(format!("Failed to wait channel close"))) };
-                    return ope.succeed(())
+                    self.session().set_blocking(true);
+                    if chan.send_eof().is_err() { return Err(Error::ScpFetchFailed(format!("Failed to send eof"))) };
+                    if chan.wait_eof().is_err() { return Err(Error::ScpFetchFailed(format!("Failed to wait eof"))) };
+                    if chan.close().is_err() { return Err(Error::ScpFetchFailed(format!("Failed to send channel close"))) };
+                    if chan.wait_close().is_err() { return Err(Error::ScpFetchFailed(format!("Failed to wait channel close"))) };
+                    return Ok(())
                 }
             }
             (b, Err(e)) => {
-                session.set_blocking(true);
-                return ope.fail(Error::ScpFetchFailed(format!("Failed to copy data")));
+                self.session().set_blocking(true);
+                return Err(Error::ScpFetchFailed(format!("Failed to copy data")));
             }
         }
     }
 }
 
-// We take care of closing the inner thread before dropping the connection.
-impl Drop for RemoteConnection{
-    fn drop(&mut self) {
-        if Arc::strong_count(&self.thread_handle) == 1 {
-            debug!("Dropping remote connection");
-            self.keep_alive.store(false, Ordering::Relaxed);
-            self.thread_handle.lock().unwrap().take().unwrap().join().unwrap();
-            let pxc = self.proxy_command
-                .lock()
-                .unwrap()
-                .take();
-            drop(pxc);
-        }
+/// Type alias for the Repository resource operations.
+type RemoteOp = Box<dyn UseResource<RemoteResource>>;
+
+/// The remote resource.
+struct RemoteResource{
+    remote: Remote,
+    queue: Vec<RemoteOp>
+}
+
+/// This structure allows to perform operations on a remote host. Operations are executed in a
+/// separate thread, which allows to avoid moving and synchronizing the ssh2 session between
+/// different tasks. As such, operations are represented by futures, which are driven to completion
+/// by the thread.
+// Under the hood, the future sends an operation to the connection thread which takes care about
+// running the operation to completion, and wakes the future when the result is available.
+#[derive(Clone)]
+pub struct RemoteHandle {
+    sender: Sender<RemoteOp>,
+    repr: String,
+    dropper: Dropper<()>,
+}
+
+impl RemoteHandle {
+
+    /// Spawn a remote connection from a profile. A handle is returned to create futures.
+    pub fn spawn_resource(profile: config::SshProfile) -> Result<RemoteHandle, Error>{
+        debug!("RemoteHandle: Start connection thread");
+        let (sender, receiver): (Sender<RemoteOp>, Receiver<RemoteOp>) = unbounded();
+        let (rs, rr): (Sender<Result<String, Error>>, Receiver<Result<String, Error>>) = unbounded();
+        let handle = thread::spawn(move || {
+            trace!("RemoteResource: Instantiating the resource");
+            let mut remote = match Remote::from_profile(profile){
+                Ok(r) => r,
+                Err(e) => {
+                    rs.send(Err(e));
+                    return ();
+                }
+            };
+            let mut res = RemoteResource{remote, queue:Vec::new()};
+            let repr = match res.remote.proxycommand{
+                Some(ref s) => format!("ProxyCommand \'{}\'", s.repr),
+                None => format!("Address"),
+            };
+            rs.send(Ok(repr));
+            trace!("RemoteResource: Starting resource loop");
+            loop{
+                // Handle a message
+                match receiver.try_recv() {
+                    Ok(o) => {
+                        trace!("RemoteResource: Received operation");
+                        res.queue.push(o)
+                    }
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {
+                        trace!("RemoteResource: Channel disconnected. Leaving...");
+                        break;
+                    }
+                }
+                // Handle an operation
+                if let Some(s) = res.queue.pop() {
+                    s.progress(&mut res);
+                }
+            }
+            trace!("RemoteResource: Leaving thread.");
+            return ();
+        });
+        let repr = rr.recv().unwrap()?;
+        return Ok(RemoteHandle{
+            sender,
+            repr,
+            dropper: Dropper::from_handle(handle),
+        });
+    }
+
+    /// Creates a RemoteExecFuture that resolves into a Result over an Output after the command was
+    /// executed on the remote host.
+    pub fn async_exec(&self, command: &str) -> ExecFuture {
+        let (recv, op) = ExecOp::from(Stateful::from(Starting(command.to_owned())));
+        return ExecFuture(OperationFuture::new(op, self.sender.clone(), recv));
+    }
+
+    /// Creates a ScpSendFuture that resolves into a Result over () after the file was sent to the
+    /// remote host.
+    pub fn async_scp_send(&self, local_path: &PathBuf, remote_path: &PathBuf) -> ScpSendFuture {
+        let (recv, op) = ScpSendOp::from(Stateful::from(Starting((local_path.to_owned(),
+                                                                  remote_path.to_owned()))));
+        return ScpSendFuture(OperationFuture::new(op, self.sender.clone(), recv));
+    }
+
+
+    /// Creates a ScpFetchFuture that resolves into a Result over () after the file was fetched from
+    /// remote host.
+    pub fn async_scp_fetch(&self, remote_path: &PathBuf, local_path: &PathBuf) -> ScpFetchFuture {
+        let (recv, op) = ScpFetchOp::from(Stateful::from(Starting((remote_path.to_owned(),
+                                                                  local_path.to_owned()))));
+        return ScpFetchFuture(OperationFuture::new(op, self.sender.clone(), recv));
+    }
+
+    /// Returns the number of handles over connection
+    pub fn handles_count(&self) -> usize{
+        return self.dropper.strong_count();
+    }
+
+}
+
+impl fmt::Debug for RemoteHandle {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "RemoteHandle<{}>", self.repr)
     }
 }
+
+
+///////////////////////////////////////////////////////////////////////////////////////// OPERATIONS
+
+/// A Future that resolves into a Result over an Output, after the command was executed on the remote
+/// host.
+pub struct ExecFuture(OperationFuture<ExecMarker, RemoteResource, Output>);
+impl Future for ExecFuture {
+    type Output = Result<Output, crate::primitives::Error>;
+    fn poll(mut self: Pin<&mut Self>, wake: &Waker) -> Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(wake)
+    }
+}
+struct ExecMarker;
+type ExecOp = Operation<ExecMarker>;
+impl UseResource<RemoteResource> for ExecOp {
+    fn progress(mut self: Box<Self>, resource: &mut RemoteResource) {
+        debug!("ExecOp: Progressing...");
+        if let Some(s) = self.state.to_state::<Starting<String>>() {
+            trace!("ExecOp: Found Starting");
+            match resource.remote.start_exec(&s.0){
+                Ok(id) => {
+                    self.state.transition::<Starting<String>, Progressing<_>>(Progressing(id));
+                    resource.queue.push(self);
+                }
+                Err(e) => {
+                    self.state.transition::<Starting<String>, Finished<Output>>(Finished(Err(
+                        crate::primitives::Error::from(e))));
+                    resource.queue.push(self);
+                }
+            }
+        }else if let Some(s) = self.state.to_state::<Progressing<Uuid>>(){
+            trace!("ExecOp: Found Progressing");
+            match resource.remote.continue_exec(&s.0){
+                Ok(o) => {
+                    self.state.transition::<Progressing<Uuid>, Finished<_>>(Finished(Ok(o)));
+                    resource.queue.push(self);
+                }
+                Err(Error::WouldBlock) => resource.queue.push(self),
+                Err(e) => {
+                    self.state.transition::<Progressing<Uuid>, Finished<Output>>(Finished(Err(
+                        crate::primitives::Error::from(e))));
+                    resource.queue.push(self);
+                }
+            }
+        } else if let Some(s) = self.state.to_state::<Finished<Output>>() {
+            trace!("ExecOp: Found Finished");
+            let waker = self
+                .waker
+                .as_ref()
+                .expect("No waker given with ExecOp")
+                .to_owned();
+            let sender = self.sender.clone();
+            trace!("ExecOp: Sending...");
+            sender.send(*self);
+            trace!("ExecOp: Waking ...");
+            waker.wake();
+        } else {
+            unreachable!()
+        }
+        trace!("ExecOp: Progress over.");
+    }
+}
+
+/// A Future that resolves into a Result over () after the file was sent to the remote host.
+pub struct ScpSendFuture(OperationFuture<ScpSendMarker, RemoteResource, ()>);
+impl Future for ScpSendFuture {
+    type Output = Result<(), crate::primitives::Error>;
+    fn poll(mut self: Pin<&mut Self>, wake: &Waker) -> Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(wake)
+    }
+}
+struct ScpSendMarker {}
+type ScpSendOp = Operation<ScpSendMarker>;
+impl UseResource<RemoteResource> for ScpSendOp {
+    fn progress(mut self: Box<Self>, resource: &mut RemoteResource) {
+        debug!("ScpSendOp: Progressing...");
+        if let Some(s) = self.state.to_state::<Starting<(PathBuf, PathBuf)>>() {
+            trace!("ScpSendOp: Found Starting");
+            match resource.remote.start_scp_send(&(s.0).0, &(s.0).1){
+                Ok(id) => {
+                    self.state.transition::<Starting<(PathBuf, PathBuf)>, Progressing<_>>(
+                        Progressing(id)
+                    );
+                    resource.queue.push(self);
+                }
+                Err(e) => {
+                    self.state.transition::<Starting<(PathBuf, PathBuf)>, Finished<()>>(Finished(Err(
+                        crate::primitives::Error::from(e))));
+                    resource.queue.push(self);
+                }
+            }
+        }else if let Some(s) = self.state.to_state::<Progressing<Uuid>>(){
+            trace!("ScpSendOp: Found Progressing");
+            match resource.remote.continue_scp_send(&s.0){
+                Ok(o) => {
+                    self.state.transition::<Progressing<Uuid>, Finished<()>>(Finished(Ok(o)));
+                    resource.queue.push(self);
+                }
+                Err(Error::WouldBlock) => resource.queue.push(self),
+                Err(e) => {
+                    self.state.transition::<Progressing<Uuid>, Finished<()>>(Finished(Err(
+                        crate::primitives::Error::from(e))));
+                    resource.queue.push(self);
+                }
+            }
+        } else if let Some(s) = self.state.to_state::<Finished<()>>() {
+            trace!("ScpSendOp: Found Finished");
+            let waker = self
+                .waker
+                .as_ref()
+                .expect("No waker given with ExecOp")
+                .to_owned();
+            let sender = self.sender.clone();
+            trace!("ScpSendOp: Sending...");
+            sender.send(*self);
+            trace!("ScpSendOp: Waking ...");
+            waker.wake();
+        } else {
+            unreachable!()
+        }
+        trace!("ScpSendOp: Progress over.");
+    }
+}
+
+/// A Future that resolves into a Result over a () after the file was fetched from the remote host
+pub struct ScpFetchFuture(OperationFuture<ScpFetchMarker, RemoteResource, ()>);
+impl Future for ScpFetchFuture {
+    type Output = Result<(), crate::primitives::Error>;
+    fn poll(mut self: Pin<&mut Self>, wake: &Waker) -> Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(wake)
+    }
+}
+struct ScpFetchMarker {}
+type ScpFetchOp = Operation<ScpFetchMarker>;
+impl UseResource<RemoteResource> for ScpFetchOp {
+    fn progress(mut self: Box<Self>, resource: &mut RemoteResource) {
+        debug!("ScpFetchOp: Progressing...");
+        if let Some(s) = self.state.to_state::<Starting<(PathBuf, PathBuf)>>() {
+            trace!("ScpFetchOp: Found Starting");
+            match resource.remote.start_scp_fetch(&(s.0).0, &(s.0).1){
+                Ok(id) => {
+                    self.state.transition::<Starting<(PathBuf, PathBuf)>, Progressing<_>>(
+                        Progressing(id)
+                    );
+                    resource.queue.push(self);
+                }
+                Err(e) => {
+                    self.state.transition::<Starting<(PathBuf, PathBuf)>, Finished<()>>(Finished(Err(
+                        crate::primitives::Error::from(e))));
+                    resource.queue.push(self);
+                }
+            }
+        }else if let Some(s) = self.state.to_state::<Progressing<Uuid>>(){
+            trace!("ScpFetchOp: Found Progressing");
+            match resource.remote.continue_scp_fetch(&s.0){
+                Ok(o) => {
+                    self.state.transition::<Progressing<Uuid>, Finished<()>>(Finished(Ok(o)));
+                    resource.queue.push(self);
+                }
+                Err(Error::WouldBlock) => resource.queue.push(self),
+                Err(e) => {
+                    self.state.transition::<Progressing<Uuid>, Finished<()>>(Finished(Err(
+                        crate::primitives::Error::from(e))));
+                    resource.queue.push(self);
+                }
+            }
+        } else if let Some(s) = self.state.to_state::<Finished<()>>() {
+            trace!("ScpFetchOp: Found Finished");
+            let waker = self
+                .waker
+                .as_ref()
+                .expect("No waker given with ExecOp")
+                .to_owned();
+            let sender = self.sender.clone();
+            trace!("ScpFetchOp: Sending...");
+            sender.send(*self);
+            trace!("ScpFetchOp: Waking ...");
+            waker.wake();
+        } else {
+            unreachable!()
+        }
+        trace!("ScpFetchOp: Progress over.");
+    }
+}
+
+//////////////////////////////////////////////////////////////////////////////////// COPY PRIMITIVES
 
 // This function copies a bufread reader into a writer by taking care about always returning the
 // number of bytes read even in case of an error (for WouldBlock error)
@@ -842,7 +910,7 @@ fn bufread_bufcopy<R: BufRead, W:Write>(reader: &mut R, writer: &mut W) -> (u64,
     return (bytes, Ok(()))
 }
 
-//This function does the same for an unbuffered read.
+// This function does the same for an unbuffered read.
 fn read_bufcopy<R:Read, W:Write>(reader: &mut R, writer: &mut W) -> (u64, Result<(), io::Error>) {
     let mut bytes = 0 as u64;
     let mut buf = [0; 8192];
@@ -859,7 +927,7 @@ fn read_bufcopy<R:Read, W:Write>(reader: &mut R, writer: &mut W) -> (u64, Result
                     Ok(w) => {
                         bytes += w as u64;
                         writer.flush();
-                        return (bytes, Err(io::Error::new(ErrorKind::Other, Error::Unknown)))
+                        return (bytes, Err(io::Error::new(ErrorKind::Other, "Don't know")))
                     }
                     Err(e) => {
                         writer.flush();
@@ -875,111 +943,34 @@ fn read_bufcopy<R:Read, W:Write>(reader: &mut R, writer: &mut W) -> (u64, Result
     }
 }
 
-//////////////////////////////////////////////////////////////////////////////////////////// FUTURES
-// Futures returned by the different methods proposed by the RemoteConnection object.
-
-enum FutureState<T>{
-    Starting(T),
-    Waiting,
-    Finished,
-}
-
-#[macro_export]
-macro_rules! make_operation_future {
-    ( $name:ident, $operation:ty, $variant:ident, $output:ty) => {
-        pub struct $name {
-            state: FutureState<$operation>,
-            connection: RemoteConnection,
-            uuid: Uuid,
-        }
-        impl $name{
-            fn new(ope:$operation, connection:RemoteConnection) -> $name{
-                return $name{
-                    state: FutureState::Starting(ope),
-                    connection: connection,
-                    uuid: Uuid::new_v4(),
-                }
-            }
-        }
-        impl Future for $name {
-            type Output = $output;
-            fn poll(mut self: Pin<&mut Self>, wake: &Waker) -> Poll<$output> {
-                loop {
-                    match &self.state {
-                        FutureState::Starting(ope) => {
-                            let (state, ret) = self.connection
-                                .operations_sender
-                                .send((RemoteOperation::$variant(ope.clone()), wake.clone(), self.uuid.clone()))
-                                .map_or_else(
-                                    |_| {(FutureState::Finished,
-                                          Poll::Ready(Err(Error::ChannelClosed)))},
-                                    |_| {(FutureState::Waiting, Poll::Pending)});
-                            self.state = state;
-                            return ret;
-                        }
-                        FutureState::Waiting => {
-                            self.state = FutureState::Finished;
-                            let ope = match self.connection.operations_results.remove(&self.uuid) {
-                                Some(ope) => ope,
-                                None => {
-                                    return Poll::Ready(Err(Error::Future("Future polled, but \
-                                    result is not there.".to_owned())))
-                                }
-                            };
-                            if let RemoteOperation::$variant(ope) = ope{
-                                return Poll::Ready(ope.into_result())
-                            } else {
-                                panic!("Wrong operation retrieved.")
-                            }
-
-                        }
-                        FutureState::Finished => {
-                            panic!("Future was polled in a finished state");
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// A future returned by the method `async_exec`. Resolves in a `Result<Output,Error>`.
-make_operation_future!(ExecFuture, ExecOp, Exec, Result<Output, Error>);
-/// A future returned by the method `async_scp_send`. Resolves in a `Result<(),Error>`.
-make_operation_future!(ScpSendFuture, ScpSendOp, ScpSend, Result<(), Error>);
-/// A future returned by the method `async_scp_fetch`. Resolves in a `Result<(),Error>`.
-make_operation_future!(ScpFetchFuture, ScpFetchOp, ScpFetch, Result<(), Error>);
-
+/////////////////////////////////////////////////////////////////////////////////////////////// TEST
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::ssh::config::SshProfile;
 
     #[test]
     fn test_proxy_command_forwarder() {
         let (pxc, address) = ProxyCommandForwarder::from_command("echo kikou").unwrap();
         let mut stream = TcpStream::connect(address).unwrap();
         let mut buf = [0 as u8; 5];
-        stream.read(&mut buf);
+        stream.read(&mut buf).unwrap();
         assert_eq!(buf, "kikou".as_bytes());
         assert!(TcpStream::connect(address).is_err());
-    }
-
-    #[test]
-    fn test_remote_from_addr() {
-        let remote = RemoteConnection::from_addr("127.0.0.1:22", "localhost", "apere").unwrap();
-    }
-
-    #[test]
-    fn test_remote_from_proxy_command() {
-        let remote = RemoteConnection::from_proxy_command( "ssh -A -l apere localhost -W localhost:22", "localhost", "apere" ).unwrap();
     }
 
     #[test]
     fn test_async_exec() {
         use futures::executor::block_on;
         async fn connect_and_ls() {
-            //let remote = RemoteConnection::from_addr("127.0.0.1:22", "localhost", "apere").unwrap();
-            let remote = RemoteConnection::from_proxy_command( "ssh -A -l apere localhost -W localhost:22", "localhost", "apere" ).unwrap();
+            let profile = config::SshProfile{
+                name: "test".to_owned(),
+                hostname: Some("127.0.0.1".to_owned()),
+                user: Some("apere".to_owned()),
+                port: None,
+                proxycommand: Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
+            };
+            let remote = RemoteHandle::spawn_resource(profile).unwrap();
             let output = await!(remote.async_exec("echo kikou && sleep 1 && echo hello!")).unwrap();
             println!("Executed and resulted in {:?}", String::from_utf8(output.stdout).unwrap());
         }
@@ -990,8 +981,14 @@ mod test {
     fn test_async_scp_send() {
         use futures::executor::block_on;
         async fn connect_and_scp_send() {
-            //let remote = RemoteConnection::from_addr("127.0.0.1:22", "localhost", "apere").unwrap();
-            let remote = RemoteConnection::from_proxy_command( "ssh -A -l apere localhost -W localhost:22", "localhost", "apere" ).unwrap();
+            let profile = config::SshProfile{
+                name: "test".to_owned(),
+                hostname: Some("127.0.0.1".to_owned()),
+                user: Some("apere".to_owned()),
+                port: None,
+                proxycommand: Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
+            };
+            let remote = RemoteHandle::spawn_resource(profile).unwrap();
             let output = std::process::Command::new("dd")
                 .args(&["if=/dev/urandom", "of=/tmp/local.txt", "bs=35M", "count=1"])
                 .output()
@@ -1021,8 +1018,14 @@ mod test {
     fn test_async_scp_fetch(){
         use futures::executor::block_on;
         async fn connect_and_scp_fetch() {
-            //let remote = RemoteConnection::from_addr("127.0.0.1:22", "localhost", "apere").unwrap();
-            let remote = RemoteConnection::from_proxy_command( "ssh -A -l apere localhost -W localhost:22", "localhost", "apere" ).unwrap();
+            let profile = config::SshProfile{
+                name: "test".to_owned(),
+                hostname: Some("127.0.0.1".to_owned()),
+                user: Some("apere".to_owned()),
+                port: Some(22),
+                proxycommand: None, //Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
+            };
+            let remote = RemoteHandle::spawn_resource(profile).unwrap();
             let output = std::process::Command::new("dd")
                 .args(&["if=/dev/urandom", "of=/tmp/remote.txt", "bs=33M", "count=1"])
                 .output()
@@ -1050,8 +1053,15 @@ mod test {
 
     #[test]
     fn test_async_concurrent_exec(){
-        let remote = RemoteConnection::from_addr("127.0.0.1:22", "localhost", "apere").unwrap();
-        async fn connect_and_ls(remote: RemoteConnection) -> std::process::Output{
+        let profile = SshProfile{
+            name: "localhost".to_owned(),
+            hostname: Some("127.0.0.1".to_owned()),
+            user: Some("apere".to_owned()),
+            port: Some(22),
+            proxycommand: None,
+        };
+        let remote = RemoteHandle::spawn_resource(profile).unwrap();
+        async fn connect_and_ls(remote: RemoteHandle) -> std::process::Output{
             return await!(remote.async_exec("echo 1 && sleep 1 && echo 2")).unwrap()
         }
         use futures::executor;

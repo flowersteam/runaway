@@ -8,28 +8,33 @@ use std::str::CharIndices;
 use std::iter::Peekable;
 use std::fmt;
 use std::error;
-use crate::ssh::Error::ConnectionFailed;
+use std::io::prelude::*;
+use std::path::PathBuf;
+use std::fs::File;
 
 ///////////////////////////////////////////////////////////////////////////////////////////// ERRORS
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Error {
+    // Leaf Errors
     Lexer(IndexedString, String),
     Parser(IndexedString, String),
     Reader(IndexedString, String),
+    GettingProfile(String),
 }
 
 impl error::Error for Error {}
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use Error::*;
         match self {
-            Lexer(ref is, ref r) =>
+            Error::Lexer(ref is, ref r) =>
                 write!(f, "The lexer encountered an unexpected character:\n```\n{}\n```\nHint: {}", is, r),
-            Parser(ref is, ref r) =>
+            Error::Parser(ref is, ref r) =>
                 write!(f, "The parser encountered an unexpected token:\n```\n{}\n```\nHint: {}", is, r),
-            Reader(ref is, ref r) =>
+            Error::Reader(ref is, ref r) =>
                 write!(f, "The configuration reader encountered an unexpected node:\n```\n{}\n```\nHint; {}", is, r),
+            Error::GettingProfile(ref s) =>
+                write!(f, "An error occurred while getting a profile: {}", s),
         }
     }
 }
@@ -38,11 +43,11 @@ impl fmt::Display for Error {
 #[derive(Debug, Clone, Hash)]
 /// Represents a reduced ssh host configuration.
 pub struct SshProfile{
-    name: String,
-    hostname: Option<String>,
-    user: Option<String>,
-    port: Option<usize>,
-    proxycommand: Option<String>,
+    pub name: String,
+    pub hostname: Option<String>,
+    pub user: Option<String>,
+    pub port: Option<usize>,
+    pub proxycommand: Option<String>,
 }
 
 impl SshProfile{
@@ -58,23 +63,46 @@ impl SshProfile{
     }
 
     fn set_hostname(mut self, hostname: String) -> SshProfile{
+        debug!("Setting profile hostname");
         self.hostname.replace(hostname);
         self
     }
 
    fn set_user(mut self, user: String) -> SshProfile{
+        debug!("Setting profile user");
         self.user.replace(user);
         self
     }
 
     fn set_port(mut self, port: usize) -> SshProfile{
+        debug!("Setting profile port");
         self.port.replace(port);
         self
     }
 
     fn set_proxycommand(mut self, proxycommand: String) -> SshProfile{
+        debug!("Setting profile proxycommand");
         self.proxycommand.replace(proxycommand);
         self
+    }
+
+    fn complete(mut self) -> SshProfile{
+        debug!("Completing profile");
+        if self.hostname.is_none(){
+            trace!("Setting hostname to name {}", self.name);
+            self.hostname = Some(self.name.clone());
+        }
+        if self.port.is_none(){
+            trace!("Setting port to 22");
+            self.port = Some(22);
+        }
+        if self.user.is_none(){
+            let user = std::env::var_os("USER")
+                .map_or("user".to_owned(), |s| s.into_string().unwrap());
+            trace!("Setting user to current username {:?}", user);
+            self.user = Some(user);
+        }
+        return self;
     }
 }
 
@@ -209,6 +237,7 @@ impl<'s> fmt::Debug for IndexedSlice<'s> {
 
 // A public and owned counterpart to IndexedSlice. Used to print locations of unexpected characters
 // in errors.
+#[derive(Clone)]
 pub struct IndexedString(String, usize, usize);
 
 impl IndexedString{
@@ -898,7 +927,7 @@ impl<'s> Iterator for ConfigReader<'s>{
 impl<'s> ConfigReader<'s>{
 
     /// Instantiates a new configuration reader out of a string.
-    fn from_str(string: &'s str) -> ConfigReader<'s>{
+    pub fn from_str(string: &'s str) -> ConfigReader<'s>{
         let mut lexer = Lexer::from(string);
         let mut parser = Parser::from_lexer(lexer).peekable();
         return ConfigReader{iter: parser};
@@ -938,6 +967,33 @@ impl<'s> ConfigReader<'s>{
             }
         }
     }
+}
+
+/// This convenient function allows to parse a config file and retrieve a profile if it exists.
+pub fn get_profile(config_path: &PathBuf, name: &str) -> Result<SshProfile, Error>{
+    let mut profiles = File::open(config_path)
+        .map_err(|_| Error::GettingProfile(format!("Failed to open the file {}",
+                                                   config_path.to_str().unwrap())))?;
+    let mut profiles_string = String::new();
+    profiles.read_to_string(&mut profiles_string)
+        .map_err(|_| Error::GettingProfile(format!("Failed to read file {}",
+                                                   config_path.to_str().unwrap())))?;
+    let initial_err = Err(Error::GettingProfile(
+        format!("There is no {} profile in {}",
+                name,
+                config_path.to_str().unwrap())));
+    let mut profile = ConfigReader::from_str(&profiles_string)
+        .fold( initial_err,|res, r| {
+                  if r.is_err(){
+                      r
+                  } else if r.as_ref().unwrap().name == name{
+                      Ok(r.unwrap())
+                  } else {
+                      res
+                  }
+              }
+        )?;
+    return Ok(profile.complete());
 }
 
 
