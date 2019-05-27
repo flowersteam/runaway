@@ -1,0 +1,9 @@
+[package]
+name = "remote-leak"
+version = "0.0.2"
+authors = ["Alexandre Péré <alexandre.pere@protonmail.com>"]
+edition = "2018"
+
+[dependencies]
+futures-preview = "0.3.0-alpha.10"
+liborchestra = { path = "../liborchestra"}
