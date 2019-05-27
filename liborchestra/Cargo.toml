@@ -6,8 +6,8 @@ edition = "2018"
 
 [dependencies]
 log = "0.3"
-pretty_logger = "0.1"
-chrono = "0.4"
+env_logger = "0.6"
+chrono = { version = "0.4", features = ["serde"] }
 serde = "1.0"
 serde_derive = "1.0"
 serde_yaml = "0.7"
@@ -17,12 +17,14 @@ yaml-rust="0.4"
 rust-crypto = "0.2"
 uuid = { version = "0.6", features = ["serde", "v4"] }
 rpassword = "0.0.4"
-ssh2 = "0.3"
+ssh2 = "0.3.3"
 dirs = "1.0"
 chashmap = "2.2.2"
 url = "1.7.2"
 git2 = "0.8"
 crossbeam = "0.7.1"
+typetag = "0.1"
+liborchestra-derive = {path = "../liborchestra-derive"}
 
 [lib]
 name="liborchestra"
