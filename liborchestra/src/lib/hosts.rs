@@ -14,11 +14,11 @@ use super::{
 use crate::derive_from_error;
 use crate::misc;
 use crate::primitives::{
-    Dropper, FinishedOperation, Operation, OperationFuture, ProgressingOperation,
-    StartingOperation, UseResource,
+    Dropper, Finished, Operation, OperationFuture, Progressing,
+    Starting, UseResource,
 };
 use crate::ssh;
-use crate::ssh::RemoteConnection;
+use crate::ssh::RemoteHandle;
 use crate::stateful::{Stateful, TransitionsTo};
 use chrono::prelude::*;
 use crossbeam::channel::{unbounded, Receiver, Sender, TryRecvError};
@@ -200,21 +200,21 @@ impl<'a> From<&'a str> for LeaveConfig {
 // (executions per nodes) of the configuration. It is synchronous over the host (main) connection.
 struct Host {
     conf: HostConf,
-    conn: ssh::RemoteConnection,
-    pool: Vec<ssh::RemoteConnection>,
+    conn: ssh::RemoteHandle,
+    pool: Vec<ssh::RemoteHandle>,
     vars: EnvironmentVariables,
 }
 
 impl Host {
     // Builds a host from a configuration.
-    fn from(conf: HostConf) -> Result<Host, Error> {
+    fn from_conf(conf: HostConf) -> Result<Host, Error> {
         debug!("Host: Creating Host from HostConf: {:?}", conf);
         let profile = ssh::config::get_profile(
             &dirs::home_dir().unwrap().join(SSH_CONFIG_RPATH),
             &conf.ssh_config,
         )?;
         trace!("Host: Profile retrieved: {:?}", profile);
-        let conn = ssh::RemoteConnection::from_profile(profile)?;
+        let conn = ssh::RemoteHandle::spawn_resource(profile)?;
         trace!("Host: Connection acquired: {:?}", conn);
         let pool = Vec::new();
         let vars = EnvironmentVariables(HashMap::new());
@@ -230,7 +230,8 @@ impl Host {
     fn start_alloc(&mut self) -> Result<(), Error> {
         debug!("Host: Starting allocation on {:?}", self.conn);
         let alloc_output: std::process::Output =
-            futures::executor::block_on(self.conn.async_exec(&self.conf.start_alloc))?;
+            futures::executor::block_on(self.conn.async_exec(&self.conf.start_alloc))
+                .map_err(|e|{Error::AllocationFailed(format!("Failed to allocate: {}",e))})?;
         let alloc_id = match alloc_output.status.code() {
             Some(0) => {
                 trace!("Host: Allocation succeeded: {:?}", alloc_output);
@@ -283,9 +284,9 @@ impl Host {
                 config.proxycommand.replace(cmd);
                 config.hostname.replace(format!("{}::{}", config.name, n));
                 trace!("Host: Node configuration: {:?}", config);
-                ssh::RemoteConnection::from_profile(config).map_err(|e| Error::from(e))
+                ssh::RemoteHandle::spawn_resource(config).map_err(|e| Error::from(e))
             })
-            .collect::<Result<Vec<ssh::RemoteConnection>, Error>>()?;
+            .collect::<Result<Vec<ssh::RemoteHandle>, Error>>()?;
         Ok(())
     }
 
@@ -294,7 +295,8 @@ impl Host {
         debug!("Host: Cancelling allocation...");
         let cancel_alloc = self.vars.substitute(&self.conf.cancel_alloc);
         let cancel_output: std::process::Output =
-            futures::executor::block_on(self.conn.async_exec(&cancel_alloc))?;
+            futures::executor::block_on(self.conn.async_exec(&cancel_alloc))
+                .map_err(|e| {Error::AllocationFailed(format!("Failed to cancel allocation: {}", e))})?;
         match cancel_output.status.code() {
             Some(0) => {
                 trace!("Host: Allocation cancelling succeeded");
@@ -313,11 +315,11 @@ impl Host {
     }
 
     // Tries to acquire a node connection
-    fn try_acquire(&mut self) -> Option<RemoteConnection> {
+    fn try_acquire(&mut self) -> Option<RemoteHandle> {
         debug!("Host: Trying to acquire a connection.");
         self.pool
             .iter()
-            .filter(|conn| conn.strong_count() < self.conf.executions_per_nodes as usize + 1)
+            .filter(|conn| conn.handles_count() < self.conf.executions_per_nodes as usize + 1)
             .nth(0)
             .map(|c| c.clone())
     }
@@ -326,7 +328,7 @@ impl Host {
     fn nodes_available(&self) -> bool {
         self.pool
             .iter()
-            .any(|conn| conn.strong_count() < self.conf.executions_per_nodes + 1)
+            .any(|conn| conn.handles_count() < self.conf.executions_per_nodes + 1)
     }
 
     // Checks whether host is allocated
@@ -341,7 +343,7 @@ impl Host {
 
     // Checks whether all nodes are free
     fn is_free(&self) -> bool {
-        self.is_allocated() && self.pool.iter().all(|conn| conn.strong_count() == 1)
+        self.is_allocated() && self.pool.iter().all(|conn| conn.handles_count() == 1)
     }
 }
 
@@ -438,27 +440,26 @@ impl HostResource {
 /// A handle that allows to create futures to perform operations on the host. Mainly, acquiring
 /// nodes. The handle is Clone and can be sent around.
 #[derive(Clone)]
-pub struct HostResourceHandle {
+pub struct HostHandle {
     sender: Sender<HostOp>,
     dropper: Dropper<()>,
 }
 
-impl HostResourceHandle {
+impl HostHandle {
     /// Spawns the resource in a separate thread and returns a handle to it.
-    pub fn spawn_resource(host_conf: HostConf) -> Result<HostResourceHandle, Error> {
+    pub fn spawn_resource(host_conf: HostConf) -> Result<HostHandle, Error> {
         debug!(
-            "HostResourceHandle: Spawning host resource {:?}",
+            "HostHandle: Spawning host resource {:?}",
             host_conf.name
         );
-        let host = Host::from(host_conf)?;
-        let (sender, receiver): (Sender<HostOp>, Receiver<HostOp>) = unbounded();
-        let handle = std::thread::spawn(move || {
-            trace!("HostResource: Creating resource in thread");
-            let mut res = HostResource {
+        let host = Host::from_conf(host_conf)?;
+        let mut res = HostResource {
                 state: Stateful::from(HostIdling),
                 host,
                 queue: Vec::new(),
             };
+        let (sender, receiver): (Sender<HostOp>, Receiver<HostOp>) = unbounded();
+        let handle = std::thread::spawn(move || {
             trace!("HostResource: Starting resource loop");
             loop {
                 // Handle a message
@@ -487,7 +488,7 @@ impl HostResourceHandle {
             trace!("HostResource: Idling Reached. Leaving thread.");
             return ();
         });
-        return Ok(HostResourceHandle {
+        return Ok(HostHandle {
             sender,
             dropper: Dropper::from_handle(handle),
         });
@@ -495,18 +496,21 @@ impl HostResourceHandle {
 
     /// Returns a future that ultimately resolves to a Result over a RemoteConnection to a node.
     pub fn async_acquire(&self) -> AcquireNodeFuture {
-        let (recv, op) = AcquireNodeOp::from(Stateful::from(StartingOperation(())));
+        let (recv, op) = AcquireNodeOp::from(Stateful::from(Starting(())));
         return AcquireNodeFuture::new(op, self.sender.clone(), recv);
     }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////// OPERATION
 // The only operation is the Acquire operation which allows to get a remote connection to a node.
+
+/// A Future that resolves to a Result on a RemoteHandle, after a node has been acquired.
+pub type AcquireNodeFuture = OperationFuture<AcquireNodeMarker, HostResource, RemoteHandle>;
 struct AcquireNodeMarker {}
 type AcquireNodeOp = Operation<AcquireNodeMarker>;
 impl UseResource<HostResource> for AcquireNodeOp {
     fn progress(mut self: Box<Self>, resource: &mut HostResource) {
-        if let Some(s) = self.state.to_state::<StartingOperation<()>>() {
+        if let Some(s) = self.state.to_state::<Starting<()>>() {
             trace!("AcquireNodeOp: Found Starting");
             if let Some(HostAllocated(_)) = resource.state.to_state::<HostAllocated>() {
                 if resource.host.is_full() {
@@ -515,8 +519,8 @@ impl UseResource<HostResource> for AcquireNodeOp {
                 } else {
                     trace!("AcquireNodeOp: Node available. Acquiring...");
                     self.state
-                        .transition::<StartingOperation<()>, FinishedOperation<_>>(
-                            FinishedOperation(resource.host.try_acquire().ok_or(
+                        .transition::<Starting<()>, Finished<_>>(
+                            Finished(resource.host.try_acquire().ok_or(
                                 crate::primitives::Error::from(Error::AcquireNodeFailed(
                                     "Failed to acquire.".to_owned(),
                                 )),
@@ -527,14 +531,14 @@ impl UseResource<HostResource> for AcquireNodeOp {
             } else if let Some(HostCrashed(e)) = resource.state.to_state::<HostCrashed>() {
                 trace!("AcquireNodeOp: HostResource found crashed. Finishing...");
                 self.state
-                    .transition::<StartingOperation<()>, FinishedOperation<RemoteConnection>>(
-                        FinishedOperation(Err(crate::primitives::Error::from(e))),
+                    .transition::<Starting<()>, Finished<RemoteHandle>>(
+                        Finished(Err(crate::primitives::Error::from(e))),
                     )
             } else {
                 trace!("AcquireNodeOp: HostResource Locked or Idle. Rescheduling...");
                 resource.queue.push(self);
             }
-        } else if let Some(s) = self.state.to_state::<FinishedOperation<RemoteConnection>>() {
+        } else if let Some(s) = self.state.to_state::<Finished<RemoteHandle>>() {
             trace!("AcquireNodeOp: Found Finished");
             let waker = self
                 .waker
@@ -552,7 +556,6 @@ impl UseResource<HostResource> for AcquireNodeOp {
         trace!("AcquireNodeOp: Progress over.");
     }
 }
-pub type AcquireNodeFuture = OperationFuture<AcquireNodeMarker, HostResource, RemoteConnection>;
 
 ////////////////////////////////////////////////////////////////////////////////////////////// TESTS
 #[cfg(test)]
@@ -609,7 +612,7 @@ mod test {
             directory: path::PathBuf::from("/projets/flowers/alex/executions"),
         };
 
-        let mut host = Host::from(conf).unwrap();
+        let mut host = Host::from_conf(conf).unwrap();
         assert!(!host.is_allocated());
         assert!(!host.is_free());
         assert!(!host.is_full());
@@ -655,7 +658,7 @@ mod test {
             directory: path::PathBuf::from("/home/apere/Executions"),
         };
 
-        let res_handle = HostResourceHandle::spawn_resource(conf).unwrap();
+        let res_handle = HostHandle::spawn_resource(conf).unwrap();
         let op1 = res_handle.async_acquire();
         let conn1 = block_on(op1);
         println!("conn1: {:?}", conn1);
