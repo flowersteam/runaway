@@ -14,6 +14,9 @@ use yaml_rust;
 ////////////////////////////////////////////////////////////////////////////////////////////// ERROR
 #[derive(Debug)]
 pub enum Error {
+    // Leaf error
+    Generic(String),
+    // Branch errors
     Io(io::Error),
     Yaml(serde_yaml::Error),
     Regex(regex::Error),
@@ -30,6 +33,7 @@ impl error::Error for Error {}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
+            Error::Generic(ref s) => write!(f, "Error happened:\n{}", s),
             Error::Io(ref err) => write!(f, "Io related error happened:\n{}", err),
             Error::Yaml(ref err) => write!(f, "Yaml related error happened:\n{}", err),
             Error::Regex(ref err) => write!(f, "Regex related error happened:\n{}", err),
