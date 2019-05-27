@@ -1,6 +1,6 @@
 // liborchestra/mod.rs
 // Author: Alexandre Péré
-#![feature(await_macro, async_await, futures_api, result_map_or_else, associated_type_defaults)]
+#![feature(trace_macros, await_macro, async_await, futures_api, result_map_or_else, trait_alias)]
 ///
 /// Liborchestra gives tools to manipulate expegit repositories, run scripts on user-defined hosts,
 /// and orchestrate the executions of batches of experiments under variations of parameters.
@@ -14,15 +14,18 @@
 /// in which the executions are stored.
 /// + Running: refers to the act of running an experiment so as to obtain an execution.
 
-// CRATES
+//////////////////////////////////////////////////////////////////////////////////////////// IMPORTS
 #[macro_use]
 extern crate serde_derive;
 #[macro_use]
 extern crate log;
+#[macro_use]
+extern crate liborchestra_derive;
 extern crate chrono;
 extern crate regex;
 extern crate yaml_rust;
-extern crate pretty_logger;
+//extern crate pretty_logger;
+extern crate env_logger;
 extern crate uuid;
 extern crate serde;
 extern crate serde_yaml;
@@ -30,32 +33,35 @@ extern crate crypto;
 extern crate rpassword;
 extern crate ssh2;
 extern crate dirs;
-
-
-
-// IMPORTS
 use std::{io, process, fmt};
 
-// MODULES
-/// The library is divided into various modules:
-/// + `repository`: Structures to handle expegit repositories
-/// + `run`: General structure to run executions on remote hosts.
-/// + `async`: General worker structure allowing asynchronous execution of jobs from a queue.
-/// + `tasks`: Specific taskqueue and task structure for remote run of expegit executions.
-/// + `git`: Utilities to perform classic operations on git repositories
-/// + `misc`: Few miscellaneous functions publicly available
-/// + `utilities`: Few miscellaneous meant for private use of the different modules
+//////////////////////////////////////////////////////////////////////////////////////////// MODULES
 //mod utilities;
 pub mod ssh;
 //pub mod git;
 //pub mod tasks;
-//pub mod run;
+pub mod hosts;
 pub mod repository;
 pub mod misc;
+pub mod primitives;
+pub mod stateful;
+#[macro_use]
 pub mod error;
 
+///////////////////////////////////////////////////////////////////////////////////////////// MACROS
+#[macro_export]
+macro_rules! derive_from_error {
+    ($error:ident, $from_type:ty, $variant:ident) => {
+        impl From<$from_type> for $error {
+            fn from(err: $from_type) -> $error {
+                    $error::$variant(err)
+            }
+        }
+    }
+}
 
-// STATICS
+
+//////////////////////////////////////////////////////////////////////////////////////////// STATICS
 // The path to the script to launch in the experiment repo
 pub static SCRIPT_RPATH: &str = "run";
 // globs pattern for files to ignore in send
@@ -66,6 +72,8 @@ pub static FETCH_IGNORE_RPATH: &str = ".fetchignore";
 pub static PROFILES_FOLDER_RPATH: &str = ".runaway";
 // file containing known hosts keys
 pub static KNOWN_HOSTS_RPATH: &str = ".runaway/known_hosts";
+// file containing ssh configs
+pub static SSH_CONFIG_RPATH: &str = ".runaway/config";
 // file name of tar archive to send
 pub static SEND_ARCH_RPATH: &str = ".send.tar";
 // file name of tar to fetch
@@ -79,7 +87,7 @@ pub static EXCCONF_RPATH: &str = ".excconf";
 // folder containing the output data in an execution folder
 pub static DATA_RPATH: &str = "data";
 // file containing expegit configuration
-pub static CMPCONF_RPATH: &str = ".cmpconf";             
+pub static CMPCONF_RPATH: &str = ".cmpconf";
 
-
+////////////////////////////////////////////////////////////////////////////////////////////// ERROR
 use error::Error;
