@@ -11,8 +11,8 @@ use super::{CMPCONF_RPATH, DATA_RPATH, EXCCONF_RPATH, EXCS_RPATH, XPRP_RPATH};
 use crate::misc;
 use crate::primitives::Error as PrimErr;
 use crate::primitives::{
-    Dropper, FinishedOperation, Operation, OperationFuture, ProgressingOperation,
-    StartingOperation, UseResource,
+    Dropper, Finished, Operation, OperationFuture, Progressing,
+    Starting, UseResource,
 };
 use crate::stateful::Stateful;
 use chashmap::CHashMap;
@@ -652,16 +652,16 @@ struct CampaignResource {
 /// Asynchronous handle to the campaign resource. Allows to perform operations on the campaign, in
 /// an asynchronous fashion.
 #[derive(Clone)]
-pub struct CampaignResourceHandle {
+pub struct CampaignHandle {
     sender: Sender<CampaignOp>,
     dropper: Dropper<()>,
 }
 
-impl CampaignResourceHandle {
+impl CampaignHandle {
 
     /// This function spawns the thread that will handle all the repository operations using the
     /// CampaignResource, and returns a handle to it.
-    pub fn spawn_resource(camp_conf: CampaignConf) -> Result<CampaignResourceHandle, Error> {
+    pub fn spawn_resource(camp_conf: CampaignConf) -> Result<CampaignHandle, Error> {
         debug!("RepositoryResourceHandle: Start Repository Thread");
         let campaign = Campaign::from(camp_conf)?;
         let (sender, receiver): (Sender<CampaignOp>, Receiver<CampaignOp>) = unbounded();
@@ -693,7 +693,7 @@ impl CampaignResourceHandle {
             trace!("RepositoryResource: Operations channel disconnected. Leaving thread.");
             return ();
         });
-        return Ok(CampaignResourceHandle {
+        return Ok(CampaignHandle {
             sender,
             dropper: Dropper::from_handle(handle),
         });
@@ -702,7 +702,7 @@ impl CampaignResourceHandle {
     /// Async method, returning a future that ultimately resolves in a campaign, after having
     /// fetched the origin changes on the experiment repository.
     pub fn async_fetch_experiment(&self) -> FetchExperimentFuture {
-        let (recv, op) = FetchExperimentOp::from(Stateful::from(StartingOperation(())));
+        let (recv, op) = FetchExperimentOp::from(Stateful::from(Starting(())));
         return FetchExperimentFuture::new(op, self.sender.clone(), recv);
     }
 
@@ -714,7 +714,7 @@ impl CampaignResourceHandle {
         parameters: &ExecutionParameters,
         tags: Vec<&ExecutionTag>,
     ) -> CreateExecutionFuture {
-        let (recv, op) = CreateExecutionOp::from(Stateful::from(StartingOperation((
+        let (recv, op) = CreateExecutionOp::from(Stateful::from(Starting((
             commit.to_owned(),
             parameters.to_owned(),
             tags.into_iter().map(|a| a.to_owned()).collect::<Vec<_>>(),
@@ -729,7 +729,7 @@ impl CampaignResourceHandle {
         id: &ExecutionId,
         upd: &ExecutionUpdate,
     ) -> UpdateExecutionFuture {
-        let (recv, op) = UpdateExecutionOp::from(Stateful::from(StartingOperation((
+        let (recv, op) = UpdateExecutionOp::from(Stateful::from(Starting((
             id.to_owned(),
             upd.to_owned(),
         ))));
@@ -739,27 +739,27 @@ impl CampaignResourceHandle {
     /// Async method, returning a future that ultimately resolves in an execution configuration
     /// after it was finished.
     pub fn async_finish_execution(&self, id: &ExecutionId) -> FinishExecutionFuture {
-        let (recv, op) = FinishExecutionOp::from(Stateful::from(StartingOperation(id.to_owned())));
+        let (recv, op) = FinishExecutionOp::from(Stateful::from(Starting(id.to_owned())));
         return FinishExecutionFuture::new(op, self.sender.clone(), recv);
     }
 
     /// Async method, returning a future that ultimately resolves in an empty type after it was
     /// finished.
     pub fn async_delete_execution(&self, id: &ExecutionId) -> DeleteExecutionFuture {
-        let (recv, op) = DeleteExecutionOp::from(Stateful::from(StartingOperation(id.to_owned())));
+        let (recv, op) = DeleteExecutionOp::from(Stateful::from(Starting(id.to_owned())));
         return DeleteExecutionFuture::new(op, self.sender.clone(), recv);
     }
 
     /// Async method, returning a future that ultimately resolves in an execution configuration
     /// after it was finished.
     pub fn async_fetch_executions(&self) -> FetchExecutionsFuture {
-        let (recv, op) = FetchExecutionsOp::from(Stateful::from(StartingOperation(())));
+        let (recv, op) = FetchExecutionsOp::from(Stateful::from(Starting(())));
         return FetchExecutionsFuture::new(op, self.sender.clone(), recv);
     }
 
     /// Async method, returning a future that ultimately resolves in a vector of execution conf.
     pub fn async_get_executions(&self) -> GetExecutionsFuture {
-        let (recv, op) = GetExecutionsOp::from(Stateful::from(StartingOperation(())));
+        let (recv, op) = GetExecutionsOp::from(Stateful::from(Starting(())));
         return GetExecutionsFuture::new(op, self.sender.clone(), recv);
     }
 }
@@ -774,15 +774,15 @@ struct FetchExperimentMarker {}
 type FetchExperimentOp = Operation<FetchExperimentMarker>;
 impl UseResource<CampaignResource> for FetchExperimentOp {
     fn progress(mut self: Box<Self>, resource: &mut CampaignResource) {
-        if let Some(s) = self.state.to_state::<StartingOperation<()>>() {
+        if let Some(s) = self.state.to_state::<Starting<()>>() {
             trace!("FetchExperimentOp: Found Starting");
             let result = resource.campaign.fetch_experiment();
             self.state
-                .transition::<StartingOperation<()>, FinishedOperation<_>>(FinishedOperation(
+                .transition::<Starting<()>, Finished<_>>(Finished(
                     result.map_err(PrimErr::from),
                 ));
             resource.queue.push(self);
-        } else if let Some(s) = self.state.to_state::<FinishedOperation<CampaignConf>>() {
+        } else if let Some(s) = self.state.to_state::<Finished<CampaignConf>>() {
             trace!("FetchExperimentOp: Found Finished");
             let waker = self
                 .waker
@@ -811,18 +811,18 @@ impl UseResource<CampaignResource> for CreateExecutionOp {
     fn progress(mut self: Box<Self>, resource: &mut CampaignResource) {
         if let Some(s) = self
             .state
-            .to_state::<StartingOperation<CreateExecutionInput>>()
+            .to_state::<Starting<CreateExecutionInput>>()
         {
             trace!("CreateExecutionOp: Found Starting");
             let result = resource
                 .campaign
                 .create_execution((s.0).0, (s.0).1, (s.0).2);
             self.state
-                .transition::<StartingOperation<CreateExecutionInput>, FinishedOperation<_>>(
-                    FinishedOperation(result.map_err(PrimErr::from)),
+                .transition::<Starting<CreateExecutionInput>, Finished<_>>(
+                    Finished(result.map_err(PrimErr::from)),
                 );
             resource.queue.push(self);
-        } else if let Some(s) = self.state.to_state::<FinishedOperation<ExecutionConf>>() {
+        } else if let Some(s) = self.state.to_state::<Finished<ExecutionConf>>() {
             trace!("CreateExecutionOp: Found Finished");
             let waker = self
                 .waker
@@ -851,16 +851,16 @@ impl UseResource<CampaignResource> for UpdateExecutionOp {
     fn progress(mut self: Box<Self>, resource: &mut CampaignResource) {
         if let Some(s) = self
             .state
-            .to_state::<StartingOperation<UpdateExecutionInput>>()
+            .to_state::<Starting<UpdateExecutionInput>>()
         {
             trace!("UpdateExecutionOp: Found Starting");
             let result = resource.campaign.update_execution((s.0).0, (s.0).1);
             self.state
-                .transition::<StartingOperation<UpdateExecutionInput>, FinishedOperation<_>>(
-                    FinishedOperation(result.map_err(PrimErr::from)),
+                .transition::<Starting<UpdateExecutionInput>, Finished<_>>(
+                    Finished(result.map_err(PrimErr::from)),
                 );
             resource.queue.push(self);
-        } else if let Some(s) = self.state.to_state::<FinishedOperation<ExecutionConf>>() {
+        } else if let Some(s) = self.state.to_state::<Finished<ExecutionConf>>() {
             trace!("UpdateExecutionOp: Found Finished");
             let waker = self
                 .waker
@@ -886,15 +886,15 @@ struct FinishExecutionMarker {}
 type FinishExecutionOp = Operation<FinishExecutionMarker>;
 impl UseResource<CampaignResource> for FinishExecutionOp {
     fn progress(mut self: Box<Self>, resource: &mut CampaignResource) {
-        if let Some(s) = self.state.to_state::<StartingOperation<ExecutionId>>() {
+        if let Some(s) = self.state.to_state::<Starting<ExecutionId>>() {
             trace!("FinishExecutionOp: Found Starting");
             let result = resource.campaign.finish_execution(s.0);
             self.state
-                .transition::<StartingOperation<ExecutionId>, FinishedOperation<_>>(
-                    FinishedOperation(result.map_err(PrimErr::from)),
+                .transition::<Starting<ExecutionId>, Finished<_>>(
+                    Finished(result.map_err(PrimErr::from)),
                 );
             resource.queue.push(self);
-        } else if let Some(s) = self.state.to_state::<FinishedOperation<ExecutionConf>>() {
+        } else if let Some(s) = self.state.to_state::<Finished<ExecutionConf>>() {
             trace!("FinishExecutionOp: Found Finished");
             let waker = self
                 .waker
@@ -919,15 +919,15 @@ struct DeleteExecutionMarker {}
 type DeleteExecutionOp = Operation<DeleteExecutionMarker>;
 impl UseResource<CampaignResource> for DeleteExecutionOp {
     fn progress(mut self: Box<Self>, resource: &mut CampaignResource) {
-        if let Some(s) = self.state.to_state::<StartingOperation<ExecutionId>>() {
+        if let Some(s) = self.state.to_state::<Starting<ExecutionId>>() {
             trace!("DeleteExecutionOp: Found Starting");
             let result = resource.campaign.delete_execution(s.0);
             self.state
-                .transition::<StartingOperation<ExecutionId>, FinishedOperation<_>>(
-                    FinishedOperation(result.map_err(PrimErr::from)),
+                .transition::<Starting<ExecutionId>, Finished<_>>(
+                    Finished(result.map_err(PrimErr::from)),
                 );
             resource.queue.push(self);
-        } else if let Some(s) = self.state.to_state::<FinishedOperation<()>>() {
+        } else if let Some(s) = self.state.to_state::<Finished<()>>() {
             trace!("DeleteExecutionOp: Found Finished");
             let waker = self
                 .waker
@@ -954,17 +954,17 @@ struct FetchExecutionsMarker {}
 type FetchExecutionsOp = Operation<FetchExecutionsMarker>;
 impl UseResource<CampaignResource> for FetchExecutionsOp {
     fn progress(mut self: Box<Self>, resource: &mut CampaignResource) {
-        if let Some(s) = self.state.to_state::<StartingOperation<()>>() {
+        if let Some(s) = self.state.to_state::<Starting<()>>() {
             trace!("FetchExecutionsOp: Found Starting");
             let result = resource.campaign.fetch_executions();
             self.state
-                .transition::<StartingOperation<()>, FinishedOperation<_>>(FinishedOperation(
+                .transition::<Starting<()>, Finished<_>>(Finished(
                     result.map_err(PrimErr::from),
                 ));
             resource.queue.push(self);
         } else if let Some(s) = self
             .state
-            .to_state::<FinishedOperation<Vec<ExecutionConf>>>()
+            .to_state::<Finished<Vec<ExecutionConf>>>()
         {
             trace!("FetchExecutionsOp: Found Finished");
             let waker = self
@@ -992,17 +992,17 @@ struct GetExecutionsMarker {}
 type GetExecutionsOp = Operation<GetExecutionsMarker>;
 impl UseResource<CampaignResource> for GetExecutionsOp {
     fn progress(mut self: Box<Self>, resource: &mut CampaignResource) {
-        if let Some(s) = self.state.to_state::<StartingOperation<()>>() {
+        if let Some(s) = self.state.to_state::<Starting<()>>() {
             trace!("GetExecutionsOp: Found Starting");
             let result = resource.campaign.get_executions();
             self.state
-                .transition::<StartingOperation<()>, FinishedOperation<_>>(FinishedOperation(
+                .transition::<Starting<()>, Finished<_>>(Finished(
                     result.map_err(PrimErr::from),
                 ));
             resource.queue.push(self);
         } else if let Some(s) = self
             .state
-            .to_state::<FinishedOperation<Vec<ExecutionConf>>>()
+            .to_state::<Finished<Vec<ExecutionConf>>>()
         {
             trace!("GetExecutionsOp: Found Finished");
             let waker = self
@@ -1126,7 +1126,7 @@ mod tests {
             Url::parse("git://localhost:9418/expe_repo").unwrap(),
         )
         .unwrap();
-        let repo = CampaignResourceHandle::spawn_resource(repo.conf).unwrap();
+        let repo = CampaignHandle::spawn_resource(repo.conf).unwrap();
         let commit = get_expe_repo_head();
         let exc = block_on(repo.async_create_execution(
             &ExperimentCommit(commit.clone()),
@@ -1162,7 +1162,7 @@ mod tests {
              Url::parse("git://localhost:9418/expe_repo").unwrap(),
          )
          .unwrap();
-         let repo = CampaignResourceHandle::spawn_resource(repo.conf).unwrap();
+         let repo = CampaignHandle::spawn_resource(repo.conf).unwrap();
 
          use futures::task::SpawnExt;
          let mut executor = futures::executor::ThreadPool::new().unwrap();
@@ -1210,7 +1210,7 @@ mod tests {
             Url::parse("git://localhost:9418/expe_repo").unwrap(),
         )
         .unwrap();
-        let repo = CampaignResourceHandle::spawn_resource(repo.conf).unwrap();
+        let repo = CampaignHandle::spawn_resource(repo.conf).unwrap();
         let commit = get_expe_repo_head();
         let exc = block_on(repo.async_create_execution(
             &ExperimentCommit(commit.clone()),
@@ -1258,7 +1258,7 @@ mod tests {
             Url::parse("git://localhost:9418/expe_repo").unwrap(),
         )
         .unwrap();
-        let repo = CampaignResourceHandle::spawn_resource(repo.conf).unwrap();
+        let repo = CampaignHandle::spawn_resource(repo.conf).unwrap();
         let commit = get_expe_repo_head();
         let exc = block_on(repo.async_create_execution(
             &ExperimentCommit(commit.clone()),
@@ -1302,7 +1302,7 @@ mod tests {
             Url::parse("git://localhost:9418/expe_repo").unwrap(),
         )
         .unwrap();
-        let repo = CampaignResourceHandle::spawn_resource(repo.conf).unwrap();
+        let repo = CampaignHandle::spawn_resource(repo.conf).unwrap();
         let commit = get_expe_repo_head();
         let exc = block_on(repo.async_create_execution(
             &ExperimentCommit(commit.clone()),
