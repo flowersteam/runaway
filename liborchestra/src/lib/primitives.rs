@@ -89,44 +89,44 @@ pub trait OperationsBound = Debug + Send + 'static;
 
 /// Type representing an operation in a Starting state.
 #[derive(Clone, Debug, State)]
-pub struct StartingOperation<A>(pub A)
+pub struct Starting<A>(pub A)
 where
     A: OperationsBound;
-impl<A> StartingOperation<A>
+impl<A> Starting<A>
 where
     A: OperationsBound,
 {
     // Starts a new operation from a given input.
-    fn from_input(input: A) -> StartingOperation<A> {
-        return StartingOperation(input);
+    fn from_input(input: A) -> Starting<A> {
+        return Starting(input);
     }
 }
 /// Type representing an operation in a Progressing state.
 #[derive(Clone, Debug, State)]
-pub struct ProgressingOperation<B>(pub B)
+pub struct Progressing<B>(pub B)
 where
     B: OperationsBound;
 /// Type representing an operation in a Finished state.
 #[derive(Clone, Debug, State)]
-pub struct FinishedOperation<A>(pub Result<A, Error>)
+pub struct Finished<A>(pub Result<A, Error>)
 where
     A: OperationsBound;
 
 // Allowed transition between operation states
-impl<A, B> TransitionsTo<ProgressingOperation<B>> for StartingOperation<A>
+impl<A, B> TransitionsTo<Progressing<B>> for Starting<A>
 where
     A: OperationsBound,
     B: OperationsBound,
 {
 }
-impl<B> TransitionsTo<ProgressingOperation<B>> for ProgressingOperation<B> where B: OperationsBound {}
-impl<B, C> TransitionsTo<FinishedOperation<C>> for ProgressingOperation<B>
+impl<B> TransitionsTo<Progressing<B>> for Progressing<B> where B: OperationsBound {}
+impl<B, C> TransitionsTo<Finished<C>> for Progressing<B>
 where
     B: OperationsBound,
     C: OperationsBound,
 {
 }
-impl<A, C> TransitionsTo<FinishedOperation<C>> for StartingOperation<A>
+impl<A, C> TransitionsTo<Finished<C>> for Starting<A>
 where
     A: OperationsBound,
     C: OperationsBound,
@@ -152,6 +152,10 @@ pub struct Dropper<M>(Arc<Mutex<Option<JoinHandle<M>>>>);
 impl<M> Dropper<M> {
     pub fn from_handle(other: JoinHandle<M>) -> Dropper<M> {
         return Dropper(Arc::new(Mutex::new(Some(other))));
+    }
+
+    pub fn strong_count(&self) -> usize{
+        return Arc::strong_count(&self.0);
     }
 }
 impl<M> Drop for Dropper<M> {
@@ -186,8 +190,8 @@ where
     Operation<M>: UseResource<R>,
     M: 'static,
 {
-    state: Arc<Mutex<Cell<OperationFutureState<M, R>>>>,
-    output_phantom: PhantomData<O>,
+    _state: Arc<Mutex<Cell<OperationFutureState<M, R>>>>,
+    _output_phantom: PhantomData<O>,
 }
 impl<M, R, O> OperationFuture<M, R, O>
 where
@@ -199,12 +203,12 @@ where
         ope: Operation<M>,
         sender: Sender<Box<dyn UseResource<R>>>,
         receiver: Receiver<Operation<M>>,
-    ) -> OperationFuture<M, R, O> {
+    ) -> Self{
         return OperationFuture {
-            state: Arc::new(Mutex::new(Cell::new(OperationFutureState::Starting((
+            _state: Arc::new(Mutex::new(Cell::new(OperationFutureState::Starting((
                 ope, sender, receiver,
             ))))),
-            output_phantom: PhantomData,
+            _output_phantom: PhantomData,
         };
     }
 }
@@ -220,7 +224,7 @@ where
 
     fn poll(mut self: Pin<&mut Self>, wake: &Waker) -> Poll<Self::Output> {
         loop {
-            let state = self.state.lock().unwrap();
+            let state = self._state.lock().unwrap();
             match state.replace(OperationFutureState::Hazardous) {
                 OperationFutureState::Starting((ope, sender, receiver)) => {
                     let mut ope = ope;
@@ -255,8 +259,7 @@ where
                             ))));
                         }
                     };
-                    if let Some(FinishedOperation(o)) = ope.state.to_state::<FinishedOperation<O>>()
-                    {
+                    if let Some(Finished(o)) = ope.state.to_state::<Finished<O>>(){
                         return Poll::Ready(o.map_err(|e| Error::Operation(format!("{}", e))));
                     } else {
                         panic!("Operation retrieved in a the wrong state.");
@@ -314,11 +317,11 @@ mod tests {
         impl MyResourceHandle {
             fn async_op_1(&self) -> MyOp1Fut {
                 let (recv, op) =
-                    MyOp1::from(Stateful::from(StartingOperation("Starting".to_owned())));
+                    MyOp1::from(Stateful::from(Starting("Starting".to_owned())));
                 return MyOp1Fut::new(op, self.sender.clone(), recv);
             }
             fn async_op_2(&self) -> MyOp2Fut {
-                let (recv, op) = MyOp2::from(Stateful::from(StartingOperation(0 as u32)));
+                let (recv, op) = MyOp2::from(Stateful::from(Starting(0 as u32)));
                 return MyOp2Fut::new(op, self.sender.clone(), recv);
             }
         }
@@ -328,21 +331,21 @@ mod tests {
         type MyOp1 = Operation<MyOp1Marker>;
         impl UseResource<MyResource> for MyOp1 {
             fn progress(mut self: Box<Self>, resource: &mut MyResource) {
-                if let Some(s) = self.state.to_state::<StartingOperation<String>>() {
+                if let Some(s) = self.state.to_state::<Starting<String>>() {
                     println!("Op1 received in state Starting: {:?}", s);
                     self.state
-                        .transition::<StartingOperation<String>, ProgressingOperation<_>>(
-                            ProgressingOperation("Progressing".to_owned()),
+                        .transition::<Starting<String>, Progressing<_>>(
+                            Progressing("Progressing".to_owned()),
                         );
                     resource.queue.push(self);
-                } else if let Some(s) = self.state.to_state::<ProgressingOperation<String>>() {
+                } else if let Some(s) = self.state.to_state::<Progressing<String>>() {
                     println!("Op1 received in state Progressing: {:?}", s);
                     self.state
-                        .transition::<ProgressingOperation<String>, FinishedOperation<_>>(
-                            FinishedOperation(Ok("Succeeded".to_owned())),
+                        .transition::<Progressing<String>, Finished<_>>(
+                            Finished(Ok("Succeeded".to_owned())),
                         );
                     resource.queue.push(self);
-                } else if let Some(s) = self.state.to_state::<FinishedOperation<String>>() {
+                } else if let Some(s) = self.state.to_state::<Finished<String>>() {
                     println!("Op1 received in state Finished: {:?}", s);
                     println!("Sending back Op1");
                     let waker = self
@@ -365,21 +368,21 @@ mod tests {
         type MyOp2 = Operation<MyOp2Marker>;
         impl UseResource<MyResource> for MyOp2 {
             fn progress(mut self: Box<Self>, resource: &mut MyResource) {
-                if let Some(s) = self.state.to_state::<StartingOperation<u32>>() {
+                if let Some(s) = self.state.to_state::<Starting<u32>>() {
                     println!("Op2 received in state Starting: {:?}", s);
                     self.state
-                        .transition::<StartingOperation<u32>, ProgressingOperation<_>>(
-                            ProgressingOperation(1 as u32),
+                        .transition::<Starting<u32>, Progressing<_>>(
+                            Progressing(1 as u32),
                         );
                     resource.queue.push(self);
-                } else if let Some(s) = self.state.to_state::<ProgressingOperation<u32>>() {
+                } else if let Some(s) = self.state.to_state::<Progressing<u32>>() {
                     println!("Op2 received in state Progressing: {:?}", s);
                     self.state
-                        .transition::<ProgressingOperation<u32>, FinishedOperation<_>>(
-                            FinishedOperation(Ok(2 as u32)),
+                        .transition::<Progressing<u32>, Finished<_>>(
+                            Finished(Ok(2 as u32)),
                         );
                     resource.queue.push(self);
-                } else if let Some(s) = self.state.to_state::<FinishedOperation<u32>>() {
+                } else if let Some(s) = self.state.to_state::<Finished<u32>>() {
                     println!("Op2 received in state Finished: {:?}", s);
                     println!("Sending back Op2");
                     let waker = self
