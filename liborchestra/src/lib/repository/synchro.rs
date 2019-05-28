@@ -48,52 +48,38 @@ pub struct NullSynchronizer {}
 
 
 impl SyncRepository for NullSynchronizer {
-    fn init_repository_hook(&self, cmp: &CampaignConf) -> Result<(), Error> {
+    fn init_repository_hook(&self, _cmp: &CampaignConf) -> Result<(), Error> {
         debug!("NullSynchronizer: Repository initialization hook called.");
-        match self {
-            Null => Ok(()),
-        }
+        Ok(())
     }
 
-    fn fetch_experiment_hook(&self, cmp: &CampaignConf) -> Result<(), Error> {
+    fn fetch_experiment_hook(&self, _cmp: &CampaignConf) -> Result<(), Error> {
         debug!("NullSynchronizer: Fetch experiment hook called.");
-        match self {
-            Null => Ok(()),
-        }
+        Ok(())
     }
 
-    fn create_execution_hook(&self, exc: &ExecutionConf) -> Result<(), Error> {
+    fn create_execution_hook(&self, _exc: &ExecutionConf) -> Result<(), Error> {
         debug!("NullSynchronizer: Execution creation hook called.");
-        match self {
-            Null => Ok(()),
-        }
+        Ok(())
     }
 
-    fn update_execution_hook(&self, exc: &ExecutionConf) -> Result<(), Error> {
+    fn update_execution_hook(&self, _exc: &ExecutionConf) -> Result<(), Error> {
         debug!("NullSynchronizer: Execution update hook called.");
-        match self {
-            Null => Ok(()),
-        }
+        Ok(())
     }
 
-    fn delete_execution_hook(&self, exc: &ExecutionConf) -> Result<(), Error> {
+    fn delete_execution_hook(&self, _exc: &ExecutionConf) -> Result<(), Error> {
         debug!("NullSynchronizer: Execution deletion hook called.");
-        match self {
-            Null => Ok(()),
-        }
+        Ok(())
     }
 
-    fn finish_execution_hook(&self, exc: &ExecutionConf) -> Result<(), Error> {
+    fn finish_execution_hook(&self, _exc: &ExecutionConf) -> Result<(), Error> {
         debug!("NullSynchronizer: Execution finished hook called.");
-        match self {
-            Null => Ok(()),
-        }
+        Ok(())
     }
 
-    fn fetch_executions_hook(&self, cmp: &CampaignConf) -> Result<(), Error> {
+    fn fetch_executions_hook(&self, _cmp: &CampaignConf) -> Result<(), Error> {
         debug!("NullSynchronizer: Execution fetched hook called.");
-        match self {
-            Null => Ok(()),
-        }
+        Ok(())
     }
 }

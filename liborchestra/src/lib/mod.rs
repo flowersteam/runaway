@@ -33,18 +33,17 @@ extern crate crypto;
 extern crate rpassword;
 extern crate ssh2;
 extern crate dirs;
-use std::{io, process, fmt};
 
 //////////////////////////////////////////////////////////////////////////////////////////// MODULES
 //mod utilities;
 pub mod ssh;
 //pub mod git;
-//pub mod tasks;
 pub mod hosts;
 pub mod repository;
 pub mod misc;
 pub mod primitives;
 pub mod stateful;
+pub mod jobs;
 #[macro_use]
 pub mod error;
 

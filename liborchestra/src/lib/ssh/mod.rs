@@ -19,30 +19,23 @@
 use ssh2::{
     Session,
     Channel,
-    KnownHosts,
     KnownHostFileKind,
     CheckResult,
     MethodType,
     KnownHostKeyFormat};
 use std::{
-    net::{TcpListener, TcpStream, SocketAddr, ToSocketAddrs, Shutdown},
+    net::{TcpStream, SocketAddr, ToSocketAddrs, Shutdown},
     sync::{
         Arc,
-        Mutex,
-        mpsc,
         atomic::{AtomicBool, Ordering},
     },
-    cell::RefCell,
     thread,
-    rc::Rc,
     io,
-    fmt::{Debug, Formatter},
     pin::Pin,
     task::{Poll, Waker},
-    io::{prelude::*, BufReader, BufWriter,copy, ErrorKind},
+    io::{prelude::*, BufReader, copy, ErrorKind},
     process::{Stdio, Command, Output},
     os::unix::process::ExitStatusExt,
-    time::{Instant, Duration},
     error,
     fmt,
     path::PathBuf,
@@ -53,7 +46,6 @@ use dirs;
 use crate::KNOWN_HOSTS_RPATH;
 use uuid::Uuid;
 use futures::future::Future;
-use chashmap::CHashMap;
 use crate::derive_from_error;
 use crate::primitives::{
     Dropper, Finished, Operation, OperationFuture, Progressing,
@@ -61,7 +53,6 @@ use crate::primitives::{
 };
 use crossbeam::channel::{unbounded, Receiver, Sender, TryRecvError};
 use crate::stateful::Stateful;
-use std::borrow::Cow::Owned;
 use std::intrinsics::transmute;
 
 ///////////////////////////////////////////////////////////////////////////////////////////// MODULE
@@ -148,8 +139,8 @@ impl ProxyCommandForwarder {
         };
         let command_string = command.to_owned();
         let address = stream.local_addr().unwrap();
-        let mut keep_forwarding = Arc::new(AtomicBool::new(true));
-        let mut kf = keep_forwarding.clone();
+        let keep_forwarding = Arc::new(AtomicBool::new(true));
+        let kf = keep_forwarding.clone();
         let mut cmd = command.split_whitespace().collect::<Vec<_>>();
         let args = cmd.split_off(1);
         let cmd = cmd.pop().unwrap();
@@ -162,16 +153,15 @@ impl ProxyCommandForwarder {
             .unwrap();
         trace!("Spawning proxy command forwarding thread");
         let handle = std::thread::spawn(move || {
-            let (mut socket, addr) = stream.accept().unwrap();
+            let (socket, _) = stream.accept().unwrap();
             let mut socket1 = socket.try_clone().unwrap();
             let mut socket2 = socket.try_clone().unwrap();
-            let mut kf1 = kf.clone();
-            let mut kf2 = kf.clone();
-            let mut kf3 = kf.clone();
+            let kf1 = kf.clone();
+            let kf2 = kf.clone();
+            let kf3 = kf.clone();
             let mut command_stdin = command.stdin.take().unwrap();
             let mut command_stdout = command.stdout.take().unwrap();
             let h1 = std::thread::spawn(move || {
-                let mut buf = [0; 2048];
                 while kf1.load(Ordering::Relaxed) {
                     if std::io::copy(&mut command_stdout, &mut socket1).is_err(){
                         break
@@ -183,7 +173,6 @@ impl ProxyCommandForwarder {
                 trace!("Exiting command -> socket thread");
             });
             let h2 = std::thread::spawn(move || {
-                let mut buf = [0; 2048];
                 while kf2.load(Ordering::Relaxed) {
                     if std::io::copy(&mut socket2, &mut command_stdin).is_err(){
                         break
@@ -196,7 +185,7 @@ impl ProxyCommandForwarder {
             });
             let h3 = std::thread::spawn(move || {
                 while kf3.load(Ordering::Relaxed) {
-                    if let Ok(Some(e)) = command.try_wait() {
+                    if let Ok(Some(_)) = command.try_wait() {
                         trace!("Proxy Command has stopped. Exiting");
                         kf3.store(false, Ordering::Relaxed);
                     }
@@ -342,7 +331,7 @@ impl Remote {
             .map_err(|_| Error::ConnectionFailed(format!("Failed to preferences")))?;
         trace!("Remote: Performing handshake");
         session.handshake(stream)
-            .map_err(|e| Error::ConnectionFailed(format!("Failed to perform handshake.")))?;
+            .map_err(|_| Error::ConnectionFailed(format!("Failed to perform handshake.")))?;
         {
             trace!("Remote: Checking host key");
             let mut known_hosts = session.known_hosts().unwrap();
@@ -352,7 +341,7 @@ impl Remote {
             known_hosts.read_file(known_hosts_path.as_path(),
                                   KnownHostFileKind::OpenSSH)
                 .map_err(|e| Error::ConnectionFailed(format!("Failed to reach knownhost file:\n{}", e)))?;
-            let (key, key_type) = session.host_key()
+            let (key, _) = session.host_key()
                 .ok_or(Error::ConnectionFailed(format!("Host did not provide a key.")))?;
             match known_hosts.check(host, key) {
                 CheckResult::Match => {}
@@ -367,7 +356,7 @@ impl Remote {
                                     key,
                                     "",
                                     KnownHostKeyFormat::SshRsa)
-                        .map_err(|e| Error::ConnectionFailed(format!("Failed to add the host \
+                        .map_err(|_| Error::ConnectionFailed(format!("Failed to add the host \
                         key in the registry")))?;
                     known_hosts.write_file(known_hosts_path.as_path(), KnownHostFileKind::OpenSSH)
                         .map_err(|_| Error::ConnectionFailed(format!("Failed to write the \
@@ -409,7 +398,7 @@ impl Remote {
         debug!("Remote: Starting execution: {}", command);
         let mut channel = match self.session().channel_session() {
             Ok(c) => c,
-            Err(e) => return Err(Error::ExecutionFailed(format!("Failed to open channel")))
+            Err(_) => return Err(Error::ExecutionFailed(format!("Failed to open channel")))
         };
         if channel.exec(&command).is_err() {
             return Err(Error::ExecutionFailed(format!("Failed to exec command {}", command)))
@@ -444,7 +433,7 @@ impl Remote {
                 self.session().set_blocking(true);
                 return Err(Error::ExecutionFailed(format!("Failed to read stdout: {}", e)))
             }
-            Ok(c) => {}
+            Ok(_) => {}
         }
         if let Err(e) = eof {
             if e.code() as i64 == -37 {
@@ -457,14 +446,14 @@ impl Remote {
                 return Err(Error::ExecutionFailed(format!("Failed to acquire eof")));
             }
         }
-        let eof = eof.unwrap();
+        //let eof = eof.unwrap(); TODO: Remove This
         self.session().set_blocking(true);
         let ecode = match chan.exit_status() {
             Ok(c) => c,
-            Err(e) => return Err(Error::ExecutionFailed(format!("Failed to get exit code")))
+            Err(_) => return Err(Error::ExecutionFailed(format!("Failed to get exit code")))
         };
         output.status = ExitStatusExt::from_raw(ecode);
-        if let Err(e) = chan.close() {
+        if let Err(_) = chan.close() {
             return Err(Error::ExecutionFailed(format!("Failed to close channel")))
         }
         if let Err(_) = chan.wait_close() {
@@ -477,12 +466,12 @@ impl Remote {
         debug!("Remote: Starting send of {} to {}",
                local_path.to_str().unwrap(),
                remote_path.to_str().unwrap());
-        let mut local_file = match File::open(local_path) {
+        let local_file = match File::open(local_path) {
             Ok(f) => f,
             Err(_) => return Err(Error::ScpSendFailed(format!("Failed to open local file"))),
         };
         let bytes = local_file.metadata().unwrap().len();
-        let mut chan = match self.session().scp_send(&remote_path,0o755,bytes,None) {
+        let chan = match self.session().scp_send(&remote_path,0o755,bytes,None) {
             Ok(chan) => chan,
             Err(_) => return Err(Error::ScpSendFailed(format!("Failed to open scp send channel"))),
         };
@@ -519,7 +508,7 @@ impl Remote {
                     return Ok(())
                 }
             }
-            (b, Err(e)) => {
+            (_, Err(_)) => {
                 self.session().set_blocking(true);
                 return Err(Error::ScpSendFailed(format!("Failed to copy")));
             }
@@ -531,11 +520,11 @@ impl Remote {
                remote_path.to_str().unwrap(),
                local_path.to_str().unwrap());
         std::fs::remove_file(&local_path);
-        let mut local_file = match OpenOptions::new().write(true).create_new(true).open(local_path) {
+        let local_file = match OpenOptions::new().write(true).create_new(true).open(local_path) {
             Ok(f) => f,
             Err(_) => return Err(Error::ScpFetchFailed(format!("Failed to open local file")))
         };
-        let (mut chan, stats) = match self.session().scp_recv(&remote_path) {
+        let (chan, stats) = match self.session().scp_recv(&remote_path) {
             Ok(c) => c,
             Err(_) => return Err(Error::ScpFetchFailed(format!("Failed to start scp recv")))
         };
@@ -572,7 +561,7 @@ impl Remote {
                     return Ok(())
                 }
             }
-            (b, Err(e)) => {
+            (_, Err(_)) => {
                 self.session().set_blocking(true);
                 return Err(Error::ScpFetchFailed(format!("Failed to copy data")));
             }
@@ -611,7 +600,7 @@ impl RemoteHandle {
         let (rs, rr): (Sender<Result<String, Error>>, Receiver<Result<String, Error>>) = unbounded();
         let handle = thread::spawn(move || {
             trace!("RemoteResource: Instantiating the resource");
-            let mut remote = match Remote::from_profile(profile){
+            let remote = match Remote::from_profile(profile){
                 Ok(r) => r,
                 Err(e) => {
                     rs.send(Err(e));
@@ -735,7 +724,7 @@ impl UseResource<RemoteResource> for ExecOp {
                     resource.queue.push(self);
                 }
             }
-        } else if let Some(s) = self.state.to_state::<Finished<Output>>() {
+        } else if let Some(_) = self.state.to_state::<Finished<Output>>() {
             trace!("ExecOp: Found Finished");
             let waker = self
                 .waker
@@ -796,7 +785,7 @@ impl UseResource<RemoteResource> for ScpSendOp {
                     resource.queue.push(self);
                 }
             }
-        } else if let Some(s) = self.state.to_state::<Finished<()>>() {
+        } else if let Some(_) = self.state.to_state::<Finished<()>>() {
             trace!("ScpSendOp: Found Finished");
             let waker = self
                 .waker
@@ -857,7 +846,7 @@ impl UseResource<RemoteResource> for ScpFetchOp {
                     resource.queue.push(self);
                 }
             }
-        } else if let Some(s) = self.state.to_state::<Finished<()>>() {
+        } else if let Some(_) = self.state.to_state::<Finished<()>>() {
             trace!("ScpFetchOp: Found Finished");
             let waker = self
                 .waker
@@ -907,7 +896,7 @@ fn bufread_bufcopy<R: BufRead, W:Write>(reader: &mut R, writer: &mut W) -> (u64,
             }
         }
     }
-    return (bytes, Ok(()))
+    //return (bytes, Ok(()))
 }
 
 // This function does the same for an unbuffered read.
@@ -951,7 +940,7 @@ mod test {
 
     #[test]
     fn test_proxy_command_forwarder() {
-        let (pxc, address) = ProxyCommandForwarder::from_command("echo kikou").unwrap();
+        let (_, address) = ProxyCommandForwarder::from_command("echo kikou").unwrap();
         let mut stream = TcpStream::connect(address).unwrap();
         let mut buf = [0 as u8; 5];
         stream.read(&mut buf).unwrap();
@@ -997,7 +986,7 @@ mod test {
             let local_f = PathBuf::from("/tmp/local.txt");
             let remote_f = PathBuf::from("/tmp/remote.txt");
             let bef = std::time::Instant::now();
-            let connection = await!(remote.async_scp_send( &local_f, &remote_f)).unwrap();
+            await!(remote.async_scp_send( &local_f, &remote_f)).unwrap();
             let dur = std::time::Instant::now().duration_since(bef);
             println!("Duration: {:?}", dur);
             println!("Check if files are the same");
@@ -1034,7 +1023,7 @@ mod test {
             let local_f = PathBuf::from("/tmp/local.txt");
             let remote_f = PathBuf::from("/tmp/remote.txt");
             let bef = std::time::Instant::now();
-            let connection = await!(remote.async_scp_fetch( &remote_f, &local_f)).unwrap();
+            await!(remote.async_scp_fetch( &remote_f, &local_f)).unwrap();
             let dur = std::time::Instant::now().duration_since(bef);
             println!("Duration = {:?}", dur);
             println!("checking files");
@@ -1068,7 +1057,7 @@ mod test {
         use futures::task::SpawnExt;
         let mut executor = executor::ThreadPool::new().unwrap();
         let mut handles = Vec::new();
-        for i in (1..10){
+        for _ in 1..10{
             handles.push(executor.spawn_with_handle(connect_and_ls(remote.clone())).unwrap())
         }
         let bef = std::time::Instant::now();

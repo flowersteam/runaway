@@ -21,13 +21,13 @@ impl error::Error for Error {}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            InvalidRepository => write!(f, "Invalid expegit repository"),
-            Unknown => write!(f, "Unknown error occured"),
+            Error::InvalidRepository => write!(f, "Invalid expegit repository"),
+            Error::Unknown => write!(f, "Unknown error occured"),
         }
     }
 }
 
-// FUNCTIONS
+////////////////////////////////////////////////////////////////////////////////////////// FUNCTIONS
 
 /// Returns a tuple containing the git and git-lfs versions.
 pub fn check_git_lfs_versions() -> Result<(String, String), crate::Error> {
@@ -118,13 +118,12 @@ pub fn get_hostname() -> Result<String, crate::Error> {
 }
 
 
+
 // TESTS
 #[cfg(test)]
 mod test {
     use std::fs;
     use std::path;
-    use std::collections::HashSet;
-    use std::iter::FromIterator;
     use super::*;
 
     // Modify the files with the variables that suits your setup to run the test.

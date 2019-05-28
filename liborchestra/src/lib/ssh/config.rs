@@ -351,7 +351,7 @@ impl<'s> Iterator for Lexer<'s>{
 impl<'s> Lexer<'s> {
     // Creates a lexer from a string.
     fn from(string: &str) -> Lexer {
-        let mut iter = string.char_indices().peekable();
+        let iter = string.char_indices().peekable();
         Lexer {
             string,
             iter,
@@ -451,7 +451,7 @@ impl<'s> Lexer<'s> {
             Some((_, ' ')) => {
                 panic!("Consume word called on wrong character");
             }
-            Some((b, chr)) => {
+            Some((b, _)) => {
                 (ret.1).move_begining(b);
                 (ret.1).move_end(b);
             }
@@ -548,7 +548,7 @@ impl<'s> Iterator for Parser<'s>{
                     Some(Ok(Token(TokenType::Tab, _))) => self.consume_clause(),
                     Some(Ok(Token(TokenType::NewLine, _))) => self.consume_newline(),
                     Some(Ok(Token(TokenType::Comment, _))) => self.consume_comment(),
-                    Some(Err(e)) => return Some(Err(self.iter.next().unwrap().unwrap_err())),
+                    Some(Err(_)) => return Some(Err(self.iter.next().unwrap().unwrap_err())),
                     None => return None
                 };
                 if let Some(n) = ret{
@@ -568,7 +568,7 @@ impl<'s> Parser<'s> {
     // Creates a parser out of a lexer.
     fn from_lexer(lexer: Lexer) -> Parser{
         let string = lexer.string.clone();
-        let mut iter = lexer.peekable();
+        let iter = lexer.peekable();
         Parser {
             string,
             iter,
@@ -620,11 +620,11 @@ impl<'s> Parser<'s> {
                 Some(Ok(Token(TokenType::Tab, _))) => {
                     self.iter.next();
                 }
-                Some(Ok(Token(TokenType::Comment, ib))) => {
+                Some(Ok(Token(TokenType::Comment, _))) => {
                     self.iter.next();
                     return Some(Ok(ret));
                 }
-                Some(Err(e)) => {return None},
+                Some(Err(_)) => {return None},
                 None => {
                     self.iter.next();
                     return Some(Ok(ret));
@@ -672,7 +672,7 @@ impl<'s> Parser<'s> {
                     IndexedSlice::end(self.string).to_owned(),
                     "Expected a clause name here.".to_owned())));
             }
-            Some(Err(e)) => return None
+            Some(Err(_)) => return None
         }
     }
 
@@ -719,7 +719,7 @@ impl<'s> Parser<'s> {
                 return Some(Err(Error::Parser(ib.to_owned(),
                                               "Expected a newline here".to_owned())))
             }
-            Some(Err(e)) => return None
+            Some(Err(_)) => return None
         }
     }
 
@@ -765,7 +765,7 @@ impl<'s> Parser<'s> {
                 return Some(Err(Error::Parser(ib.to_owned(),
                                               "Expected a newline here.".to_owned())))
             }
-            Some(Err(e)) => return None
+            Some(Err(_)) => return None
         }
     }
 
@@ -810,7 +810,7 @@ impl<'s> Parser<'s> {
                 return Some(Err(Error::Parser(ib.to_owned(),
                                               "Expected a newline here".to_owned())))
             }
-            Some(Err(e)) => {return None}
+            Some(Err(_)) => {return None}
         }
     }
 
@@ -841,7 +841,7 @@ impl<'s> Parser<'s> {
                 return Some(Err(Error::Parser(IndexedSlice::end(self.string).to_owned(),
                                               "Expected a command here".to_owned())));
             }
-            Some(Err(e)) => return None
+            Some(Err(_)) => return None
         }
         // We consume the upcoming proxycommand words
         loop {
@@ -863,7 +863,7 @@ impl<'s> Parser<'s> {
                     return Some(Err(Error::Parser(ib.to_owned(),
                                                   "Expected word, comment or newline here".to_owned())))
                 }
-                Some(Err(e)) => return None
+                Some(Err(_)) => return None
             }
         }
     }
@@ -913,7 +913,7 @@ impl<'s> Iterator for ConfigReader<'s>{
                    return Some(Err(Error::Reader(ib.to_owned(),
                                                  "Expected Host".to_owned())));
                }
-               Some(Err(e)) => return Some(Err(self.iter.next().unwrap().unwrap_err())),
+               Some(Err(_)) => return Some(Err(self.iter.next().unwrap().unwrap_err())),
                None => return None
            };
            if let Some(n) = ret{
@@ -928,8 +928,8 @@ impl<'s> ConfigReader<'s>{
 
     /// Instantiates a new configuration reader out of a string.
     pub fn from_str(string: &'s str) -> ConfigReader<'s>{
-        let mut lexer = Lexer::from(string);
-        let mut parser = Parser::from_lexer(lexer).peekable();
+        let lexer = Lexer::from(string);
+        let parser = Parser::from_lexer(lexer).peekable();
         return ConfigReader{iter: parser};
     }
 
@@ -982,7 +982,7 @@ pub fn get_profile(config_path: &PathBuf, name: &str) -> Result<SshProfile, Erro
         format!("There is no {} profile in {}",
                 name,
                 config_path.to_str().unwrap())));
-    let mut profile = ConfigReader::from_str(&profiles_string)
+    let profile = ConfigReader::from_str(&profiles_string)
         .fold( initial_err,|res, r| {
                   if r.is_err(){
                       r
@@ -1056,7 +1056,7 @@ mod tests {
         \tUser apere #some comments \n\
         \tPort 222 #not classic\n\
         \tProxyCommand ssh -A -l apere localhost -W localhost:22 # some comments".to_owned();
-        let mut lexer = Lexer::from(&a);
+        let lexer = Lexer::from(&a);
         let mut parser = Parser::from_lexer(lexer);
         let n = parser.next().unwrap().unwrap();
         println!("n: {:?}", n);
@@ -1084,7 +1084,7 @@ mod tests {
     #[test]
     fn test_parser_error(){
         let a = "\tPort 222a".to_owned();
-        let mut lexer = Lexer::from(&a);
+        let lexer = Lexer::from(&a);
         let mut parser = Parser::from_lexer(lexer);
         let n = parser.next().unwrap().unwrap_err();
         println!("n: {}", n);

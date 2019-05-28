@@ -16,8 +16,7 @@
 ///
 /// To see how everything fits, check the test.
 //////////////////////////////////////////////////////////////////////////////////////////// IMPORTS
-use crate::stateful::{State, Stateful, TransitionsTo};
-use core::borrow::BorrowMut;
+use crate::stateful::{Stateful, TransitionsTo};
 use crossbeam::channel::{unbounded, Receiver, Sender, TryRecvError};
 use std::cell::Cell;
 use std::error;
@@ -26,7 +25,6 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::task::Waker;
@@ -222,14 +220,14 @@ where
 {
     type Output = Result<O, Error>;
 
-    fn poll(mut self: Pin<&mut Self>, wake: &Waker) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, wake: &Waker) -> Poll<Self::Output> {
         loop {
             let state = self._state.lock().unwrap();
             match state.replace(OperationFutureState::Hazardous) {
                 OperationFutureState::Starting((ope, sender, receiver)) => {
                     let mut ope = ope;
                     ope.waker = Some(wake.to_owned());
-                    let (mut new_state, ret) = sender.send(Box::new(ope)).map_or_else(
+                    let (new_state, ret) = sender.send(Box::new(ope)).map_or_else(
                         |_| {
                             (
                                 OperationFutureState::Finished,

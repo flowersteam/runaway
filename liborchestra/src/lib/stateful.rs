@@ -42,7 +42,7 @@ impl Stateful{
     }
     /// Transitions from one state to another.
     pub fn transition<F:State+TransitionsTo<T>+Clone+'static, T:State+'static>(&mut self, other:T){
-        if let Some(f) = self.to_state::<F>() {
+        if let Some(_) = self.to_state::<F>() {
             self.state = Box::new(other);
         } else {
             panic!("Wrong transition occurred!")
@@ -82,7 +82,7 @@ mod tests {
         // Using the state machine
         let mut machine: Stateful = Stateful::from(StateA{integer:0});
 
-        for a in 1..10{
+        for _ in 1..10{
             println!("Machine state is: {:?}", machine);
             // We transition depending on the state. This is not far from a match statement.
             if let Some(state_a) = machine.to_state::<StateA>(){

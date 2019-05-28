@@ -11,23 +11,15 @@ use super::{CMPCONF_RPATH, DATA_RPATH, EXCCONF_RPATH, EXCS_RPATH, XPRP_RPATH};
 use crate::misc;
 use crate::primitives::Error as PrimErr;
 use crate::primitives::{
-    Dropper, Finished, Operation, OperationFuture, Progressing,
+    Dropper, Finished, Operation, OperationFuture,
     Starting, UseResource,
 };
 use crate::stateful::Stateful;
-use chashmap::CHashMap;
 use chrono;
-use crossbeam::channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
-use crypto::ed25519::exchange;
-use futures::future::Future;
+use crossbeam::channel::{unbounded, Receiver, Sender, TryRecvError};
 use git2;
-use regex;
 use serde_yaml;
 use std::collections::{HashMap, HashSet};
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
-use std::task::{Poll, Waker};
 use std::{error, fmt, fs, io, path, str, thread};
 use url::Url;
 use uuid;
@@ -182,18 +174,19 @@ impl fmt::Display for CampaignConf {
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Clone)]
 pub enum ExecutionState {
     Initialized,
-    Interrupted,
+    Running,
+    Failed,
     Finished,
-    Hazard,
 }
 
 impl<'a> From<&'a str> for ExecutionState {
     fn from(s: &str) -> ExecutionState {
         match s {
             "initialized" => ExecutionState::Initialized,
-            "interrupted" => ExecutionState::Interrupted,
+            "running" => ExecutionState::Running,
+            "failed" => ExecutionState::Failed,
             "finished" => ExecutionState::Finished,
-            _ => ExecutionState::Hazard,
+            e => panic!("Unknown state {}", e),
         }
     }
 }
@@ -202,16 +195,16 @@ impl fmt::Display for ExecutionState {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ExecutionState::Initialized => write!(f, "Initialized"),
-            ExecutionState::Interrupted => write!(f, "Interrupted"),
+            ExecutionState::Running => write!(f, "Running"),
+            ExecutionState::Failed => write!(f, "Interrupted"),
             ExecutionState::Finished => write!(f, "Finished"),
-            ExecutionState::Hazard => write!(f, "Hazard"),
         }
     }
 }
 
 /// Newtype representing a commit string.
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
-pub struct ExperimentCommit(String);
+pub struct ExperimentCommit(pub String);
 impl fmt::Display for ExperimentCommit {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -220,15 +213,15 @@ impl fmt::Display for ExperimentCommit {
 
 /// Newtype representing parameters string.
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
-pub struct ExecutionParameters(String);
+pub struct ExecutionParameters(pub String);
 
 /// Newtype representing tag string.
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
-pub struct ExecutionTag(String);
+pub struct ExecutionTag(pub String);
 
 /// Newtype representing an execution identifier.
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone, Hash)]
-pub struct ExecutionId(Uuid);
+pub struct ExecutionId(pub Uuid);
 impl fmt::Display for ExecutionId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -238,22 +231,24 @@ impl fmt::Display for ExecutionId {
 /// Represents the configuration and results of an execution of the experiment.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct ExecutionConf {
-    identifier: ExecutionId,
-    path: Option<path::PathBuf>,
-    commit: ExperimentCommit,
-    parameters: ExecutionParameters,
-    state: ExecutionState,
-    experiment_elements: Vec<path::PathBuf>,
-    executor: Option<String>,
-    execution_date: Option<String>,
-    execution_duration: Option<u32>,
-    execution_stdout: Option<String>,
-    execution_stderr: Option<String>,
-    execution_exit_code: Option<u32>,
-    execution_fitness: Option<f64>,
-    generator: String,
-    generation_date: String,
-    tags: Vec<ExecutionTag>,
+    pub identifier: ExecutionId,
+    pub orchestra_message: String,
+    pub path: Option<path::PathBuf>,
+    pub commit: ExperimentCommit,
+    pub parameters: ExecutionParameters,
+    pub state: ExecutionState,
+    pub experiment_elements: Vec<path::PathBuf>,
+    pub executor: Option<String>,
+    pub execution_date: Option<String>,
+    pub execution_duration: Option<u32>,
+    pub execution_stdout: Option<String>,
+    pub execution_stderr: Option<String>,
+    pub execution_exit_code: Option<u32>,
+    pub execution_fitness: Option<f64>,
+    pub execution_features: Option<Vec<f64>>,
+    pub generator: String,
+    pub generation_date: String,
+    pub tags: Vec<ExecutionTag>,
 }
 
 impl ExecutionConf {
@@ -371,8 +366,7 @@ impl Campaign {
             local_path.to_str().unwrap()
         );
         fs::create_dir_all(local_path)?;
-        let expe_repository =
-            git2::Repository::clone(experiment_url.as_str(), local_path.join(XPRP_RPATH))?;
+        git2::Repository::clone(experiment_url.as_str(), local_path.join(XPRP_RPATH))?;
         let campaign = CampaignConf {
             path: Some(local_path.to_owned()),
             synchro: synchro::Synchronizer::Null(synchro::NullSynchronizer {}),
@@ -406,7 +400,7 @@ impl Campaign {
                     Error::FetchExperiment("Couldn't find annotated commit".to_owned())
                 })
             })?;
-        let (analysis, preferences) = experiment_repo
+        let (analysis, _) = experiment_repo
             .merge_analysis(&[&ann_remote_head])
             .map_err(|_| Error::Unknown)?;
         if analysis.is_fast_forward() {
@@ -449,6 +443,7 @@ impl Campaign {
         debug!("Campaign: Creating Execution");
         let mut exc_conf = ExecutionConf {
             commit,
+            orchestra_message: String::new(),
             parameters: param,
             state: ExecutionState::Initialized,
             path: None,
@@ -460,6 +455,7 @@ impl Campaign {
             execution_stderr: None,
             execution_exit_code: None,
             execution_fitness: None,
+            execution_features: None,
             generator: misc::get_hostname().unwrap(),
             generation_date: chrono::prelude::Utc::now()
                 .format("%Y-%m-%d %H:%M:%S")
@@ -635,7 +631,7 @@ impl Campaign {
     /// Returns a list of the executions.
     fn get_executions(&self) -> Result<Vec<ExecutionConf>, Error> {
         debug!("Campaign: Getting executions");
-        Ok(self.cache.iter().map(|(id, conf)| conf.clone()).collect())
+        Ok(self.cache.iter().map(|(_, conf)| conf.clone()).collect())
     }
 }
 
@@ -774,7 +770,7 @@ struct FetchExperimentMarker {}
 type FetchExperimentOp = Operation<FetchExperimentMarker>;
 impl UseResource<CampaignResource> for FetchExperimentOp {
     fn progress(mut self: Box<Self>, resource: &mut CampaignResource) {
-        if let Some(s) = self.state.to_state::<Starting<()>>() {
+        if let Some(_) = self.state.to_state::<Starting<()>>() {
             trace!("FetchExperimentOp: Found Starting");
             let result = resource.campaign.fetch_experiment();
             self.state
@@ -782,7 +778,7 @@ impl UseResource<CampaignResource> for FetchExperimentOp {
                     result.map_err(PrimErr::from),
                 ));
             resource.queue.push(self);
-        } else if let Some(s) = self.state.to_state::<Finished<CampaignConf>>() {
+        } else if let Some(_) = self.state.to_state::<Finished<CampaignConf>>() {
             trace!("FetchExperimentOp: Found Finished");
             let waker = self
                 .waker
@@ -822,7 +818,7 @@ impl UseResource<CampaignResource> for CreateExecutionOp {
                     Finished(result.map_err(PrimErr::from)),
                 );
             resource.queue.push(self);
-        } else if let Some(s) = self.state.to_state::<Finished<ExecutionConf>>() {
+        } else if let Some(_) = self.state.to_state::<Finished<ExecutionConf>>() {
             trace!("CreateExecutionOp: Found Finished");
             let waker = self
                 .waker
@@ -860,7 +856,7 @@ impl UseResource<CampaignResource> for UpdateExecutionOp {
                     Finished(result.map_err(PrimErr::from)),
                 );
             resource.queue.push(self);
-        } else if let Some(s) = self.state.to_state::<Finished<ExecutionConf>>() {
+        } else if let Some(_) = self.state.to_state::<Finished<ExecutionConf>>() {
             trace!("UpdateExecutionOp: Found Finished");
             let waker = self
                 .waker
@@ -894,7 +890,7 @@ impl UseResource<CampaignResource> for FinishExecutionOp {
                     Finished(result.map_err(PrimErr::from)),
                 );
             resource.queue.push(self);
-        } else if let Some(s) = self.state.to_state::<Finished<ExecutionConf>>() {
+        } else if let Some(_) = self.state.to_state::<Finished<ExecutionConf>>() {
             trace!("FinishExecutionOp: Found Finished");
             let waker = self
                 .waker
@@ -927,7 +923,7 @@ impl UseResource<CampaignResource> for DeleteExecutionOp {
                     Finished(result.map_err(PrimErr::from)),
                 );
             resource.queue.push(self);
-        } else if let Some(s) = self.state.to_state::<Finished<()>>() {
+        } else if let Some(_) = self.state.to_state::<Finished<()>>() {
             trace!("DeleteExecutionOp: Found Finished");
             let waker = self
                 .waker
@@ -954,7 +950,7 @@ struct FetchExecutionsMarker {}
 type FetchExecutionsOp = Operation<FetchExecutionsMarker>;
 impl UseResource<CampaignResource> for FetchExecutionsOp {
     fn progress(mut self: Box<Self>, resource: &mut CampaignResource) {
-        if let Some(s) = self.state.to_state::<Starting<()>>() {
+        if let Some(_) = self.state.to_state::<Starting<()>>() {
             trace!("FetchExecutionsOp: Found Starting");
             let result = resource.campaign.fetch_executions();
             self.state
@@ -962,7 +958,7 @@ impl UseResource<CampaignResource> for FetchExecutionsOp {
                     result.map_err(PrimErr::from),
                 ));
             resource.queue.push(self);
-        } else if let Some(s) = self
+        } else if let Some(_) = self
             .state
             .to_state::<Finished<Vec<ExecutionConf>>>()
         {
@@ -992,7 +988,7 @@ struct GetExecutionsMarker {}
 type GetExecutionsOp = Operation<GetExecutionsMarker>;
 impl UseResource<CampaignResource> for GetExecutionsOp {
     fn progress(mut self: Box<Self>, resource: &mut CampaignResource) {
-        if let Some(s) = self.state.to_state::<Starting<()>>() {
+        if let Some(_) = self.state.to_state::<Starting<()>>() {
             trace!("GetExecutionsOp: Found Starting");
             let result = resource.campaign.get_executions();
             self.state
@@ -1000,7 +996,7 @@ impl UseResource<CampaignResource> for GetExecutionsOp {
                     result.map_err(PrimErr::from),
                 ));
             resource.queue.push(self);
-        } else if let Some(s) = self
+        } else if let Some(_) = self
             .state
             .to_state::<Finished<Vec<ExecutionConf>>>()
         {
@@ -1027,6 +1023,7 @@ impl UseResource<CampaignResource> for GetExecutionsOp {
 mod tests {
 
     use super::*;
+    use std::time::Duration;
     use std::io::prelude::*;
     use std::{fs, process};
 
@@ -1059,8 +1056,8 @@ mod tests {
             .args(&["daemon", "--reuseaddr", "--base-path=/tmp", "--export-all"])
             .spawn()
             .expect("Failed to start git server");
-        std::thread::sleep_ms(1000);
-        if let Ok(Some(o)) = server.try_wait() {
+        std::thread::sleep(Duration::new(1, 000));
+        if let Ok(Some(_)) = server.try_wait() {
             panic!("Server did not start");
         }
     }
@@ -1097,7 +1094,7 @@ mod tests {
         setup_expe_repo();
 
         let repo_path = path::PathBuf::from("/tmp/cmp_repo");
-        let repo = Campaign::new(
+        Campaign::new(
             &repo_path,
             Url::parse("git://localhost:9418/expe_repo").unwrap(),
         );
@@ -1138,7 +1135,7 @@ mod tests {
         assert_eq!(exc.commit, ExperimentCommit(commit.clone()));
         assert_eq!(exc.parameters, ExecutionParameters("".to_owned()));
         assert!(exc.tags.is_empty());
-        thread::sleep_ms(1000);
+        thread::sleep(Duration::new(1, 000));
         let executions = block_on(repo.async_get_executions());
         assert!(executions.unwrap().contains(&exc));
         let exc_file = ExecutionConf::from_file(&exc.get_path().join(EXCCONF_RPATH)).unwrap();
@@ -1169,7 +1166,7 @@ mod tests {
          let mut handles = Vec::new();
          let commit = get_expe_repo_head();
 
-         for i in (1..200) {
+         for _ in 1..200 {
              handles.push(
                  executor
                      .spawn_with_handle(repo.async_create_execution(
@@ -1185,7 +1182,7 @@ mod tests {
              .map(|h| executor.run(h).unwrap())
              .collect::<Vec<_>>();
 
-         thread::sleep_ms(1000);
+         thread::sleep(Duration::new(1, 000));
          let executions = block_on(repo.async_get_executions()).unwrap();
          for exc in excs {
              assert!(executions.contains(&exc));
@@ -1233,7 +1230,7 @@ mod tests {
         println!("Execution updated: {:?}", exc);
         assert_eq!(exc.identifier, exc_u.identifier);
 
-        thread::sleep_ms(1000);
+        thread::sleep(Duration::new(1, 000));
         let executions = block_on(repo.async_get_executions()).unwrap();
         assert!(!executions.contains(&exc));
         assert!(executions.contains(&exc_u));
@@ -1276,7 +1273,7 @@ mod tests {
         assert!(exc.get_path().exists());
         assert!(!exc.get_path().join("run.py").exists());
 
-        thread::sleep_ms(1000);
+        thread::sleep(Duration::new(1, 000));
         let executions = block_on(repo.async_get_executions()).unwrap();
         assert!(!executions.contains(&exc));
         assert!(executions.contains(&exc_f));
@@ -1316,7 +1313,7 @@ mod tests {
 
         assert!(!exc.get_path().exists());
 
-        thread::sleep_ms(1000);
+        thread::sleep(Duration::new(1, 000));
         let executions = block_on(repo.async_get_executions()).unwrap();
         assert!(!executions.contains(&exc));
 

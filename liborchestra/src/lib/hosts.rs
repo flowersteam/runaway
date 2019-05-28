@@ -7,30 +7,21 @@
 /// understanding how pieces fit, check the primitives module test.
 
 //////////////////////////////////////////////////////////////////////////////////////////// IMPORTS
-use super::{
-    FETCH_ARCH_RPATH, FETCH_IGNORE_RPATH, PROFILES_FOLDER_RPATH, SEND_ARCH_RPATH,
-    SEND_IGNORE_RPATH, SSH_CONFIG_RPATH,
-};
+use super::SSH_CONFIG_RPATH;
 use crate::derive_from_error;
-use crate::misc;
 use crate::primitives::{
-    Dropper, Finished, Operation, OperationFuture, Progressing,
+    Dropper, Finished, Operation, OperationFuture,
     Starting, UseResource,
 };
 use crate::ssh;
 use crate::ssh::RemoteHandle;
 use crate::stateful::{Stateful, TransitionsTo};
-use chrono::prelude::*;
 use crossbeam::channel::{unbounded, Receiver, Sender, TryRecvError};
 use dirs;
 use std::collections::HashMap;
-use std::hint::unreachable_unchecked;
-use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use std::{env, error, fmt, fs, io, io::prelude::*, path, process, str};
-use uuid::Uuid;
+use std::{error, fmt, fs, io::prelude::*, path, str};
 
 ///////////////////////////////////////////////////////////////////////////////////////////// ERRORS
 #[derive(Debug, Clone)]
@@ -118,7 +109,7 @@ impl EnvironmentVariables {
 /// for a given host. It can write to/read from yaml files.
 // Todo: Implement the hash so that it can be insensitive to the name.
 // Todo: Document the fact that -F configfile must be added to the nodes proxycommand
-#[derive(Serialize, Deserialize, Debug, Hash)]
+#[derive(Serialize, Deserialize, Debug, Hash, Clone)]
 pub struct HostConf {
     pub name: String,                // The name of the configuration
     pub ssh_config: String,          // The name of the ssh config used (found in SSH_CONFIG_RPATH)
@@ -143,7 +134,7 @@ impl HostConf {
                 host_path.to_str().unwrap()
             ))
         })?;
-        let mut config: HostConf = serde_yaml::from_reader(file).map_err(|_| {
+        let config: HostConf = serde_yaml::from_reader(file).map_err(|_| {
             Error::ReadingHost(format!(
                 "Failed to parse host configuration file {}",
                 host_path.to_str().unwrap()
@@ -442,6 +433,7 @@ impl HostResource {
 #[derive(Clone)]
 pub struct HostHandle {
     sender: Sender<HostOp>,
+    conf: HostConf,
     dropper: Dropper<()>,
 }
 
@@ -452,7 +444,7 @@ impl HostHandle {
             "HostHandle: Spawning host resource {:?}",
             host_conf.name
         );
-        let host = Host::from_conf(host_conf)?;
+        let host = Host::from_conf(host_conf.clone())?;
         let mut res = HostResource {
                 state: Stateful::from(HostIdling),
                 host,
@@ -490,6 +482,7 @@ impl HostHandle {
         });
         return Ok(HostHandle {
             sender,
+            conf: host_conf,
             dropper: Dropper::from_handle(handle),
         });
     }
@@ -499,6 +492,12 @@ impl HostHandle {
         let (recv, op) = AcquireNodeOp::from(Stateful::from(Starting(())));
         return AcquireNodeFuture::new(op, self.sender.clone(), recv);
     }
+
+    /// Returns the directory that contains the executions.
+    pub fn get_host_directory(&self) -> path::PathBuf{
+        return self.conf.directory.clone()
+    }
+
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////// OPERATION
@@ -510,7 +509,7 @@ struct AcquireNodeMarker {}
 type AcquireNodeOp = Operation<AcquireNodeMarker>;
 impl UseResource<HostResource> for AcquireNodeOp {
     fn progress(mut self: Box<Self>, resource: &mut HostResource) {
-        if let Some(s) = self.state.to_state::<Starting<()>>() {
+        if let Some(_) = self.state.to_state::<Starting<()>>() {
             trace!("AcquireNodeOp: Found Starting");
             if let Some(HostAllocated(_)) = resource.state.to_state::<HostAllocated>() {
                 if resource.host.is_full() {
@@ -538,7 +537,7 @@ impl UseResource<HostResource> for AcquireNodeOp {
                 trace!("AcquireNodeOp: HostResource Locked or Idle. Rescheduling...");
                 resource.queue.push(self);
             }
-        } else if let Some(s) = self.state.to_state::<Finished<RemoteHandle>>() {
+        } else if let Some(_) = self.state.to_state::<Finished<RemoteHandle>>() {
             trace!("AcquireNodeOp: Found Finished");
             let waker = self
                 .waker
@@ -622,11 +621,11 @@ mod test {
         assert!(host.nodes_available());
         assert!(host.is_free());
         assert!(!host.is_full());
-        let a = host.try_acquire().unwrap();
+        host.try_acquire().unwrap();
         assert!(host.nodes_available());
         assert!(!host.is_full());
         assert!(!host.is_free());
-        let b = host.try_acquire().unwrap();
+        host.try_acquire().unwrap();
         assert!(!host.is_free());
         assert!(!host.nodes_available());
         assert!(host.is_full());
@@ -663,7 +662,7 @@ mod test {
         let conn1 = block_on(op1);
         println!("conn1: {:?}", conn1);
         assert!(conn1.is_ok());
-        thread::sleep_ms(11000);
+        thread::sleep(Duration::new(11, 0));
         drop(conn1);
         let op2 = res_handle.async_acquire();
         let conn2 = block_on(op2);
@@ -673,19 +672,19 @@ mod test {
         assert!(conn2.is_ok());
         println!("conn3: {:?}", conn3);
         assert!(conn3.is_ok());
-        thread::sleep_ms(2000);
+        thread::sleep(Duration::new(2,0));
         std::thread::spawn(|| {
-            thread::sleep_ms(11000);
+            thread::sleep(Duration::new(11,0));
             drop(conn2);
             drop(conn3);
             println!("conn2-3 dropped");
-            thread::sleep_ms(2000);
+            thread::sleep(Duration::new(2, 0));
         });
         let op4 = res_handle.async_acquire();
         let conn4 = block_on(op4);
         println!("conn4: {:?}", conn4);
         assert!(conn4.is_ok());
-        thread::sleep_ms(5000);
+        thread::sleep(Duration::new(5, 000));
     }
 
 }
