@@ -31,12 +31,13 @@ use tar;
 use tar::Archive;
 use uuid::Uuid;
 use futures::channel::{mpsc, oneshot};
+use futures::lock::Mutex;
 use futures::executor;
 use futures::future::Future;
 use futures::prelude::*;
 use futures::task::LocalSpawnExt;
 use futures::task::SpawnExt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 ////////////////////////////////////////////////////////////////////////////////////////////// ERROR
 #[derive(Debug, Clone)]
@@ -130,8 +131,7 @@ impl Application {
                          -> Result<(), Error> {
         debug!("Application: Submitting execution to host {} at commit {} with parameters {}", 
             host, commit.0, parameters.0);
-        let mut app = app.lock()
-            .map_err(|e| Error::AcquireLock(e.to_string()))?;
+        let mut app = app.lock().await;
         let host = app.hosts
             .get(&host)
             .ok_or(Error::UnknownHost(format!("Unknown host {}", host)))?;
@@ -154,8 +154,7 @@ impl Application {
                                app_handle: ApplicationHandle) -> Result<(), Error>{
                                       use repository::ExecutionState::*;
         debug!("Application: Post processing execution {:?}", exec.identifier);
-        let mut app = app.lock()
-            .map_err(|e| Error::AcquireLock(e.to_string()))?;
+        let mut app = app.lock().await;
         match (exec.state, app.reschedule){
             (Completed, _) => {
                 trace!("Application: Execution found completed. Ending...");
@@ -186,8 +185,7 @@ impl Application {
                            host: hosts::HostHandle) 
                            -> Result<(), Error> {
         debug!("Application: Registering host {:?}", host);
-        let mut app = app.lock()
-            .map_err(|e| Error::AcquireLock(e.to_string()))?;
+        let mut app = app.lock().await;
         app.hosts.insert(host.get_name(), host);
         Ok(())
     }
@@ -195,8 +193,7 @@ impl Application {
     /// Asynchronous function that unregisters a host.
     async fn unregister_host(app: Arc<Mutex<Application>>, host: String) -> Result<(), Error>{
         debug!("Application: Unregistering host {}", host);
-        let mut app = app.lock()
-            .map_err(|e| Error::AcquireLock(e.to_string()))?;
+        let mut app = app.lock().await;
         app.hosts.remove(&host);
         Ok(())
     }
@@ -204,8 +201,7 @@ impl Application {
     /// Asynchronous function that activates rescheduling.
     async fn activate_rescheduling(app: Arc<Mutex<Application>>) -> Result<(), Error>{
         debug!("Application: Activating rescheduling");
-        let mut app = app.lock()
-            .map_err(|e| Error::AcquireLock(e.to_string()))?;
+        let mut app = app.lock().await;
         app.reschedule = true;
         Ok(())
     }
@@ -213,8 +209,7 @@ impl Application {
     /// Asynchronous function that deactivates rescheduling.
     async fn deactivate_rescheduling(app: Arc<Mutex<Application>>) -> Result<(), Error>{
         debug!("Application: Deactivate rescheduling");
-        let mut app = app.lock()
-            .map_err(|e| Error::AcquireLock(e.to_string()))?;
+        let mut app = app.lock().await;
         app.reschedule = false;
         Ok(())
     }
