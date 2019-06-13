@@ -5,6 +5,7 @@
 /// the repository using futures. It communicates with a `CampaignResource` that manages the operations
 /// executions on the actual `Campaign`. If you have difficulties with the asynchronous design, check
 /// the primitives module.
+
 //////////////////////////////////////////////////////////////////////////////////////////// IMPORTS
 use super::{CMPCONF_RPATH, DATA_RPATH, EXCCONF_RPATH, EXCS_RPATH, XPRP_RPATH};
 use crate::misc;
@@ -13,13 +14,20 @@ use crate::primitives::{Dropper, Finished, Operation, OperationFuture, Starting,
 use crate::stateful::Stateful;
 use chrono::prelude::*;
 use crossbeam::channel::{unbounded, Receiver, Sender, TryRecvError};
-use futures::Future;
 use git2;
 use serde_yaml;
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::task::{Poll, Waker, Context};
 use std::{error, fmt, fs, io, path, str, thread};
+use std::sync::Arc;
+use futures::channel::{mpsc, oneshot};
+use futures::executor;
+use futures::future::Future;
+use futures::prelude::*;
+use futures::task::LocalSpawnExt;
+use futures::task::SpawnExt;
+use futures::lock::Mutex;
 use url::Url;
 use uuid;
 use uuid::Uuid;
@@ -37,7 +45,7 @@ pub enum Error {
     InvalidRepo,
     InvalidExpeCommit,
     NoOutputAvailable,
-    ChannelBroken(String),
+    Channel(String),
     FetchExperiment(String),
     CreateExecution(String),
     UpdateExecution(String),
@@ -45,6 +53,7 @@ pub enum Error {
     FetchExecutions(String),
     DeleteExecution(String),
     CacheError(String),
+    OperationFetch(String),
     ReadExecution,
     WriteExecution,
     ReadCampaign,
@@ -67,7 +76,7 @@ impl fmt::Display for Error {
             Error::InvalidRepo => write!(f, "Invalid expegit repository"),
             Error::InvalidExpeCommit => write!(f, "Invalid experiment commit"),
             Error::NoOutputAvailable => write!(f, "No output was available"),
-            Error::ChannelBroken(s) => write!(f, "Communication channel broken: \n{}", s),
+            Error::Channel(s) => write!(f, "Communication channel error: \n{}", s),
             Error::FetchExperiment(s) => write!(f, "Failed to fetch experiment: \n{}", s),
             Error::CreateExecution(s) => write!(f, "Failed to create execution: \n{}", s),
             Error::UpdateExecution(s) => write!(f, "Failed to update execution: \n{}", s),
@@ -75,6 +84,7 @@ impl fmt::Display for Error {
             Error::FetchExecutions(s) => write!(f, "Failed to fetch executions: \n{}", s),
             Error::DeleteExecution(s) => write!(f, "Failed to delete execution: \n{}", s),
             Error::CacheError(s) => write!(f, "Error occurred with executions chache: \n{}", s),
+            Error::OperationFetch(s) => write!(f, "Error occurred when fetching the operation: \n{}", s),
             Error::ReadExecution => write!(f, "Failed to read execution from file"),
             Error::WriteExecution => write!(f, "Failed to write execution from file"),
             Error::ReadCampaign => write!(f, "Failed to read campaign from file"),
@@ -214,10 +224,20 @@ impl fmt::Display for ExperimentCommit {
 /// Newtype representing parameters string.
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
 pub struct ExecutionParameters(pub String);
+impl fmt::Display for ExecutionParameters {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// Newtype representing tag string.
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
 pub struct ExecutionTag(pub String);
+impl fmt::Display for ExecutionTag {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// Newtype representing an execution identifier.
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone, Hash)]
@@ -284,7 +304,7 @@ impl ExecutionConf {
 
 impl fmt::Display for ExecutionConf {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.identifier.0)
+        write!(f, "{}", self.identifier)
     }
 }
 
@@ -423,6 +443,7 @@ pub struct Campaign {
 }
 
 impl Campaign {
+    
     /// Opens a Campaign from a local path.
     fn from(conf: CampaignConf) -> Result<Campaign, Error> {
         debug!("Campaign: Open campaign from conf {}", conf);
@@ -461,9 +482,10 @@ impl Campaign {
     }
 
     /// Fetches the last experiment from its remote repository.
-    fn fetch_experiment(&mut self) -> Result<CampaignConf, Error> {
+    async fn fetch_experiment(cmp: Arc<Mutex<Campaign>>) -> Result<CampaignConf, Error> {
         debug!("Campaign: Fetch experiment");
-        let experiment_repo = git2::Repository::open(self.conf.get_experiment_path()).unwrap();
+        let mut cmp = cmp.lock().await;
+        let experiment_repo = git2::Repository::open(cmp.conf.get_experiment_path()).unwrap();
         let mut remote = experiment_repo
             .find_remote("origin")
             .map_err(|_| Error::FetchExperiment("No origin remote found".to_owned()))?;
@@ -509,21 +531,22 @@ impl Campaign {
                 .map_err(|_| {
                     Error::FetchExperiment("Couldn't set reposity HEAD to target".to_owned())
                 })?;
-            self.synchro.fetch_experiment_hook(&self.conf)?;
-            return Ok(self.conf.clone());
+            cmp.synchro.fetch_experiment_hook(&cmp.conf)?;
+            return Ok(cmp.conf.clone());
         } else {
             return Err(Error::NoFFPossible);
         }
     }
 
     /// Creates a new execution.
-    fn create_execution(
-        &mut self,
+    async fn create_execution(
+        cmp: Arc<Mutex<Campaign>>,
         commit: ExperimentCommit,
         param: ExecutionParameters,
         tags: Vec<ExecutionTag>,
     ) -> Result<ExecutionConf, Error> {
         debug!("Campaign: Creating Execution");
+        let mut cmp = cmp.lock().await;
         let mut exc_conf = ExecutionConf {
             commit,
             execution_message: None,
@@ -544,16 +567,16 @@ impl Campaign {
             tags: tags.clone(),
         };
         exc_conf.path = Some(
-            self.conf
-                .get_path()
-                .join(EXCS_RPATH)
-                .join(format!("{}", exc_conf.identifier)),
+            cmp.conf
+               .get_path()
+               .join(EXCS_RPATH)
+               .join(format!("{}", exc_conf.identifier)),
         );
         fs::create_dir(&exc_conf.get_path())
             .map_err(|_| Error::CreateExecution("Failed to create directory".to_owned()))?;
         let url = format!(
             "file://{}",
-            self.conf.get_experiment_path().to_str().unwrap()
+            cmp.conf.get_experiment_path().to_str().unwrap()
         );
         let repo = git2::Repository::clone(&url, exc_conf.get_path())
             .map_err(|_| Error::CreateExecution("Failed to local clone".to_owned()))?;
@@ -582,26 +605,27 @@ impl Campaign {
         exc_conf
             .to_file(&exc_conf.get_path().join(EXCCONF_RPATH))
             .map_err(|_| Error::CreateExecution("Failed to write config file.".to_owned()))?;
-        self.synchro.create_execution_hook(&exc_conf)?;
-        self.cache
+        cmp.synchro.create_execution_hook(&exc_conf)?;
+        cmp.cache
             .insert(exc_conf.identifier.clone(), exc_conf.clone());
         return Ok(exc_conf);
     }
 
     /// Updates an execution.
-    fn update_execution(
-        &mut self,
+    async fn update_execution(
+        cmp: Arc<Mutex<Campaign>>,
         id: ExecutionId,
         upd: ExecutionUpdate,
     ) -> Result<ExecutionConf, Error> {
         debug!("Campaign: Updating execution {}", id.0);
-        let conf_path = self
+        let mut cmp = cmp.lock().await;
+        let conf_path = cmp
             .conf
             .get_path()
             .join(EXCS_RPATH)
             .join(format!("{}", id))
             .join(EXCCONF_RPATH);
-        let exc_conf = self
+        let exc_conf = cmp
             .cache
             .remove(&id)
             .ok_or(Error::UpdateExecution(format!(
@@ -611,22 +635,23 @@ impl Campaign {
             )))?;
         let exc_conf = upd.apply(exc_conf);
         exc_conf.to_file(&conf_path)?;
-        self.synchro.update_execution_hook(&exc_conf)?;
-        self.cache
+        cmp.synchro.update_execution_hook(&exc_conf)?;
+        cmp.cache
             .insert(exc_conf.identifier.clone(), exc_conf.clone());
         Ok(exc_conf)
     }
 
     /// Finishes an execution.
-    fn finish_execution(&mut self, id: ExecutionId) -> Result<ExecutionConf, Error> {
+    async fn finish_execution(cmp: Arc<Mutex<Campaign>>, id: ExecutionId) -> Result<ExecutionConf, Error> {
         debug!("Campaign: Finishing Execution {}", id.0);
-        let conf_path = self
+        let mut cmp = cmp.lock().await;
+        let conf_path = cmp
             .conf
             .get_path()
             .join(EXCS_RPATH)
             .join(format!("{}", id))
             .join(EXCCONF_RPATH);
-        let mut exc_conf = self
+        let mut exc_conf = cmp
             .cache
             .remove(&id)
             .ok_or(Error::UpdateExecution(format!(
@@ -653,21 +678,22 @@ impl Campaign {
             .collect::<Result<Vec<()>, Error>>()?;
         exc_conf.state = ExecutionState::Completed;
         exc_conf.to_file(&conf_path)?;
-        self.synchro.finish_execution_hook(&exc_conf)?;
-        self.cache
+        cmp.synchro.finish_execution_hook(&exc_conf)?;
+        cmp.cache
             .insert(exc_conf.identifier.clone(), exc_conf.clone());
         Ok(exc_conf)
     }
 
     /// Deletes an execution.
-    fn delete_execution(&mut self, id: ExecutionId) -> Result<(), Error> {
+    async fn delete_execution(cmp: Arc<Mutex<Campaign>>, id: ExecutionId) -> Result<(), Error> {
         debug!("Campaign: Delete Execution {}", id.0);
-        let conf_path = self
+        let mut cmp = cmp.lock().await;
+        let conf_path = cmp
             .conf
             .get_path()
             .join(EXCS_RPATH)
             .join(format!("{}", id));
-        let exc_conf = self
+        let exc_conf = cmp
             .cache
             .remove(&id)
             .ok_or(Error::UpdateExecution(format!(
@@ -677,20 +703,21 @@ impl Campaign {
             )))?;
         fs::remove_dir_all(conf_path)
             .map_err(|_| Error::DeleteExecution("Failed to remove execution files".to_owned()))?;
-        self.synchro.delete_execution_hook(&exc_conf)?;
+        cmp.synchro.delete_execution_hook(&exc_conf)?;
         Ok(())
     }
 
     /// Fetches possibly distant executions. Fetches executions or not depending on the synchronizer.
-    fn fetch_executions(&mut self) -> Result<Vec<ExecutionConf>, Error> {
+    async fn fetch_executions(cmp: Arc<Mutex<Campaign>>) -> Result<Vec<ExecutionConf>, Error> {
         debug!("Campaign: Fetching Executions");
-        let before: HashSet<path::PathBuf> = fs::read_dir(self.conf.get_executions_path())
+        let mut cmp = cmp.lock().await;
+        let before: HashSet<path::PathBuf> = fs::read_dir(cmp.conf.get_executions_path())
             .unwrap()
             .map(|p| p.unwrap().path())
             .filter(|p| p.join(EXCCONF_RPATH).exists())
             .collect();
-        self.synchro.fetch_executions_hook(&self.conf)?;
-        let after: HashSet<path::PathBuf> = fs::read_dir(self.conf.get_executions_path())
+        cmp.synchro.fetch_executions_hook(&cmp.conf)?;
+        let after: HashSet<path::PathBuf> = fs::read_dir(cmp.conf.get_executions_path())
             .unwrap()
             .map(|p| p.unwrap().path())
             .filter(|p| p.join(EXCCONF_RPATH).exists())
@@ -702,82 +729,175 @@ impl Campaign {
         } else {
             after
                 .difference(&before)
-                .map(|p| ExecutionConf::from_file(&self.conf.get_executions_path().join(p)))
+                .map(|p| ExecutionConf::from_file(&cmp.conf.get_executions_path().join(p)))
                 .collect::<Result<Vec<ExecutionConf>, Error>>()
         }
     }
 
     /// Returns a list of the executions.
-    fn get_executions(&self) -> Result<Vec<ExecutionConf>, Error> {
+    async fn get_executions(cmp: Arc<Mutex<Campaign>>) -> Result<Vec<ExecutionConf>, Error> {
         debug!("Campaign: Getting executions");
-        Ok(self.cache.iter().map(|(_, conf)| conf.clone()).collect())
+        let cmp = cmp.lock().await;
+        Ok(cmp.cache.iter().map(|(_, conf)| conf.clone()).collect())
     }
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////// RESOURCE
-/// Type alias for the Repository resource operations.
-type CampaignOp = Box<dyn UseResource<CampaignResource>>;
 
-/// Resource handling operations sent by the futures, using the synchronous Campaign.
-struct CampaignResource {
-    campaign: Campaign,
-    queue: Vec<CampaignOp>,
+#[derive(Debug)]
+enum OperationInput{
+    FetchExperiment,
+    CreateExecution(ExperimentCommit, ExecutionParameters, Vec<ExecutionTag>),
+    UpdateExecution(ExecutionId, ExecutionUpdate),
+    FinishExecution(ExecutionId),
+    DeleteExecution(ExecutionId),
+    FetchExecutions,
+    GetExecutions,
+}
+
+#[derive(Debug)]
+enum OperationOutput{
+    FetchExperiment(Result<CampaignConf, Error>),
+    CreateExecution(Result<ExecutionConf, Error>),
+    UpdateExecution(Result<ExecutionConf, Error>),
+    FinishExecution(Result<ExecutionConf, Error>),
+    DeleteExecution(Result<(), Error>),
+    FetchExecutions(Result<Vec<ExecutionConf>, Error>),
+    GetExecutions(Result<Vec<ExecutionConf>, Error>),
 }
 
 /// Asynchronous handle to the campaign resource. Allows to perform operations on the campaign, in
 /// an asynchronous fashion.
 #[derive(Clone)]
 pub struct CampaignHandle {
-    sender: Sender<CampaignOp>,
-    dropper: Dropper<()>,
+    _sender: mpsc::UnboundedSender<(oneshot::Sender<OperationOutput>, OperationInput)>,
+    _dropper: Dropper<()>,
 }
 
 impl CampaignHandle {
     /// This function spawns the thread that will handle all the repository operations using the
     /// CampaignResource, and returns a handle to it.
-    pub fn spawn_resource(camp_conf: CampaignConf) -> Result<CampaignHandle, Error> {
-        debug!("RepositoryResourceHandle: Start Repository Thread");
+    pub fn spawn(camp_conf: CampaignConf) -> Result<CampaignHandle, Error> {
+        debug!("CampaignHandle: Start campaign thread");
         let campaign = Campaign::from(camp_conf)?;
-        let (sender, receiver): (Sender<CampaignOp>, Receiver<CampaignOp>) = unbounded();
-        let handle = thread::spawn(move || {
-            trace!("RepositoryResource: Creating resource in thread");
-            let mut res = CampaignResource {
-                campaign,
-                queue: Vec::new(),
-            };
-            trace!("RepositoryResource: Starting resource loop");
-            loop {
-                // Handle a message
-                match receiver.try_recv() {
-                    Ok(o) => {
-                        trace!("RepositoryResource: Received operation");
-                        res.queue.push(o)
-                    }
-                    Err(TryRecvError::Empty) => {}
-                    Err(TryRecvError::Disconnected) => {
-                        trace!("RepositoryResource: Channel disconnected. Leaving...");
-                        break;
-                    }
+        let (sender, receiver) = mpsc::unbounded();
+        let handle = thread::Builder::new().name("campaign".to_owned()).spawn(move || {
+            trace!("Campaign Thread: Creating resource in thread");
+            let mut res = Arc::new(Mutex::new(campaign));
+            trace!("Campaign Thread: Starting resource loop");
+            let mut pool = executor::LocalPool::new();
+            let mut spawner = pool.spawner();
+            let handling_stream = receiver.for_each(
+                move |(sender, operation): (oneshot::Sender<OperationOutput>, OperationInput)| {
+                    trace!("Campaign Thread: received operation {:?}", operation);
+                    match operation {
+                        OperationInput::FetchExperiment => {
+                            spawner.spawn_local(
+                                Campaign::fetch_experiment(res.clone())
+                                    .map(|a| {
+                                        sender.send(OperationOutput::FetchExperiment(a))
+                                            .map_err(|e| error!("Campaign Thread: Failed to \\
+                                            send an operation output: \n{:?}", e));
+                                    })
+                            )
+                        }
+                        OperationInput::CreateExecution(commit, params, tags) =>{
+                            spawner.spawn_local(
+                                Campaign::create_execution(res.clone(), commit, params, tags)
+                                    .map(|a|{
+                                        sender.send(OperationOutput::CreateExecution(a))
+                                            .map_err(|e| error!("Campaign Thread: Failed to \\
+                                            send an operation output: \n{:?}", e));
+                                    })
+                            )
+                        }
+                        OperationInput::UpdateExecution(id, upd) =>{
+                            spawner.spawn_local(
+                                Campaign::update_execution(res.clone(), id, upd)
+                                    .map(|a|{
+                                        sender.send(OperationOutput::UpdateExecution(a))
+                                            .map_err(|e| error!("Campaign Thread: Failed to \\
+                                            send an operation output: \n{:?}", e));
+                                    })
+                            )
+                        }
+                        OperationInput::FinishExecution(id) =>{
+                            spawner.spawn_local(
+                                Campaign::finish_execution(res.clone(), id)
+                                    .map(|a|{
+                                        sender.send(OperationOutput::FinishExecution(a))
+                                            .map_err(|e| error!("Campaign Thread: Failed to \\
+                                            send an operation output: \n{:?}", e));
+                                    })
+                            )
+                        }
+                        OperationInput::DeleteExecution(id) =>{
+                            spawner.spawn_local(
+                                Campaign::delete_execution(res.clone(), id)
+                                    .map(|a|{
+                                        sender.send(OperationOutput::DeleteExecution(a))
+                                            .map_err(|e| error!("Campaign Thread: Failed to \\
+                                            send an operation output: \n{:?}", e));
+                                    })
+                            )
+                        }
+                        OperationInput::FetchExecutions =>{
+                            spawner.spawn_local(
+                                Campaign::fetch_executions(res.clone())
+                                    .map(|a|{
+                                        sender.send(OperationOutput::FetchExecutions(a))
+                                            .map_err(|e| error!("Campaign Thread: Failed to \\
+                                            send an operation output: \n{:?}", e));
+                                    })
+                            )
+                        }
+                        OperationInput::GetExecutions =>{
+                            spawner.spawn_local(
+                                Campaign::get_executions(res.clone())
+                                    .map(|a|{
+                                        sender.send(OperationOutput::GetExecutions(a))
+                                            .map_err(|e| error!("Campaign Thread: Failed to \\
+                                            send an operation output: \n{:?}", e));
+                                    })
+                            )
+                        }
+                        _ => unimplemented!()
+                    }.map_err(|e| error!("Campaign Thread: Failed to spawn the operation: \n{:?}", e));
+                    future::ready(())
                 }
-                // Handle an operation
-                if let Some(s) = res.queue.pop() {
-                    s.progress(&mut res);
-                }
-            }
-            trace!("RepositoryResource: Operations channel disconnected. Leaving thread.");
-            return ();
-        });
-        return Ok(CampaignHandle {
-            sender,
-            dropper: Dropper::from_handle(handle),
-        });
+            );
+            let mut spawner = pool.spawner();
+            spawner.spawn_local(handling_stream)
+                .map_err(|_| error!("Campaign Thread: Failed to spawn handling stream"));
+            trace!("Campaign Thread: Starting local executor.");
+            pool.run();
+            trace!("Campaign Thread: All futures executed. Leaving...");
+        }).expect("Failed to spawn campaign thread.");
+        Ok(CampaignHandle {
+            _sender: sender,
+            _dropper: Dropper::from_handle(handle),
+        })
     }
 
     /// Async method, returning a future that ultimately resolves in a campaign, after having
     /// fetched the origin changes on the experiment repository.
-    pub fn async_fetch_experiment(&self) -> FetchExperimentFuture {
-        let (recv, op) = FetchExperimentOp::from(Stateful::from(Starting(())));
-        return FetchExperimentFuture(OperationFuture::new(op, self.sender.clone(), recv));
+    pub fn async_fetch_experiment(&self) -> impl Future<Output=Result<CampaignConf,Error>> {
+        debug!("CampaignHandle: Building async_fetch_experiment future");
+        let mut chan = self._sender.clone();
+        let mut res = (*self).clone();
+        async move {
+            let (sender, receiver) = oneshot::channel();
+            trace!("CampaignHandle::async_fetch_experiment_future: Sending input");
+            chan.send((sender, OperationInput::FetchExperiment))
+                .await
+                .map_err(|e| Error::Channel(e.to_string()))?;
+            trace!("CampaignHandle::async_fetch_experiement_future: Awaiting output");
+            match receiver.await {
+                Err(e) => Err(Error::OperationFetch(format!("{}", e))),
+                Ok(OperationOutput::FetchExperiment(res)) => res,
+                Ok(e) => Err(Error::OperationFetch(format!("Exepected FetchExperiment, found {:?}", e)))
+            }
+        }
     }
 
     /// Async method, returning a future that ultimately resolves in an execution configuration,
@@ -787,13 +907,26 @@ impl CampaignHandle {
         commit: &ExperimentCommit,
         parameters: &ExecutionParameters,
         tags: Vec<&ExecutionTag>,
-    ) -> CreateExecutionFuture {
-        let (recv, op) = CreateExecutionOp::from(Stateful::from(Starting((
-            commit.to_owned(),
-            parameters.to_owned(),
-            tags.into_iter().map(|a| a.to_owned()).collect::<Vec<_>>(),
-        ))));
-        return CreateExecutionFuture(OperationFuture::new(op, self.sender.clone(), recv));
+    ) -> impl Future<Output=Result<ExecutionConf, Error>> {
+        debug!("CampaignHandle: Building async_create_execution future");
+        let mut chan = self._sender.clone();
+        let mut res = (*self).clone();
+        let commit = commit.to_owned();
+        let parameters = parameters.to_owned();
+        let tags = tags.into_iter().map(|a| a.to_owned()).collect::<Vec<ExecutionTag>>();
+        async move {
+            let (sender, receiver) = oneshot::channel();
+            trace!("CampaignHandle::async_create_execution_future: Sending input");
+            chan.send((sender, OperationInput::CreateExecution(commit, parameters, tags)))
+                .await
+                .map_err(|e| Error::Channel(e.to_string()))?;
+            trace!("CampaignHandle::async_create_execution_future: Awaiting output");
+            match receiver.await {
+                Err(e) => Err(Error::OperationFetch(format!("{}", e))),
+                Ok(OperationOutput::CreateExecution(res)) => res,
+                Ok(e) => Err(Error::OperationFetch(format!("Exepected CreateExecution, found {:?}", e)))
+            }
+        }
     }
 
     /// Async method, returning a future that ultimately resolves in the new configuration after it
@@ -802,326 +935,110 @@ impl CampaignHandle {
         &self,
         id: &ExecutionId,
         upd: &ExecutionUpdate,
-    ) -> UpdateExecutionFuture {
-        let (recv, op) =
-            UpdateExecutionOp::from(Stateful::from(Starting((id.to_owned(), upd.to_owned()))));
-        return UpdateExecutionFuture(OperationFuture::new(op, self.sender.clone(), recv));
+    ) -> impl Future<Output=Result<ExecutionConf, Error>>{
+        debug!("CampaignHandle: Building async_update_execution future");
+        let mut chan = self._sender.clone();
+        let mut res = (*self).clone();
+        let id = id.to_owned();
+        let upd = upd.to_owned();
+        async move {
+            let (sender, receiver) = oneshot::channel();
+            trace!("CampaignHandle::async_update_executio_future: Sending input");
+            chan.send((sender, OperationInput::UpdateExecution(id, upd)))
+                .await
+                .map_err(|e| Error::Channel(e.to_string()))?;
+            trace!("CampaignHandle::async_update_execution_future: Awaiting output");
+            match receiver.await {
+                Err(e) => Err(Error::OperationFetch(format!("{}", e))),
+                Ok(OperationOutput::UpdateExecution(res)) => res,
+                Ok(e) => Err(Error::OperationFetch(format!("Exepected UpdateExecution, found {:?}", e)))
+            }
+        }
     }
 
     /// Async method, returning a future that ultimately resolves in an execution configuration
     /// after it was finished.
-    pub fn async_finish_execution(&self, id: &ExecutionId) -> FinishExecutionFuture {
-        let (recv, op) = FinishExecutionOp::from(Stateful::from(Starting(id.to_owned())));
-        return FinishExecutionFuture(OperationFuture::new(op, self.sender.clone(), recv));
+    pub fn async_finish_execution(&self, id: &ExecutionId) -> impl Future<Output=Result<ExecutionConf, Error>>{
+        debug!("CampaignHandle: Building async_finish_execution future");
+        let mut chan = self._sender.clone();
+        let mut res = (*self).clone();
+        let id = id.to_owned();
+        async move {
+            let (sender, receiver) = oneshot::channel();
+            trace!("CampaignHandle::async_finish_execution_future: Sending input");
+            chan.send((sender, OperationInput::FinishExecution(id)))
+                .await
+                .map_err(|e| Error::Channel(e.to_string()))?;
+            trace!("CampaignHandle::async_finish_execution_future: Awaiting output");
+            match receiver.await {
+                Err(e) => Err(Error::OperationFetch(format!("{}", e))),
+                Ok(OperationOutput::FinishExecution(res)) => res,
+                Ok(e) => Err(Error::OperationFetch(format!("Exepected FinishExecution, found {:?}", e)))
+            }
+        }
     }
 
     /// Async method, returning a future that ultimately resolves in an empty type after it was
     /// finished.
-    pub fn async_delete_execution(&self, id: &ExecutionId) -> DeleteExecutionFuture {
-        let (recv, op) = DeleteExecutionOp::from(Stateful::from(Starting(id.to_owned())));
-        return DeleteExecutionFuture(OperationFuture::new(op, self.sender.clone(), recv));
-    }
-
+    pub fn async_delete_execution(&self, id: &ExecutionId) -> impl Future<Output=Result<(), Error>> {
+        debug!("CampaignHandle: Building async_delete_execution future");
+        let mut chan = self._sender.clone();
+        let mut res = (*self).clone();
+        let id = id.to_owned();
+        async move {
+            let (sender, receiver) = oneshot::channel();
+            trace!("CampaignHandle::async_delete_execution_future: Sending input");
+            chan.send((sender, OperationInput::DeleteExecution(id)))
+                .await
+                .map_err(|e| Error::Channel(e.to_string()))?;
+            trace!("CampaignHandle::async_delete_execution_future: Awaiting output");
+            match receiver.await {
+                Err(e) => Err(Error::OperationFetch(format!("{}", e))),
+                Ok(OperationOutput::DeleteExecution(res)) => res,
+                Ok(e) => Err(Error::OperationFetch(format!("Exepected DeleteExecution, found {:?}", e)))
+            }
+        }
+    }    
+    
     /// Async method, returning a future that ultimately resolves in an execution configuration
     /// after it was finished.
-    pub fn async_fetch_executions(&self) -> FetchExecutionsFuture {
-        let (recv, op) = FetchExecutionsOp::from(Stateful::from(Starting(())));
-        return FetchExecutionsFuture(OperationFuture::new(op, self.sender.clone(), recv));
-    }
-
+    pub fn async_fetch_executions(&self) -> impl Future<Output=Result<Vec<ExecutionConf>, Error>> {
+        debug!("CampaignHandle: Building async_fetch_executions future");
+        let mut chan = self._sender.clone();
+        let mut res = (*self).clone();
+        async move {
+            let (sender, receiver) = oneshot::channel();
+            trace!("CampaignHandle::async_fetch_executions_future: Sending input");
+            chan.send((sender, OperationInput::FetchExecutions))
+                .await
+                .map_err(|e| Error::Channel(e.to_string()))?;
+            trace!("CampaignHandle::async_fetch_executions_future: Awaiting output");
+            match receiver.await {
+                Err(e) => Err(Error::OperationFetch(format!("{}", e))),
+                Ok(OperationOutput::FetchExecutions(res)) => res,
+                Ok(e) => Err(Error::OperationFetch(format!("Exepected FetchExecutions, found {:?}", e)))
+            }
+        }
+    }    
+ 
     /// Async method, returning a future that ultimately resolves in a vector of execution conf.
-    pub fn async_get_executions(&self) -> GetExecutionsFuture {
-        let (recv, op) = GetExecutionsOp::from(Stateful::from(Starting(())));
-        return GetExecutionsFuture(OperationFuture::new(op, self.sender.clone(), recv));
-    }
-}
-
-///////////////////////////////////////////////////////////////////////////////////////// OPERATIONS
-// Check the primitives module for more info on the way the following works.
-
-/// A Future resolving in a Result over a Campaign conf after the experiment was fetched from remote.
-pub struct FetchExperimentFuture(
-    OperationFuture<FetchExperimentMarker, CampaignResource, CampaignConf>,
-);
-impl Future for FetchExperimentFuture {
-    type Output = Result<CampaignConf, crate::primitives::Error>;
-    fn poll(mut self: Pin<&mut Self>, context: & mut Context) -> Poll<Self::Output> {
-        Pin::new(&mut self.0).poll(context)
-    }
-}
-struct FetchExperimentMarker {}
-type FetchExperimentOp = Operation<FetchExperimentMarker>;
-impl UseResource<CampaignResource> for FetchExperimentOp {
-    fn progress(mut self: Box<Self>, resource: &mut CampaignResource) {
-        if let Some(_) = self.state.to_state::<Starting<()>>() {
-            trace!("FetchExperimentOp: Found Starting");
-            let result = resource.campaign.fetch_experiment();
-            self.state
-                .transition::<Starting<()>, Finished<_>>(Finished(result.map_err(PrimErr::from)));
-            resource.queue.push(self);
-        } else if let Some(_) = self.state.to_state::<Finished<CampaignConf>>() {
-            trace!("FetchExperimentOp: Found Finished");
-            let waker = self
-                .waker
-                .as_ref()
-                .expect("No waker given with FetchExperimentOp")
-                .to_owned();
-            let sender = self.sender.clone();
-            trace!("FetchExperimentOp: Sending...");
-            sender.send(*self);
-            trace!("FetchExperimentOp: Waking ...");
-            waker.wake();
-        } else {
-            unreachable!()
+    pub fn async_get_executions(&self) -> impl Future<Output=Result<Vec<ExecutionConf>, Error>> {
+        debug!("CampaignHandle: Building async_get_executions future");
+        let mut chan = self._sender.clone();
+        let mut res = (*self).clone();
+        async move {
+            let (sender, receiver) = oneshot::channel();
+            trace!("CampaignHandle::async_get_executions_future: Sending input");
+            chan.send((sender, OperationInput::GetExecutions))
+                .await
+                .map_err(|e| Error::Channel(e.to_string()))?;
+            trace!("CampaignHandle::async_get_executions_future: Awaiting output");
+            match receiver.await {
+                Err(e) => Err(Error::OperationFetch(format!("{}", e))),
+                Ok(OperationOutput::GetExecutions(res)) => res,
+                Ok(e) => Err(Error::OperationFetch(format!("Exepected GetExecutions, found {:?}", e)))
+            }
         }
-        trace!("FetchExperimentOp: Progress over.");
-    }
-}
-
-/// A Future that resolves to a Result on an ExecutionConf after the execution was created.
-pub struct CreateExecutionFuture(
-    OperationFuture<CreateExecutionMarker, CampaignResource, ExecutionConf>,
-);
-impl Future for CreateExecutionFuture {
-    type Output = Result<ExecutionConf, crate::primitives::Error>;
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
-        Pin::new(&mut self.0).poll(context)
-    }
-}
-struct CreateExecutionMarker {}
-type CreateExecutionOp = Operation<CreateExecutionMarker>;
-type CreateExecutionInput = (ExperimentCommit, ExecutionParameters, Vec<ExecutionTag>);
-impl UseResource<CampaignResource> for CreateExecutionOp {
-    fn progress(mut self: Box<Self>, resource: &mut CampaignResource) {
-        if let Some(s) = self.state.to_state::<Starting<CreateExecutionInput>>() {
-            trace!("CreateExecutionOp: Found Starting");
-            let result = resource
-                .campaign
-                .create_execution((s.0).0, (s.0).1, (s.0).2);
-            self.state
-                .transition::<Starting<CreateExecutionInput>, Finished<_>>(Finished(
-                    result.map_err(PrimErr::from),
-                ));
-            resource.queue.push(self);
-        } else if let Some(_) = self.state.to_state::<Finished<ExecutionConf>>() {
-            trace!("CreateExecutionOp: Found Finished");
-            let waker = self
-                .waker
-                .as_ref()
-                .expect("No waker given with CreateExecutionOp")
-                .to_owned();
-            let sender = self.sender.clone();
-            trace!("CreateExecutionOp: Sending...");
-            sender.send(*self);
-            trace!("CreateExecutionOp: Waking ...");
-            waker.wake();
-        } else {
-            unreachable!()
-        }
-        trace!("CreateExecutionOp: Progress over.");
-    }
-}
-
-/// A Future that resolves in a Result on an ExecutionConf after the execution was updated.
-pub struct UpdateExecutionFuture(
-    OperationFuture<UpdateExecutionMarker, CampaignResource, ExecutionConf>,
-);
-impl Future for UpdateExecutionFuture {
-    type Output = Result<ExecutionConf, crate::primitives::Error>;
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
-        Pin::new(&mut self.0).poll(context)
-    }
-}
-struct UpdateExecutionMarker {}
-type UpdateExecutionOp = Operation<UpdateExecutionMarker>;
-type UpdateExecutionInput = (ExecutionId, ExecutionUpdate);
-impl UseResource<CampaignResource> for UpdateExecutionOp {
-    fn progress(mut self: Box<Self>, resource: &mut CampaignResource) {
-        if let Some(s) = self.state.to_state::<Starting<UpdateExecutionInput>>() {
-            trace!("UpdateExecutionOp: Found Starting");
-            let result = resource.campaign.update_execution((s.0).0, (s.0).1);
-            self.state
-                .transition::<Starting<UpdateExecutionInput>, Finished<_>>(Finished(
-                    result.map_err(PrimErr::from),
-                ));
-            resource.queue.push(self);
-        } else if let Some(_) = self.state.to_state::<Finished<ExecutionConf>>() {
-            trace!("UpdateExecutionOp: Found Finished");
-            let waker = self
-                .waker
-                .as_ref()
-                .expect("No waker given with UpdateExecutionOp")
-                .to_owned();
-            let sender = self.sender.clone();
-            trace!("UpdateExecutionOp: Sending...");
-            sender.send(*self);
-            trace!("UpdateExecutionOp: Waking ...");
-            waker.wake();
-        } else {
-            unreachable!()
-        }
-        trace!("UpdateExecutionOp: Progress over.");
-    }
-}
-
-/// A Future that resolves in a Result on an ExecutionConf after the execution was finished.
-pub struct FinishExecutionFuture(
-    OperationFuture<FinishExecutionMarker, CampaignResource, ExecutionConf>,
-);
-impl Future for FinishExecutionFuture {
-    type Output = Result<ExecutionConf, crate::primitives::Error>;
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
-        Pin::new(&mut self.0).poll(context)
-    }
-}
-struct FinishExecutionMarker {}
-type FinishExecutionOp = Operation<FinishExecutionMarker>;
-impl UseResource<CampaignResource> for FinishExecutionOp {
-    fn progress(mut self: Box<Self>, resource: &mut CampaignResource) {
-        if let Some(s) = self.state.to_state::<Starting<ExecutionId>>() {
-            trace!("FinishExecutionOp: Found Starting");
-            let result = resource.campaign.finish_execution(s.0);
-            self.state
-                .transition::<Starting<ExecutionId>, Finished<_>>(Finished(
-                    result.map_err(PrimErr::from),
-                ));
-            resource.queue.push(self);
-        } else if let Some(_) = self.state.to_state::<Finished<ExecutionConf>>() {
-            trace!("FinishExecutionOp: Found Finished");
-            let waker = self
-                .waker
-                .as_ref()
-                .expect("No waker given with FinishExecutionOp")
-                .to_owned();
-            let sender = self.sender.clone();
-            trace!("FinishExecutionOp: Sending...");
-            sender.send(*self);
-            trace!("FinishExecutionOp: Waking ...");
-            waker.wake();
-        } else {
-            unreachable!()
-        }
-        trace!("FinishExecutionOp: Progress over.");
-    }
-}
-
-/// A Future that resolves in a Result on an empty type after the execution was deleted.
-#[derive(Debug)]
-pub struct DeleteExecutionFuture(OperationFuture<DeleteExecutionMarker, CampaignResource, ()>);
-impl Future for DeleteExecutionFuture {
-    type Output = Result<(), crate::primitives::Error>;
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
-        Pin::new(&mut self.0).poll(context)
-    }
-}
-struct DeleteExecutionMarker {}
-type DeleteExecutionOp = Operation<DeleteExecutionMarker>;
-impl UseResource<CampaignResource> for DeleteExecutionOp {
-    fn progress(mut self: Box<Self>, resource: &mut CampaignResource) {
-        if let Some(s) = self.state.to_state::<Starting<ExecutionId>>() {
-            trace!("DeleteExecutionOp: Found Starting");
-            let result = resource.campaign.delete_execution(s.0);
-            self.state
-                .transition::<Starting<ExecutionId>, Finished<_>>(Finished(
-                    result.map_err(PrimErr::from),
-                ));
-            resource.queue.push(self);
-        } else if let Some(_) = self.state.to_state::<Finished<()>>() {
-            trace!("DeleteExecutionOp: Found Finished");
-            let waker = self
-                .waker
-                .as_ref()
-                .expect("No waker given with DeleteExecutionOp")
-                .to_owned();
-            let sender = self.sender.clone();
-            trace!("DeleteExecutionOp: Sending...");
-            sender.send(*self);
-            trace!("DeleteExecutionOp: Waking ...");
-            waker.wake();
-        } else {
-            unreachable!()
-        }
-        trace!("DeleteExecutionOp: Progress over.");
-    }
-}
-
-/// A Future that resolves in a Result over a vector of ExecutionConf after the new executions were
-/// fetched.
-pub struct FetchExecutionsFuture(
-    OperationFuture<FetchExecutionsMarker, CampaignResource, Vec<ExecutionConf>>,
-);
-impl Future for FetchExecutionsFuture {
-    type Output = Result<Vec<ExecutionConf>, crate::primitives::Error>;
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
-        Pin::new(&mut self.0).poll(context)
-    }
-}
-struct FetchExecutionsMarker {}
-type FetchExecutionsOp = Operation<FetchExecutionsMarker>;
-impl UseResource<CampaignResource> for FetchExecutionsOp {
-    fn progress(mut self: Box<Self>, resource: &mut CampaignResource) {
-        if let Some(_) = self.state.to_state::<Starting<()>>() {
-            trace!("FetchExecutionsOp: Found Starting");
-            let result = resource.campaign.fetch_executions();
-            self.state
-                .transition::<Starting<()>, Finished<_>>(Finished(result.map_err(PrimErr::from)));
-            resource.queue.push(self);
-        } else if let Some(_) = self.state.to_state::<Finished<Vec<ExecutionConf>>>() {
-            trace!("FetchExecutionsOp: Found Finished");
-            let waker = self
-                .waker
-                .as_ref()
-                .expect("No waker given with FetchExecutionsOp")
-                .to_owned();
-            let sender = self.sender.clone();
-            trace!("FetchExecutionsOp: Sending...");
-            sender.send(*self);
-            trace!("FetchExecutionsOp: Waking ...");
-            waker.wake();
-        } else {
-            unreachable!()
-        }
-        trace!("FetchExecutionsOp: Progress over.");
-    }
-}
-
-/// A Future that resolves in a Result over a vector of ExecutionConf, after the current executions
-/// were collected.
-pub struct GetExecutionsFuture(
-    OperationFuture<GetExecutionsMarker, CampaignResource, Vec<ExecutionConf>>,
-);
-impl Future for GetExecutionsFuture {
-    type Output = Result<Vec<ExecutionConf>, crate::primitives::Error>;
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
-        Pin::new(&mut self.0).poll(context)
-    }
-}
-struct GetExecutionsMarker {}
-type GetExecutionsOp = Operation<GetExecutionsMarker>;
-impl UseResource<CampaignResource> for GetExecutionsOp {
-    fn progress(mut self: Box<Self>, resource: &mut CampaignResource) {
-        if let Some(_) = self.state.to_state::<Starting<()>>() {
-            trace!("GetExecutionsOp: Found Starting");
-            let result = resource.campaign.get_executions();
-            self.state
-                .transition::<Starting<()>, Finished<_>>(Finished(result.map_err(PrimErr::from)));
-            resource.queue.push(self);
-        } else if let Some(_) = self.state.to_state::<Finished<Vec<ExecutionConf>>>() {
-            trace!("GetExecutionsOp: Found Finished");
-            let waker = self
-                .waker
-                .as_ref()
-                .expect("No waker given with GetExecutionsOp")
-                .to_owned();
-            let sender = self.sender.clone();
-            trace!("GetExecutionsOp: Sending...");
-            sender.send(*self);
-            trace!("GetExecutionsOp: Waking ...");
-            waker.wake();
-        } else {
-            unreachable!()
-        }
-        trace!("GetExecutionsOp: Progress over.");
     }
 }
 
@@ -1230,7 +1147,7 @@ mod tests {
             Url::parse("git://localhost:9418/expe_repo").unwrap(),
         )
         .unwrap();
-        let repo = CampaignHandle::spawn_resource(repo.conf).unwrap();
+        let repo = CampaignHandle::spawn(repo.conf).unwrap();
         let commit = get_expe_repo_head();
         let exc = block_on(repo.async_create_execution(
             &ExperimentCommit(commit.clone()),
@@ -1266,7 +1183,7 @@ mod tests {
             Url::parse("git://localhost:9418/expe_repo").unwrap(),
         )
         .unwrap();
-        let repo = CampaignHandle::spawn_resource(repo.conf).unwrap();
+        let repo = CampaignHandle::spawn(repo.conf).unwrap();
 
         use futures::task::SpawnExt;
         let mut executor = futures::executor::ThreadPool::new().unwrap();
@@ -1313,7 +1230,7 @@ mod tests {
             Url::parse("git://localhost:9418/expe_repo").unwrap(),
         )
         .unwrap();
-        let repo = CampaignHandle::spawn_resource(repo.conf).unwrap();
+        let repo = CampaignHandle::spawn(repo.conf).unwrap();
         let commit = get_expe_repo_head();
         let exc = block_on(repo.async_create_execution(
             &ExperimentCommit(commit.clone()),
@@ -1363,7 +1280,7 @@ mod tests {
             Url::parse("git://localhost:9418/expe_repo").unwrap(),
         )
         .unwrap();
-        let repo = CampaignHandle::spawn_resource(repo.conf).unwrap();
+        let repo = CampaignHandle::spawn(repo.conf).unwrap();
         let commit = get_expe_repo_head();
         let exc = block_on(repo.async_create_execution(
             &ExperimentCommit(commit.clone()),
@@ -1407,7 +1324,7 @@ mod tests {
             Url::parse("git://localhost:9418/expe_repo").unwrap(),
         )
         .unwrap();
-        let repo = CampaignHandle::spawn_resource(repo.conf).unwrap();
+        let repo = CampaignHandle::spawn(repo.conf).unwrap();
         let commit = get_expe_repo_head();
         let exc = block_on(repo.async_create_execution(
             &ExperimentCommit(commit.clone()),

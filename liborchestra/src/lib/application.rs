@@ -277,6 +277,7 @@ impl ApplicationHandle {
                 jobs_executor: executor::ThreadPoolBuilder::new().name_prefix("application-pool")
                     .create().unwrap(),
             }));
+            trace!("Application Thread: Starting handling stream");
             let mut pool = executor::LocalPool::new();
             let mut spawner = pool.spawner();
             let handling_stream = receiver.for_each(
@@ -369,18 +370,18 @@ impl ApplicationHandle {
                              tags: Vec<repository::ExecutionTag>,
                              host: String) 
                              -> impl Future<Output=Result<(), Error>> {
-        debug!("ApplicationHandle: Submitting execution to host {} at commit {} with parameters {}", 
+        debug!("ApplicationHandle: Building async_submit_exec future to host {} at commit {} with parameters {}", 
             host, commit.0, parameters.0);
         let mut chan = self._sender.clone();
         let mut app = (*self).clone();
         app._dropper = None;
         async move {
             let (sender, receiver) = oneshot::channel();
-            trace!("ApplicationHandle: Sending submit exec input");
+            trace!("ApplicationHandle::async_submit_exec_future: Sending submit exec input");
             chan.send((sender, OperationInput::SubmitExec(commit, parameters, tags, host, app)))
                 .await
                 .map_err(|e| Error::Channel(e.to_string()))?;
-            trace!("ApplicationHandle: Awaiting submit exec output");
+            trace!("ApplicationHandle::async_submit_exec_future: Awaiting submit exec output");
             match receiver.await {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::SubmitExec(res)) => res,
@@ -830,7 +831,7 @@ os.utime(\".features\", None)").unwrap();
             Url::parse("git://localhost:9418/expe_repo").unwrap(),
         )
             .unwrap();
-        let repo = crate::repository::CampaignHandle::spawn_resource(repo.conf).unwrap();
+        let repo = crate::repository::CampaignHandle::spawn(repo.conf).unwrap();
 
         let conf = crate::hosts::HostConf {
             name: "localhost".to_owned(),
@@ -888,7 +889,7 @@ os.utime(\".features\", None)").unwrap();
             Url::parse("git://localhost:9418/expe_repo").unwrap(),
         )
             .unwrap();
-        let repo = crate::repository::CampaignHandle::spawn_resource(repo.conf).unwrap();
+        let repo = crate::repository::CampaignHandle::spawn(repo.conf).unwrap();
 
         let conf = crate::hosts::HostConf {
             name: "localhost".to_owned(),
@@ -959,7 +960,7 @@ os.utime(\".features\", None)").unwrap();
             Url::parse("git://localhost:9418/expe_repo").unwrap(),
         )
             .unwrap();
-        let repo = crate::repository::CampaignHandle::spawn_resource(repo.conf).unwrap();
+        let repo = crate::repository::CampaignHandle::spawn(repo.conf).unwrap();
 
         let conf = crate::hosts::HostConf {
             name: "localhost".to_owned(),
@@ -1011,7 +1012,7 @@ os.utime(\".features\", None)").unwrap();
         sshd.kill();
         sshd.wait();
         clean_expe_repo();
-        //clean_cmp_repo();
+        clean_cmp_repo();
     }
 
     #[test]
