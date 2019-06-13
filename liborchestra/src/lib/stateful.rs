@@ -28,22 +28,22 @@ pub trait TransitionsTo<A> where Self: Sized{
 /// Stateful is a trait object that wraps a state, and allows to cast to concrete type.
 #[derive(Debug)]
 pub struct Stateful{
-    state: Box<dyn State>,
+    _state: Box<dyn State>,
 }
 
 impl Stateful{
     /// Returns whether the state is A
     pub fn is_state<A: 'static>(&self) -> bool{
-        return self.state.as_any().is::<A>()
+        self._state.as_any().is::<A>()
     }
     /// Creates a clone of the state if it is A
     pub fn to_state<A: 'static + Clone>(&self) -> Option<A>{
-        self.state.as_any().downcast_ref::<A>().map(|a| a.to_owned())
+        self._state.as_any().downcast_ref::<A>().map(|a| a.to_owned())
     }
     /// Transitions from one state to another.
     pub fn transition<F:State+TransitionsTo<T>+Clone+'static, T:State+'static>(&mut self, other:T){
         if let Some(_) = self.to_state::<F>() {
-            self.state = Box::new(other);
+            self._state = Box::new(other);
         } else {
             panic!("Wrong transition occurred!")
         }
@@ -52,7 +52,7 @@ impl Stateful{
 
 impl<A> From<A> for Stateful where A: State + 'static{
     fn from(other: A) -> Stateful{
-        return Stateful{state: Box::new(other)}
+        Stateful{_state: Box::new(other)}
     }
 }
 
@@ -97,13 +97,10 @@ mod tests {
 
     #[test]
     fn test_derive(){
-
         #[derive(Clone, Debug, State)]
         struct St<A>(A) where A: Clone + Debug + Send + 'static;
         let a = St(44);
         a.as_any();
-
-
     }
 }
 

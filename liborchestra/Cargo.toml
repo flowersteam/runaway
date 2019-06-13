@@ -12,7 +12,7 @@ serde = "1.0"
 serde_derive = "1.0"
 serde_yaml = "0.7"
 regex = "1"
-futures-preview = "0.3.0-alpha.10"
+futures-preview = "=0.3.0-alpha.16"
 yaml-rust="0.4"
 rust-crypto = "0.2"
 uuid = { version = "0.6", features = ["serde", "v4"] }
@@ -24,6 +24,11 @@ url = "1.7.2"
 git2 = "0.8"
 crossbeam = "0.7.1"
 typetag = "0.1"
+tar = "0.4.26"
+ignore = "0.4.7"
+fasthash = "0.4.0"
+walkdir = "2.2.7"
+shells = "0.2"
 liborchestra-derive = {path = "../liborchestra-derive"}
 
 [lib]

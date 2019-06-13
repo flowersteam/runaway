@@ -2,7 +2,6 @@
 // Author: Alexandre Péré
 /// This module contains synchronization mechanisms for the campaign repositories. Those can be used
 /// to save the results of experiments, or collaborate on a campaign.
-
 //////////////////////////////////////////////////////////////////////////////////////////// IMPORTS
 use super::{CampaignConf, Error, ExecutionConf};
 
@@ -45,7 +44,6 @@ pub enum Synchronizer {
 /// Synchronizes nothing.
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
 pub struct NullSynchronizer {}
-
 
 impl SyncRepository for NullSynchronizer {
     fn init_repository_hook(&self, _cmp: &CampaignConf) -> Result<(), Error> {

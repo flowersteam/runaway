@@ -1,18 +1,21 @@
 // liborchestra/mod.rs
 // Author: Alexandre Péré
-#![feature(trace_macros, await_macro, async_await, futures_api, result_map_or_else, trait_alias)]
-///
-/// Liborchestra gives tools to manipulate expegit repositories, run scripts on user-defined hosts,
-/// and orchestrate the executions of batches of experiments under variations of parameters.
-///
-/// Concepts around which the code is written:
-/// + Experiment: refers to the code of the experiment. By extension, refers to the separate
-/// repository in which the experiment code is managed.
-/// + Execution: refers to the result of running the experiment once, for a given experiment
-/// repository commit, parameter and machine. By extension, refers to the encompassing structure.
-/// + Campaign: refers to an ensemble of executions. By extension, refers to the separate repository
-/// in which the executions are stored.
-/// + Running: refers to the act of running an experiment so as to obtain an execution.
+#![feature(trace_macros, await_macro, async_await, futures_api, result_map_or_else, trait_alias,
+try_blocks)]
+
+/**
+Liborchestra gives tools to manipulate expegit repositories, run scripts on user-defined hosts,
+and orchestrate the executions of batches of experiments under variations of parameters.
+
+Concepts around which the code is written:
++ Experiment: refers to the code of the experiment. By extension, refers to the separate
+repository in which the experiment code is managed.
++ Execution: refers to the result of running the experiment once, for a given experiment
+repository commit, parameter and machine. By extension, refers to the encompassing structure.
++ Campaign: refers to an ensemble of executions. By extension, refers to the separate repository
+in which the executions are stored.
++ Running: refers to the act of running an experiment so as to obtain an execution.
+*/
 
 //////////////////////////////////////////////////////////////////////////////////////////// IMPORTS
 #[macro_use]
@@ -35,15 +38,14 @@ extern crate ssh2;
 extern crate dirs;
 
 //////////////////////////////////////////////////////////////////////////////////////////// MODULES
-//mod utilities;
 pub mod ssh;
-//pub mod git;
 pub mod hosts;
 pub mod repository;
+//pub mod schedulers;
 pub mod misc;
 pub mod primitives;
 pub mod stateful;
-pub mod jobs;
+pub mod application;
 #[macro_use]
 pub mod error;
 
@@ -56,6 +58,23 @@ macro_rules! derive_from_error {
                     $error::$variant(err)
             }
         }
+    }
+}
+
+#[macro_export]
+macro_rules! try_or_notify {
+    ($result:expr, $text:expr, $repo:expr, $id:expr) => {
+        match $result{
+            Ok(h) => h,
+            Err(e) => {
+                let update = crate::repository::ExecutionUpdateBuilder::new()
+                    .state(crate::repository::ExecutionState::Failed)
+                    .message(format!($text, e))
+                    .build();
+                $repo .async_update_execution($id, &update).await;
+            return
+        }
+    };
     }
 }
 
@@ -87,6 +106,12 @@ pub static EXCCONF_RPATH: &str = ".excconf";
 pub static DATA_RPATH: &str = "data";
 // file containing expegit configuration
 pub static CMPCONF_RPATH: &str = ".cmpconf";
+// file containing the execution features
+pub static FEATURES_RPATH: &str = ".features";
+// product scheduler name
+pub static PRODUCT_SCHED_NAME: &str = "product";
+// resched scheduler name
+pub static RESCHED_SCHED_NAME: &str = "resched";
 
 ////////////////////////////////////////////////////////////////////////////////////////////// ERROR
 use error::Error;

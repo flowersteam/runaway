@@ -1,5 +1,6 @@
 // liborchestra/mod.rs
 // Author: Alexandre Péré
+
 /// This module contains structures that wraps the ssh2 session object to provide ways to handle 
 /// ssh configurations, authentications, and proxy-commands. In particular, since libssh2
 /// does not provide ways to handle proxy-commands, we use a threaded copy loop that open a
@@ -32,7 +33,7 @@ use std::{
     thread,
     io,
     pin::Pin,
-    task::{Poll, Waker},
+    task::{Poll, Waker, Context},
     io::{prelude::*, BufReader, copy, ErrorKind},
     process::{Stdio, Command, Output},
     os::unix::process::ExitStatusExt,
@@ -331,7 +332,7 @@ impl Remote {
             .map_err(|_| Error::ConnectionFailed(format!("Failed to preferences")))?;
         trace!("Remote: Performing handshake");
         session.handshake(stream)
-            .map_err(|_| Error::ConnectionFailed(format!("Failed to perform handshake.")))?;
+            .map_err(|e| Error::ConnectionFailed(format!("Failed to perform handshake: \n{}", e)))?;
         {
             trace!("Remote: Checking host key");
             let mut known_hosts = session.known_hosts().unwrap();
@@ -446,13 +447,15 @@ impl Remote {
                 return Err(Error::ExecutionFailed(format!("Failed to acquire eof")));
             }
         }
-        //let eof = eof.unwrap(); TODO: Remove This
         self.session().set_blocking(true);
         let ecode = match chan.exit_status() {
-            Ok(c) => c,
+            Ok(c) => {
+                trace!("Remote: Found exit code {}", c); c
+            }
             Err(_) => return Err(Error::ExecutionFailed(format!("Failed to get exit code")))
         };
         output.status = ExitStatusExt::from_raw(ecode);
+        trace!("Remote: Output is now {:?}", output);
         if let Err(_) = chan.close() {
             return Err(Error::ExecutionFailed(format!("Failed to close channel")))
         }
@@ -688,8 +691,8 @@ impl fmt::Debug for RemoteHandle {
 pub struct ExecFuture(OperationFuture<ExecMarker, RemoteResource, Output>);
 impl Future for ExecFuture {
     type Output = Result<Output, crate::primitives::Error>;
-    fn poll(mut self: Pin<&mut Self>, wake: &Waker) -> Poll<Self::Output> {
-        Pin::new(&mut self.0).poll(wake)
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(context)
     }
 }
 struct ExecMarker;
@@ -747,8 +750,8 @@ impl UseResource<RemoteResource> for ExecOp {
 pub struct ScpSendFuture(OperationFuture<ScpSendMarker, RemoteResource, ()>);
 impl Future for ScpSendFuture {
     type Output = Result<(), crate::primitives::Error>;
-    fn poll(mut self: Pin<&mut Self>, wake: &Waker) -> Poll<Self::Output> {
-        Pin::new(&mut self.0).poll(wake)
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(context)
     }
 }
 struct ScpSendMarker {}
@@ -808,8 +811,8 @@ impl UseResource<RemoteResource> for ScpSendOp {
 pub struct ScpFetchFuture(OperationFuture<ScpFetchMarker, RemoteResource, ()>);
 impl Future for ScpFetchFuture {
     type Output = Result<(), crate::primitives::Error>;
-    fn poll(mut self: Pin<&mut Self>, wake: &Waker) -> Poll<Self::Output> {
-        Pin::new(&mut self.0).poll(wake)
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> { 
+        Pin::new(&mut self.0).poll(context)
     }
 }
 struct ScpFetchMarker {}
@@ -874,7 +877,7 @@ fn bufread_bufcopy<R: BufRead, W:Write>(reader: &mut R, writer: &mut W) -> (u64,
     loop{
         match reader.fill_buf(){
             Ok(buf) => {
-                let l = std::cmp::min(1024000, buf.len());
+                let l = std::cmp::min(1_024_000, buf.len());
                 match writer.write(&buf[..l]){
                     Ok(0) => {
                         writer.flush();

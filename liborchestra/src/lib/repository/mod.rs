@@ -5,25 +5,25 @@
 /// the repository using futures. It communicates with a `CampaignResource` that manages the operations
 /// executions on the actual `Campaign`. If you have difficulties with the asynchronous design, check
 /// the primitives module.
-
 //////////////////////////////////////////////////////////////////////////////////////////// IMPORTS
 use super::{CMPCONF_RPATH, DATA_RPATH, EXCCONF_RPATH, EXCS_RPATH, XPRP_RPATH};
 use crate::misc;
 use crate::primitives::Error as PrimErr;
-use crate::primitives::{
-    Dropper, Finished, Operation, OperationFuture,
-    Starting, UseResource,
-};
+use crate::primitives::{Dropper, Finished, Operation, OperationFuture, Starting, UseResource};
 use crate::stateful::Stateful;
-use chrono;
+use chrono::prelude::*;
 use crossbeam::channel::{unbounded, Receiver, Sender, TryRecvError};
+use futures::Future;
 use git2;
 use serde_yaml;
 use std::collections::{HashMap, HashSet};
+use std::pin::Pin;
+use std::task::{Poll, Waker, Context};
 use std::{error, fmt, fs, io, path, str, thread};
 use url::Url;
 use uuid;
 use uuid::Uuid;
+use walkdir::WalkDir;
 
 ///////////////////////////////////////////////////////////////////////////////////////////// MODULE
 pub mod synchro;
@@ -176,7 +176,7 @@ pub enum ExecutionState {
     Initialized,
     Running,
     Failed,
-    Finished,
+    Completed,
 }
 
 impl<'a> From<&'a str> for ExecutionState {
@@ -185,7 +185,7 @@ impl<'a> From<&'a str> for ExecutionState {
             "initialized" => ExecutionState::Initialized,
             "running" => ExecutionState::Running,
             "failed" => ExecutionState::Failed,
-            "finished" => ExecutionState::Finished,
+            "completed" => ExecutionState::Completed,
             e => panic!("Unknown state {}", e),
         }
     }
@@ -197,7 +197,7 @@ impl fmt::Display for ExecutionState {
             ExecutionState::Initialized => write!(f, "Initialized"),
             ExecutionState::Running => write!(f, "Running"),
             ExecutionState::Failed => write!(f, "Interrupted"),
-            ExecutionState::Finished => write!(f, "Finished"),
+            ExecutionState::Completed => write!(f, "Completed"),
         }
     }
 }
@@ -232,22 +232,21 @@ impl fmt::Display for ExecutionId {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct ExecutionConf {
     pub identifier: ExecutionId,
-    pub orchestra_message: String,
     pub path: Option<path::PathBuf>,
     pub commit: ExperimentCommit,
     pub parameters: ExecutionParameters,
     pub state: ExecutionState,
     pub experiment_elements: Vec<path::PathBuf>,
     pub executor: Option<String>,
-    pub execution_date: Option<String>,
-    pub execution_duration: Option<u32>,
+    pub execution_beginning_date: Option<DateTime<Utc>>,
+    pub execution_ending_date: Option<DateTime<Utc>>,
     pub execution_stdout: Option<String>,
     pub execution_stderr: Option<String>,
-    pub execution_exit_code: Option<u32>,
-    pub execution_fitness: Option<f64>,
+    pub execution_message: Option<String>,
+    pub execution_exit_code: Option<i32>,
     pub execution_features: Option<Vec<f64>>,
     pub generator: String,
-    pub generation_date: String,
+    pub generation_date: DateTime<Utc>,
     pub tags: Vec<ExecutionTag>,
 }
 
@@ -285,35 +284,33 @@ impl ExecutionConf {
 
 impl fmt::Display for ExecutionConf {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Execution<{:?}>", self.identifier)
+        write!(f, "{}", self.identifier.0)
     }
 }
 
 /// Represents the update of an execution.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct ExecutionUpdate {
+    state: Option<ExecutionState>,
     executor: Option<String>,
-    execution_date: Option<String>,
-    execution_duration: Option<u32>,
     execution_stdout: Option<String>,
     execution_stderr: Option<String>,
-    execution_exit_code: Option<u32>,
-    execution_fitness: Option<f64>,
+    execution_exit_code: Option<i32>,
+    execution_features: Option<Vec<f64>>,
+    execution_message: Option<String>,
+    execution_beginning_date: Option<DateTime<Utc>>,
+    execution_ending_date: Option<DateTime<Utc>>,
 }
 
 impl ExecutionUpdate {
-
     /// Consumes the update and an execution to generate a new execution.
     fn apply(self, conf: ExecutionConf) -> ExecutionConf {
         let mut conf = conf;
+        if let Some(s) = self.state {
+            conf.state = s
+        }
         if let Some(s) = self.executor {
             conf.executor = Some(s)
-        }
-        if let Some(s) = self.execution_date {
-            conf.execution_date = Some(s)
-        }
-        if let Some(s) = self.execution_duration {
-            conf.execution_duration = Some(s)
         }
         if let Some(s) = self.execution_stdout {
             conf.execution_stdout = Some(s)
@@ -324,22 +321,108 @@ impl ExecutionUpdate {
         if let Some(s) = self.execution_exit_code {
             conf.execution_exit_code = Some(s)
         }
-        if let Some(s) = self.execution_fitness {
-            conf.execution_fitness = Some(s)
+        if let Some(s) = self.execution_features {
+            conf.execution_features = Some(s)
+        }
+        if let Some(s) = self.execution_message {
+            conf.execution_message = Some(s)
+        }
+        if let Some(s) = self.execution_beginning_date {
+            conf.execution_beginning_date = Some(s)
+        }
+        if let Some(s) = self.execution_ending_date {
+            conf.execution_ending_date = Some(s)
         }
         return conf;
     }
 }
 
+/// A structure to build Execution updates
+pub struct ExecutionUpdateBuilder(ExecutionUpdate);
+
+impl ExecutionUpdateBuilder {
+    /// Creates a new update.
+    pub fn new() -> ExecutionUpdateBuilder {
+        ExecutionUpdateBuilder(ExecutionUpdate {
+            state: None,
+            executor: None,
+            execution_stdout: None,
+            execution_stderr: None,
+            execution_message: None,
+            execution_exit_code: None,
+            execution_features: None,
+            execution_beginning_date: None,
+            execution_ending_date: None,
+        })
+    }
+
+    /// Sets the state
+    pub fn state(mut self, e: ExecutionState) -> Self {
+        self.0.state = Some(e);
+        return self;
+    }
+    /// Sets the executor
+    pub fn executor(mut self, e: String) -> Self {
+        self.0.executor = Some(e);
+        return self;
+    }
+
+    /// Sets the execution stdout
+    pub fn stdout(mut self, d: String) -> Self {
+        self.0.execution_stdout = Some(d);
+        return self;
+    }
+
+    /// Sets the execution stderr
+    pub fn stderr(mut self, d: String) -> Self {
+        self.0.execution_stderr = Some(d);
+        return self;
+    }
+
+    /// Sets the execution message
+    pub fn message(mut self, m: String) -> Self {
+        self.0.execution_message = Some(m);
+        return self;
+    }
+
+    /// Sets the execution exit code
+    pub fn exit_code(mut self, m: i32) -> Self {
+        self.0.execution_exit_code = Some(m);
+        return self;
+    }
+
+    /// Sets the execution features
+    pub fn features(mut self, m: Vec<f64>) -> Self {
+        self.0.execution_features = Some(m);
+        return self;
+    }
+
+    /// Sets the beginning time
+    pub fn beginning_date(mut self, m: DateTime<Utc>) -> Self {
+        self.0.execution_beginning_date = Some(m);
+        return self;
+    }
+
+    /// Sets the end time
+    pub fn ending_date(mut self, m: DateTime<Utc>) -> Self {
+        self.0.execution_ending_date = Some(m);
+        return self;
+    }
+
+    /// Returns the execution update
+    pub fn build(self) -> ExecutionUpdate {
+        return self.0;
+    }
+}
+
 /// The inner synchronous resource. Contains the different basic methods to manipulate a repository.
-struct Campaign {
-    conf: CampaignConf,
+pub struct Campaign {
+    pub conf: CampaignConf,
     cache: HashMap<ExecutionId, ExecutionConf>,
     synchro: Box<dyn synchro::SyncRepository>,
 }
 
 impl Campaign {
-
     /// Opens a Campaign from a local path.
     fn from(conf: CampaignConf) -> Result<Campaign, Error> {
         debug!("Campaign: Open campaign from conf {}", conf);
@@ -359,7 +442,7 @@ impl Campaign {
     }
 
     /// Opens a new repository at the local path, using the experiment repository url.
-    fn new(local_path: &path::PathBuf, experiment_url: Url) -> Result<Campaign, Error> {
+    pub fn new(local_path: &path::PathBuf, experiment_url: Url) -> Result<Campaign, Error> {
         debug!(
             "Campaign: Initializing campaign on experiment {} in {}",
             experiment_url,
@@ -443,23 +526,20 @@ impl Campaign {
         debug!("Campaign: Creating Execution");
         let mut exc_conf = ExecutionConf {
             commit,
-            orchestra_message: String::new(),
+            execution_message: None,
             parameters: param,
             state: ExecutionState::Initialized,
             path: None,
             experiment_elements: vec![],
             executor: None,
-            execution_date: None,
-            execution_duration: None,
+            execution_beginning_date: None,
+            execution_ending_date: None,
             execution_stdout: None,
             execution_stderr: None,
             execution_exit_code: None,
-            execution_fitness: None,
             execution_features: None,
             generator: misc::get_hostname().unwrap(),
-            generation_date: chrono::prelude::Utc::now()
-                .format("%Y-%m-%d %H:%M:%S")
-                .to_string(),
+            generation_date: Utc::now(),
             identifier: ExecutionId(uuid::Uuid::new_v4()),
             tags: tags.clone(),
         };
@@ -489,15 +569,14 @@ impl Campaign {
             .map_err(|_| Error::CreateExecution("Couldn't checkout tree".to_owned()))?;
         fs::remove_dir_all(exc_conf.get_path().join(".git"))
             .map_err(|_| Error::CreateExecution("Couldn't remove git folder".to_owned()))?;
-        fs::read_dir(exc_conf.get_path())
-            .unwrap()
-            .map(|r| match r {
-                Err(_) => Err(Error::CreateExecution(
-                    "Failed in elements gathering".to_owned(),
-                )),
-                Ok(r) => Ok(exc_conf.experiment_elements.push(r.path())),
-            })
-            .collect::<Result<Vec<()>, Error>>()?;
+        let path = exc_conf.get_path();
+        WalkDir::new(&path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.metadata().unwrap().is_file())
+            .map(|e| e.path().strip_prefix(&path).unwrap().to_path_buf())
+            .map(|e| exc_conf.experiment_elements.push(e))
+            .for_each(|_| {});
         fs::create_dir(exc_conf.get_path().join(DATA_RPATH))
             .map_err(|_| Error::CreateExecution("Failed to create data folder".to_owned()))?;
         exc_conf
@@ -572,9 +651,9 @@ impl Campaign {
                 })
             })
             .collect::<Result<Vec<()>, Error>>()?;
-        exc_conf.state = ExecutionState::Finished;
+        exc_conf.state = ExecutionState::Completed;
         exc_conf.to_file(&conf_path)?;
-        self.synchro.update_execution_hook(&exc_conf)?;
+        self.synchro.finish_execution_hook(&exc_conf)?;
         self.cache
             .insert(exc_conf.identifier.clone(), exc_conf.clone());
         Ok(exc_conf)
@@ -654,7 +733,6 @@ pub struct CampaignHandle {
 }
 
 impl CampaignHandle {
-
     /// This function spawns the thread that will handle all the repository operations using the
     /// CampaignResource, and returns a handle to it.
     pub fn spawn_resource(camp_conf: CampaignConf) -> Result<CampaignHandle, Error> {
@@ -699,7 +777,7 @@ impl CampaignHandle {
     /// fetched the origin changes on the experiment repository.
     pub fn async_fetch_experiment(&self) -> FetchExperimentFuture {
         let (recv, op) = FetchExperimentOp::from(Stateful::from(Starting(())));
-        return FetchExperimentFuture::new(op, self.sender.clone(), recv);
+        return FetchExperimentFuture(OperationFuture::new(op, self.sender.clone(), recv));
     }
 
     /// Async method, returning a future that ultimately resolves in an execution configuration,
@@ -715,7 +793,7 @@ impl CampaignHandle {
             parameters.to_owned(),
             tags.into_iter().map(|a| a.to_owned()).collect::<Vec<_>>(),
         ))));
-        return CreateExecutionFuture::new(op, self.sender.clone(), recv);
+        return CreateExecutionFuture(OperationFuture::new(op, self.sender.clone(), recv));
     }
 
     /// Async method, returning a future that ultimately resolves in the new configuration after it
@@ -725,38 +803,36 @@ impl CampaignHandle {
         id: &ExecutionId,
         upd: &ExecutionUpdate,
     ) -> UpdateExecutionFuture {
-        let (recv, op) = UpdateExecutionOp::from(Stateful::from(Starting((
-            id.to_owned(),
-            upd.to_owned(),
-        ))));
-        return UpdateExecutionFuture::new(op, self.sender.clone(), recv);
+        let (recv, op) =
+            UpdateExecutionOp::from(Stateful::from(Starting((id.to_owned(), upd.to_owned()))));
+        return UpdateExecutionFuture(OperationFuture::new(op, self.sender.clone(), recv));
     }
 
     /// Async method, returning a future that ultimately resolves in an execution configuration
     /// after it was finished.
     pub fn async_finish_execution(&self, id: &ExecutionId) -> FinishExecutionFuture {
         let (recv, op) = FinishExecutionOp::from(Stateful::from(Starting(id.to_owned())));
-        return FinishExecutionFuture::new(op, self.sender.clone(), recv);
+        return FinishExecutionFuture(OperationFuture::new(op, self.sender.clone(), recv));
     }
 
     /// Async method, returning a future that ultimately resolves in an empty type after it was
     /// finished.
     pub fn async_delete_execution(&self, id: &ExecutionId) -> DeleteExecutionFuture {
         let (recv, op) = DeleteExecutionOp::from(Stateful::from(Starting(id.to_owned())));
-        return DeleteExecutionFuture::new(op, self.sender.clone(), recv);
+        return DeleteExecutionFuture(OperationFuture::new(op, self.sender.clone(), recv));
     }
 
     /// Async method, returning a future that ultimately resolves in an execution configuration
     /// after it was finished.
     pub fn async_fetch_executions(&self) -> FetchExecutionsFuture {
         let (recv, op) = FetchExecutionsOp::from(Stateful::from(Starting(())));
-        return FetchExecutionsFuture::new(op, self.sender.clone(), recv);
+        return FetchExecutionsFuture(OperationFuture::new(op, self.sender.clone(), recv));
     }
 
     /// Async method, returning a future that ultimately resolves in a vector of execution conf.
     pub fn async_get_executions(&self) -> GetExecutionsFuture {
         let (recv, op) = GetExecutionsOp::from(Stateful::from(Starting(())));
-        return GetExecutionsFuture::new(op, self.sender.clone(), recv);
+        return GetExecutionsFuture(OperationFuture::new(op, self.sender.clone(), recv));
     }
 }
 
@@ -764,8 +840,15 @@ impl CampaignHandle {
 // Check the primitives module for more info on the way the following works.
 
 /// A Future resolving in a Result over a Campaign conf after the experiment was fetched from remote.
-pub type FetchExperimentFuture =
-    OperationFuture<FetchExperimentMarker, CampaignResource, CampaignConf>;
+pub struct FetchExperimentFuture(
+    OperationFuture<FetchExperimentMarker, CampaignResource, CampaignConf>,
+);
+impl Future for FetchExperimentFuture {
+    type Output = Result<CampaignConf, crate::primitives::Error>;
+    fn poll(mut self: Pin<&mut Self>, context: & mut Context) -> Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(context)
+    }
+}
 struct FetchExperimentMarker {}
 type FetchExperimentOp = Operation<FetchExperimentMarker>;
 impl UseResource<CampaignResource> for FetchExperimentOp {
@@ -774,9 +857,7 @@ impl UseResource<CampaignResource> for FetchExperimentOp {
             trace!("FetchExperimentOp: Found Starting");
             let result = resource.campaign.fetch_experiment();
             self.state
-                .transition::<Starting<()>, Finished<_>>(Finished(
-                    result.map_err(PrimErr::from),
-                ));
+                .transition::<Starting<()>, Finished<_>>(Finished(result.map_err(PrimErr::from)));
             resource.queue.push(self);
         } else if let Some(_) = self.state.to_state::<Finished<CampaignConf>>() {
             trace!("FetchExperimentOp: Found Finished");
@@ -798,25 +879,29 @@ impl UseResource<CampaignResource> for FetchExperimentOp {
 }
 
 /// A Future that resolves to a Result on an ExecutionConf after the execution was created.
-pub type CreateExecutionFuture =
-    OperationFuture<CreateExecutionMarker, CampaignResource, ExecutionConf>;
+pub struct CreateExecutionFuture(
+    OperationFuture<CreateExecutionMarker, CampaignResource, ExecutionConf>,
+);
+impl Future for CreateExecutionFuture {
+    type Output = Result<ExecutionConf, crate::primitives::Error>;
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(context)
+    }
+}
 struct CreateExecutionMarker {}
 type CreateExecutionOp = Operation<CreateExecutionMarker>;
 type CreateExecutionInput = (ExperimentCommit, ExecutionParameters, Vec<ExecutionTag>);
 impl UseResource<CampaignResource> for CreateExecutionOp {
     fn progress(mut self: Box<Self>, resource: &mut CampaignResource) {
-        if let Some(s) = self
-            .state
-            .to_state::<Starting<CreateExecutionInput>>()
-        {
+        if let Some(s) = self.state.to_state::<Starting<CreateExecutionInput>>() {
             trace!("CreateExecutionOp: Found Starting");
             let result = resource
                 .campaign
                 .create_execution((s.0).0, (s.0).1, (s.0).2);
             self.state
-                .transition::<Starting<CreateExecutionInput>, Finished<_>>(
-                    Finished(result.map_err(PrimErr::from)),
-                );
+                .transition::<Starting<CreateExecutionInput>, Finished<_>>(Finished(
+                    result.map_err(PrimErr::from),
+                ));
             resource.queue.push(self);
         } else if let Some(_) = self.state.to_state::<Finished<ExecutionConf>>() {
             trace!("CreateExecutionOp: Found Finished");
@@ -838,23 +923,27 @@ impl UseResource<CampaignResource> for CreateExecutionOp {
 }
 
 /// A Future that resolves in a Result on an ExecutionConf after the execution was updated.
-pub type UpdateExecutionFuture =
-    OperationFuture<UpdateExecutionMarker, CampaignResource, ExecutionConf>;
+pub struct UpdateExecutionFuture(
+    OperationFuture<UpdateExecutionMarker, CampaignResource, ExecutionConf>,
+);
+impl Future for UpdateExecutionFuture {
+    type Output = Result<ExecutionConf, crate::primitives::Error>;
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(context)
+    }
+}
 struct UpdateExecutionMarker {}
 type UpdateExecutionOp = Operation<UpdateExecutionMarker>;
 type UpdateExecutionInput = (ExecutionId, ExecutionUpdate);
 impl UseResource<CampaignResource> for UpdateExecutionOp {
     fn progress(mut self: Box<Self>, resource: &mut CampaignResource) {
-        if let Some(s) = self
-            .state
-            .to_state::<Starting<UpdateExecutionInput>>()
-        {
+        if let Some(s) = self.state.to_state::<Starting<UpdateExecutionInput>>() {
             trace!("UpdateExecutionOp: Found Starting");
             let result = resource.campaign.update_execution((s.0).0, (s.0).1);
             self.state
-                .transition::<Starting<UpdateExecutionInput>, Finished<_>>(
-                    Finished(result.map_err(PrimErr::from)),
-                );
+                .transition::<Starting<UpdateExecutionInput>, Finished<_>>(Finished(
+                    result.map_err(PrimErr::from),
+                ));
             resource.queue.push(self);
         } else if let Some(_) = self.state.to_state::<Finished<ExecutionConf>>() {
             trace!("UpdateExecutionOp: Found Finished");
@@ -876,8 +965,15 @@ impl UseResource<CampaignResource> for UpdateExecutionOp {
 }
 
 /// A Future that resolves in a Result on an ExecutionConf after the execution was finished.
-pub type FinishExecutionFuture =
-    OperationFuture<FinishExecutionMarker, CampaignResource, ExecutionConf>;
+pub struct FinishExecutionFuture(
+    OperationFuture<FinishExecutionMarker, CampaignResource, ExecutionConf>,
+);
+impl Future for FinishExecutionFuture {
+    type Output = Result<ExecutionConf, crate::primitives::Error>;
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(context)
+    }
+}
 struct FinishExecutionMarker {}
 type FinishExecutionOp = Operation<FinishExecutionMarker>;
 impl UseResource<CampaignResource> for FinishExecutionOp {
@@ -886,9 +982,9 @@ impl UseResource<CampaignResource> for FinishExecutionOp {
             trace!("FinishExecutionOp: Found Starting");
             let result = resource.campaign.finish_execution(s.0);
             self.state
-                .transition::<Starting<ExecutionId>, Finished<_>>(
-                    Finished(result.map_err(PrimErr::from)),
-                );
+                .transition::<Starting<ExecutionId>, Finished<_>>(Finished(
+                    result.map_err(PrimErr::from),
+                ));
             resource.queue.push(self);
         } else if let Some(_) = self.state.to_state::<Finished<ExecutionConf>>() {
             trace!("FinishExecutionOp: Found Finished");
@@ -910,7 +1006,14 @@ impl UseResource<CampaignResource> for FinishExecutionOp {
 }
 
 /// A Future that resolves in a Result on an empty type after the execution was deleted.
-pub type DeleteExecutionFuture = OperationFuture<DeleteExecutionMarker, CampaignResource, ()>;
+#[derive(Debug)]
+pub struct DeleteExecutionFuture(OperationFuture<DeleteExecutionMarker, CampaignResource, ()>);
+impl Future for DeleteExecutionFuture {
+    type Output = Result<(), crate::primitives::Error>;
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(context)
+    }
+}
 struct DeleteExecutionMarker {}
 type DeleteExecutionOp = Operation<DeleteExecutionMarker>;
 impl UseResource<CampaignResource> for DeleteExecutionOp {
@@ -919,9 +1022,9 @@ impl UseResource<CampaignResource> for DeleteExecutionOp {
             trace!("DeleteExecutionOp: Found Starting");
             let result = resource.campaign.delete_execution(s.0);
             self.state
-                .transition::<Starting<ExecutionId>, Finished<_>>(
-                    Finished(result.map_err(PrimErr::from)),
-                );
+                .transition::<Starting<ExecutionId>, Finished<_>>(Finished(
+                    result.map_err(PrimErr::from),
+                ));
             resource.queue.push(self);
         } else if let Some(_) = self.state.to_state::<Finished<()>>() {
             trace!("DeleteExecutionOp: Found Finished");
@@ -944,8 +1047,15 @@ impl UseResource<CampaignResource> for DeleteExecutionOp {
 
 /// A Future that resolves in a Result over a vector of ExecutionConf after the new executions were
 /// fetched.
-pub type FetchExecutionsFuture =
-    OperationFuture<FetchExecutionsMarker, CampaignResource, Vec<ExecutionConf>>;
+pub struct FetchExecutionsFuture(
+    OperationFuture<FetchExecutionsMarker, CampaignResource, Vec<ExecutionConf>>,
+);
+impl Future for FetchExecutionsFuture {
+    type Output = Result<Vec<ExecutionConf>, crate::primitives::Error>;
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(context)
+    }
+}
 struct FetchExecutionsMarker {}
 type FetchExecutionsOp = Operation<FetchExecutionsMarker>;
 impl UseResource<CampaignResource> for FetchExecutionsOp {
@@ -954,14 +1064,9 @@ impl UseResource<CampaignResource> for FetchExecutionsOp {
             trace!("FetchExecutionsOp: Found Starting");
             let result = resource.campaign.fetch_executions();
             self.state
-                .transition::<Starting<()>, Finished<_>>(Finished(
-                    result.map_err(PrimErr::from),
-                ));
+                .transition::<Starting<()>, Finished<_>>(Finished(result.map_err(PrimErr::from)));
             resource.queue.push(self);
-        } else if let Some(_) = self
-            .state
-            .to_state::<Finished<Vec<ExecutionConf>>>()
-        {
+        } else if let Some(_) = self.state.to_state::<Finished<Vec<ExecutionConf>>>() {
             trace!("FetchExecutionsOp: Found Finished");
             let waker = self
                 .waker
@@ -982,8 +1087,15 @@ impl UseResource<CampaignResource> for FetchExecutionsOp {
 
 /// A Future that resolves in a Result over a vector of ExecutionConf, after the current executions
 /// were collected.
-pub type GetExecutionsFuture =
-    OperationFuture<GetExecutionsMarker, CampaignResource, Vec<ExecutionConf>>;
+pub struct GetExecutionsFuture(
+    OperationFuture<GetExecutionsMarker, CampaignResource, Vec<ExecutionConf>>,
+);
+impl Future for GetExecutionsFuture {
+    type Output = Result<Vec<ExecutionConf>, crate::primitives::Error>;
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(context)
+    }
+}
 struct GetExecutionsMarker {}
 type GetExecutionsOp = Operation<GetExecutionsMarker>;
 impl UseResource<CampaignResource> for GetExecutionsOp {
@@ -992,14 +1104,9 @@ impl UseResource<CampaignResource> for GetExecutionsOp {
             trace!("GetExecutionsOp: Found Starting");
             let result = resource.campaign.get_executions();
             self.state
-                .transition::<Starting<()>, Finished<_>>(Finished(
-                    result.map_err(PrimErr::from),
-                ));
+                .transition::<Starting<()>, Finished<_>>(Finished(result.map_err(PrimErr::from)));
             resource.queue.push(self);
-        } else if let Some(_) = self
-            .state
-            .to_state::<Finished<Vec<ExecutionConf>>>()
-        {
+        } else if let Some(_) = self.state.to_state::<Finished<Vec<ExecutionConf>>>() {
             trace!("GetExecutionsOp: Found Finished");
             let waker = self
                 .waker
@@ -1023,8 +1130,8 @@ impl UseResource<CampaignResource> for GetExecutionsOp {
 mod tests {
 
     use super::*;
-    use std::time::Duration;
     use std::io::prelude::*;
+    use std::time::Duration;
     use std::{fs, process};
 
     fn init_logger() {
@@ -1144,54 +1251,53 @@ mod tests {
         clean_cmp_repo();
     }
 
-     #[test]
-     fn test_stress_create_execution() {
-         init_logger();
-         clean_expe_repo();
-         clean_cmp_repo();
-         setup_expe_repo();
+    #[test]
+    fn test_stress_create_execution() {
+        init_logger();
+        clean_expe_repo();
+        clean_cmp_repo();
+        setup_expe_repo();
 
-         use futures::executor::block_on;
+        use futures::executor::block_on;
 
-         let repo_path = path::PathBuf::from("/tmp/cmp_repo");
-         let repo = Campaign::new(
-             &repo_path,
-             Url::parse("git://localhost:9418/expe_repo").unwrap(),
-         )
-         .unwrap();
-         let repo = CampaignHandle::spawn_resource(repo.conf).unwrap();
+        let repo_path = path::PathBuf::from("/tmp/cmp_repo");
+        let repo = Campaign::new(
+            &repo_path,
+            Url::parse("git://localhost:9418/expe_repo").unwrap(),
+        )
+        .unwrap();
+        let repo = CampaignHandle::spawn_resource(repo.conf).unwrap();
 
-         use futures::task::SpawnExt;
-         let mut executor = futures::executor::ThreadPool::new().unwrap();
-         let mut handles = Vec::new();
-         let commit = get_expe_repo_head();
+        use futures::task::SpawnExt;
+        let mut executor = futures::executor::ThreadPool::new().unwrap();
+        let mut handles = Vec::new();
+        let commit = get_expe_repo_head();
 
-         for _ in 1..200 {
-             handles.push(
-                 executor
-                     .spawn_with_handle(repo.async_create_execution(
-                         &ExperimentCommit(commit.clone()),
-                         &ExecutionParameters("".to_owned()),
-                         vec![],
-                     ))
-                     .unwrap(),
-             )
-         }
-         let excs = handles
-             .into_iter()
-             .map(|h| executor.run(h).unwrap())
-             .collect::<Vec<_>>();
+        for _ in 1..200 {
+            handles.push(
+                executor
+                    .spawn_with_handle(repo.async_create_execution(
+                        &ExperimentCommit(commit.clone()),
+                        &ExecutionParameters("".to_owned()),
+                        vec![],
+                    ))
+                    .unwrap(),
+            )
+        }
+        let excs = handles
+            .into_iter()
+            .map(|h| executor.run(h).unwrap())
+            .collect::<Vec<_>>();
 
-         thread::sleep(Duration::new(1, 000));
-         let executions = block_on(repo.async_get_executions()).unwrap();
-         for exc in excs {
-             assert!(executions.contains(&exc));
-         }
+        thread::sleep(Duration::new(1, 000));
+        let executions = block_on(repo.async_get_executions()).unwrap();
+        for exc in excs {
+            assert!(executions.contains(&exc));
+        }
 
-         clean_expe_repo();
-         clean_cmp_repo();
-     }
-
+        clean_expe_repo();
+        clean_cmp_repo();
+    }
 
     #[test]
     fn test_update_execution() {
@@ -1217,13 +1323,15 @@ mod tests {
         .unwrap();
         println!("Execution: {:?}", exc);
         let upd = ExecutionUpdate {
+            state: Some(ExecutionState::Initialized),
             executor: Some("apere-pc".to_owned()),
-            execution_date: Some("now".to_owned()),
-            execution_duration: Some(50),
             execution_stdout: Some("Some stdout messages".to_owned()),
             execution_stderr: Some("Some stderr messages".to_owned()),
             execution_exit_code: Some(0),
-            execution_fitness: Some(50.),
+            execution_beginning_date: Some(Utc::now()),
+            execution_ending_date: Some(Utc::now()),
+            execution_features: Some(vec![1.5, 1.5]),
+            execution_message: Some("Some orchestra messages".to_owned()),
         };
 
         let exc_u = block_on(repo.async_update_execution(&exc.identifier, &upd)).unwrap();

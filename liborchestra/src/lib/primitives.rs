@@ -27,7 +27,7 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
-use std::task::Waker;
+use std::task::{Waker, Context};
 use std::thread::JoinHandle;
 
 ///////////////////////////////////////////////////////////////////////////////////////////// ERRORS
@@ -159,7 +159,10 @@ impl<M> Dropper<M> {
 impl<M> Drop for Dropper<M> {
     fn drop(&mut self) {
         if Arc::strong_count(&self.0) == 1 {
+            trace!("Dropper: Counter at 1. Joining...");
             self.0.lock().unwrap().take().unwrap().join().unwrap();
+        } else{
+            trace!("Dropper: Counter at {}. Dropping...", Arc::strong_count(&self.0))
         }
     }
 }
@@ -210,6 +213,15 @@ where
         };
     }
 }
+impl<M,R,O> Debug for OperationFuture<M,R,O> 
+where
+    Operation<M>: UseResource<R>,
+    M: 'static,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result{
+        write!(f, "OperationFuture")
+    }
+}
 
 // Generic implementation of the Operation future.
 impl<M, R, O> Future for OperationFuture<M, R, O>
@@ -220,13 +232,13 @@ where
 {
     type Output = Result<O, Error>;
 
-    fn poll(self: Pin<&mut Self>, wake: &Waker) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
         loop {
             let state = self._state.lock().unwrap();
             match state.replace(OperationFutureState::Hazardous) {
                 OperationFutureState::Starting((ope, sender, receiver)) => {
                     let mut ope = ope;
-                    ope.waker = Some(wake.to_owned());
+                    ope.waker = Some(context.waker().to_owned());
                     let (new_state, ret) = sender.send(Box::new(ope)).map_or_else(
                         |_| {
                             (

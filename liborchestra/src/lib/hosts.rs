@@ -9,19 +9,19 @@
 //////////////////////////////////////////////////////////////////////////////////////////// IMPORTS
 use super::SSH_CONFIG_RPATH;
 use crate::derive_from_error;
-use crate::primitives::{
-    Dropper, Finished, Operation, OperationFuture,
-    Starting, UseResource,
-};
+use crate::primitives::{Dropper, Finished, Operation, OperationFuture, Starting, UseResource};
 use crate::ssh;
 use crate::ssh::RemoteHandle;
 use crate::stateful::{Stateful, TransitionsTo};
 use crossbeam::channel::{unbounded, Receiver, Sender, TryRecvError};
 use dirs;
-use std::collections::HashMap;
-use std::thread;
+use futures::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 use std::{error, fmt, fs, io::prelude::*, path, str};
+use std::collections::HashMap;
+
 
 ///////////////////////////////////////////////////////////////////////////////////////////// ERRORS
 #[derive(Debug, Clone)]
@@ -208,7 +208,7 @@ impl Host {
         let conn = ssh::RemoteHandle::spawn_resource(profile)?;
         trace!("Host: Connection acquired: {:?}", conn);
         let pool = Vec::new();
-        let vars = EnvironmentVariables(HashMap::new());
+        let vars = EnvironmentVariables::new();
         return Ok(Host {
             conf,
             conn,
@@ -222,7 +222,7 @@ impl Host {
         debug!("Host: Starting allocation on {:?}", self.conn);
         let alloc_output: std::process::Output =
             futures::executor::block_on(self.conn.async_exec(&self.conf.start_alloc))
-                .map_err(|e|{Error::AllocationFailed(format!("Failed to allocate: {}",e))})?;
+                .map_err(|e| Error::AllocationFailed(format!("Failed to allocate: {}", e)))?;
         let alloc_id = match alloc_output.status.code() {
             Some(0) => {
                 trace!("Host: Allocation succeeded: {:?}", alloc_output);
@@ -286,8 +286,9 @@ impl Host {
         debug!("Host: Cancelling allocation...");
         let cancel_alloc = self.vars.substitute(&self.conf.cancel_alloc);
         let cancel_output: std::process::Output =
-            futures::executor::block_on(self.conn.async_exec(&cancel_alloc))
-                .map_err(|e| {Error::AllocationFailed(format!("Failed to cancel allocation: {}", e))})?;
+            futures::executor::block_on(self.conn.async_exec(&cancel_alloc)).map_err(|e| {
+                Error::AllocationFailed(format!("Failed to cancel allocation: {}", e))
+            })?;
         match cancel_output.status.code() {
             Some(0) => {
                 trace!("Host: Allocation cancelling succeeded");
@@ -376,9 +377,7 @@ struct HostResource {
 }
 impl HostResource {
     fn step(&mut self) {
-        debug!("HostResource: Stepping {:?}", self.host.conf.name);
         if let Some(HostIdling) = self.state.to_state::<HostIdling>() {
-            trace!("HostResource: Found Idling");
             if !self.queue.is_empty() {
                 trace!("HostResource: Found operations in queue. Allocating");
                 match self.host.start_alloc() {
@@ -388,16 +387,12 @@ impl HostResource {
                             .transition::<HostIdling, HostAllocated>(HostAllocated(Instant::now()))
                     }
                     Err(e) => {
-                        trace!("HostResource: Allocation failed :(");
-                        self.state
-                            .transition::<HostIdling, HostCrashed>(HostCrashed(
-                                Error::HostResourceCrashed(format!("{}", e)),
-                            ))
+                        warn!("HostResource: Allocation failed :( : {}", e);
                     }
+
                 }
             }
         } else if let Some(HostAllocated(beginning)) = self.state.to_state::<HostAllocated>() {
-            trace!("HostResource: Found Allocated");
             if Instant::now().duration_since(beginning)
                 > Duration::from_secs(self.host.conf.alloc_duration as u64)
             {
@@ -406,7 +401,6 @@ impl HostResource {
                     .transition::<HostAllocated, HostLocked>(HostLocked);
             }
         } else if let Some(HostLocked) = self.state.to_state::<HostLocked>() {
-            trace!("HostResource: Found Locked");
             if self.host.is_free() {
                 trace!("HostResource: No running jobs encountered. Cancelling allocation...");
                 match self.host.cancel_alloc() {
@@ -417,11 +411,9 @@ impl HostResource {
                             Error::HostResourceCrashed(format!("{}", e)),
                         )),
                 }
-            } else {
-                trace!("HostResource: Jobs still running. Postponing canceling.")
             }
         } else if let Some(HostCrashed(e)) = self.state.to_state::<HostCrashed>() {
-            trace!("HostResource: Found Crashed: {}", e);
+            //error!("HostResource: Found Crashed: {}", e);
         } else {
             unreachable!()
         }
@@ -437,19 +429,28 @@ pub struct HostHandle {
     dropper: Dropper<()>,
 }
 
+impl fmt::Debug for HostHandle {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "HostHandle<{:?}>", self.conf)
+    }
+}
+
+impl fmt::Display for HostHandle{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.conf.name)
+    }
+}
+
 impl HostHandle {
     /// Spawns the resource in a separate thread and returns a handle to it.
     pub fn spawn_resource(host_conf: HostConf) -> Result<HostHandle, Error> {
-        debug!(
-            "HostHandle: Spawning host resource {:?}",
-            host_conf.name
-        );
+        debug!("HostHandle: Spawning host resource {:?}", host_conf.name);
         let host = Host::from_conf(host_conf.clone())?;
         let mut res = HostResource {
-                state: Stateful::from(HostIdling),
-                host,
-                queue: Vec::new(),
-            };
+            state: Stateful::from(HostIdling),
+            host,
+            queue: Vec::new(),
+        };
         let (sender, receiver): (Sender<HostOp>, Receiver<HostOp>) = unbounded();
         let handle = std::thread::spawn(move || {
             trace!("HostResource: Starting resource loop");
@@ -474,7 +475,7 @@ impl HostHandle {
                 }
             }
             trace!("HostResource: Resource loop left.");
-            while !res.state.is_state::<HostIdling>() {
+            while !res.state.is_state::<HostIdling>() && !res.state.is_state::<HostCrashed>() {
                 res.step();
             }
             trace!("HostResource: Idling Reached. Leaving thread.");
@@ -490,12 +491,16 @@ impl HostHandle {
     /// Returns a future that ultimately resolves to a Result over a RemoteConnection to a node.
     pub fn async_acquire(&self) -> AcquireNodeFuture {
         let (recv, op) = AcquireNodeOp::from(Stateful::from(Starting(())));
-        return AcquireNodeFuture::new(op, self.sender.clone(), recv);
+        return AcquireNodeFuture(OperationFuture::new(op, self.sender.clone(), recv));
     }
 
     /// Returns the directory that contains the executions.
-    pub fn get_host_directory(&self) -> path::PathBuf{
-        return self.conf.directory.clone()
+    pub fn get_host_directory(&self) -> path::PathBuf {
+        return self.conf.directory.clone();
+    }
+
+    pub fn get_name(&self) -> String {
+        return self.conf.name.clone();
     }
 
 }
@@ -504,7 +509,13 @@ impl HostHandle {
 // The only operation is the Acquire operation which allows to get a remote connection to a node.
 
 /// A Future that resolves to a Result on a RemoteHandle, after a node has been acquired.
-pub type AcquireNodeFuture = OperationFuture<AcquireNodeMarker, HostResource, RemoteHandle>;
+pub struct AcquireNodeFuture(OperationFuture<AcquireNodeMarker, HostResource, RemoteHandle>);
+impl Future for AcquireNodeFuture {
+    type Output = Result<RemoteHandle, crate::primitives::Error>;
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context) -> Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(context)
+    }
+}
 struct AcquireNodeMarker {}
 type AcquireNodeOp = Operation<AcquireNodeMarker>;
 impl UseResource<HostResource> for AcquireNodeOp {
@@ -517,22 +528,23 @@ impl UseResource<HostResource> for AcquireNodeOp {
                     resource.queue.push(self);
                 } else {
                     trace!("AcquireNodeOp: Node available. Acquiring...");
-                    self.state
-                        .transition::<Starting<()>, Finished<_>>(
-                            Finished(resource.host.try_acquire().ok_or(
-                                crate::primitives::Error::from(Error::AcquireNodeFailed(
-                                    "Failed to acquire.".to_owned(),
-                                )),
-                            )),
-                        );
+                    self.state.transition::<Starting<()>, Finished<_>>(Finished(
+                        resource
+                            .host
+                            .try_acquire()
+                            .ok_or(crate::primitives::Error::from(Error::AcquireNodeFailed(
+                                "Failed to acquire.".to_owned(),
+                            ))),
+                    ));
                     resource.queue.push(self);
                 }
             } else if let Some(HostCrashed(e)) = resource.state.to_state::<HostCrashed>() {
                 trace!("AcquireNodeOp: HostResource found crashed. Finishing...");
                 self.state
-                    .transition::<Starting<()>, Finished<RemoteHandle>>(
-                        Finished(Err(crate::primitives::Error::from(e))),
-                    )
+                    .transition::<Starting<()>, Finished<RemoteHandle>>(Finished(Err(
+                        crate::primitives::Error::from(e),
+                    )));
+                resource.queue.push(self);
             } else {
                 trace!("AcquireNodeOp: HostResource Locked or Idle. Rescheduling...");
                 resource.queue.push(self);
@@ -640,6 +652,7 @@ mod test {
     #[test]
     fn test_host_resource() {
         use futures::executor::block_on;
+        use std::thread;
 
         init();
 
@@ -672,9 +685,9 @@ mod test {
         assert!(conn2.is_ok());
         println!("conn3: {:?}", conn3);
         assert!(conn3.is_ok());
-        thread::sleep(Duration::new(2,0));
+        thread::sleep(Duration::new(2, 0));
         std::thread::spawn(|| {
-            thread::sleep(Duration::new(11,0));
+            thread::sleep(Duration::new(11, 0));
             drop(conn2);
             drop(conn3);
             println!("conn2-3 dropped");
