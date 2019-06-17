@@ -1,5 +1,6 @@
 // liborchestra/hosts.rs
 // Author: Alexandre Péré
+
 /// This module contains structure that manages host allocations. The resulting tool is the
 /// HostResource, which given an host configuration provide asynchronous nodes allocation. Put
 /// differently, it allows to await a node to be available for computation, given the restrictions
@@ -163,8 +164,8 @@ impl HostConf {
 }
 
 // Represents what should be kept on the host once the execution is done.
-#[derive(Debug)]
-enum LeaveConfig {
+#[derive(Debug, Clone)]
+pub enum LeaveConfig {
     Nothing,
     Code,
     Everything,
@@ -418,6 +419,29 @@ impl HostResource {
             unreachable!()
         }
     }
+
+    fn finish(&mut self) {
+        debug!("HostResource: Finishing.");
+        if let Some(HostAllocated(beginning)) = self.state.to_state::<HostAllocated>() {
+            if self.host.is_free() {
+                trace!("HostResource: No running jobs encountered. Locking host...");
+                self.state.transition::<HostAllocated, HostLocked>(HostLocked);
+            }
+        } else if let Some(HostLocked) = self.state.to_state::<HostLocked>() {
+            if self.host.is_free() {
+                trace!("HostResource: No running jobs encountered. Cancelling allocation...");
+                match self.host.cancel_alloc() {
+                    Ok(_) => self.state.transition::<HostLocked, HostIdling>(HostIdling),
+                    Err(e) => self
+                        .state
+                        .transition::<HostLocked, HostCrashed>(HostCrashed(
+                            Error::HostResourceCrashed(format!("{}", e)),
+                        )),
+                }
+            }
+        }
+        return ;
+    }
 }
 
 /// A handle that allows to create futures to perform operations on the host. Mainly, acquiring
@@ -476,15 +500,15 @@ impl HostHandle {
             }
             trace!("HostResource: Resource loop left.");
             while !res.state.is_state::<HostIdling>() && !res.state.is_state::<HostCrashed>() {
-                res.step();
+                res.finish();
             }
             trace!("HostResource: Idling Reached. Leaving thread.");
             return ();
         });
         return Ok(HostHandle {
             sender,
-            conf: host_conf,
-            dropper: Dropper::from_handle(handle),
+            conf: host_conf.clone(),
+            dropper: Dropper::from_handle(handle, format!("HostHandle<{}>", host_conf.name)),
         });
     }
 
@@ -499,8 +523,19 @@ impl HostHandle {
         return self.conf.directory.clone();
     }
 
+    /// Returns the name of the host.
     pub fn get_name(&self) -> String {
         return self.conf.name.clone();
+    }
+
+    /// Returns the command to execute before the executions.
+    pub fn get_before_execution_command(&self) -> String{
+        return self.conf.before_execution.clone();
+    }
+
+    /// Returns the command to execute after the executions.
+    pub fn get_after_execution_command(&self) -> String{
+        return self.conf.after_execution.clone();
     }
 
 }
@@ -525,7 +560,7 @@ impl UseResource<HostResource> for AcquireNodeOp {
             if let Some(HostAllocated(_)) = resource.state.to_state::<HostAllocated>() {
                 if resource.host.is_full() {
                     trace!("AcquireNodeOp: All nodes taken. Rescheduling...");
-                    resource.queue.push(self);
+                    resource.queue.insert(0, self);
                 } else {
                     trace!("AcquireNodeOp: Node available. Acquiring...");
                     self.state.transition::<Starting<()>, Finished<_>>(Finished(
@@ -536,7 +571,7 @@ impl UseResource<HostResource> for AcquireNodeOp {
                                 "Failed to acquire.".to_owned(),
                             ))),
                     ));
-                    resource.queue.push(self);
+                    resource.queue.insert(0, self);
                 }
             } else if let Some(HostCrashed(e)) = resource.state.to_state::<HostCrashed>() {
                 trace!("AcquireNodeOp: HostResource found crashed. Finishing...");
@@ -544,10 +579,10 @@ impl UseResource<HostResource> for AcquireNodeOp {
                     .transition::<Starting<()>, Finished<RemoteHandle>>(Finished(Err(
                         crate::primitives::Error::from(e),
                     )));
-                resource.queue.push(self);
+                resource.queue.insert(0, self);
             } else {
                 trace!("AcquireNodeOp: HostResource Locked or Idle. Rescheduling...");
-                resource.queue.push(self);
+                resource.queue.insert(0, self);
             }
         } else if let Some(_) = self.state.to_state::<Finished<RemoteHandle>>() {
             trace!("AcquireNodeOp: Found Finished");

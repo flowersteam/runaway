@@ -130,8 +130,8 @@ impl ProxyCommandForwarder {
     /// Creates a new `ProxyCommandForwarder` from a command. An available port is automatically
     /// given by the OS, and is returned along with the forwarder. 
     pub fn from_command(command: &str) -> Result<(ProxyCommandForwarder, SocketAddr), Error> {
-        debug!("Starting proxy command: {}", command);
-        trace!("Starting proxy command tcp listener");
+        debug!("ProxyCommandForwarder: Starting proxy command: {}", command);
+        trace!("ProxyCommandForwarder: Starting tcp listener");
         let stream = match std::net::TcpListener::bind("127.0.0.1:0") {
             Ok(s) => s,
             Err(e) => return Err(Error::ProxyCommandStartup(
@@ -145,14 +145,14 @@ impl ProxyCommandForwarder {
         let mut cmd = command.split_whitespace().collect::<Vec<_>>();
         let args = cmd.split_off(1);
         let cmd = cmd.pop().unwrap();
-        trace!("Spawning proxy command");
+        trace!("ProxyCommandForwarder: Spawning proxy command");
         let mut command = Command::new(cmd)
             .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
-        trace!("Spawning proxy command forwarding thread");
+        trace!("ProxyCommandForwarder: Spawning proxy command forwarding thread");
         let handle = std::thread::spawn(move || {
             let (socket, _) = stream.accept().unwrap();
             let mut socket1 = socket.try_clone().unwrap();
@@ -171,7 +171,7 @@ impl ProxyCommandForwarder {
                     }
                 }
                 socket1.shutdown(Shutdown::Write);
-                trace!("Exiting command -> socket thread");
+                trace!("ProxyCommandForwarder: Exiting command -> socket thread");
             });
             let h2 = std::thread::spawn(move || {
                 while kf2.load(Ordering::Relaxed) {
@@ -182,20 +182,20 @@ impl ProxyCommandForwarder {
                     }
                 }
                 socket2.shutdown(Shutdown::Read);
-                trace!("Exiting socket -> command thread");
+                trace!("ProxyCommandForwarder: Exiting socket -> command thread");
             });
             let h3 = std::thread::spawn(move || {
                 while kf3.load(Ordering::Relaxed) {
                     if let Ok(Some(_)) = command.try_wait() {
-                        trace!("Proxy Command has stopped. Exiting");
+                        trace!("ProxyCommandForwarder: Proxy Command has stopped. Exiting");
                         kf3.store(false, Ordering::Relaxed);
                     }
                 }
-                trace!("Exiting alive watch thread");
+                trace!("ProxyCommandForwarder: Exiting watch thread");
             });
             return (h1, h2, h3);
         });
-        trace!("Returning proxy command");
+        trace!("ProxyCommandForwarder: Returning proxy command");
         return Ok((ProxyCommandForwarder {
             keep_alive: keep_forwarding,
             handle: Some(handle),
@@ -215,16 +215,12 @@ impl fmt::Debug for ProxyCommandForwarder{
 // process.
 impl Drop for ProxyCommandForwarder { 
     fn drop(&mut self) {
-        debug!("Dropping proxy command");
-        trace!("Stop forwarding");
         self.keep_alive.store(false, Ordering::Relaxed);
-        trace!("Waiting for thread handles");
         let handle = self.handle.take().unwrap();
         let (h1, h2, h3) = handle.join().unwrap();
-        h1.join();
-        h2.join();
-        h3.join();
-        trace!("Proxy command fully dropped");
+        h1.join().unwrap();
+        h2.join().unwrap();
+        h3.join().unwrap();
     }
 }
 
@@ -641,8 +637,8 @@ impl RemoteHandle {
         let repr = rr.recv().unwrap()?;
         return Ok(RemoteHandle{
             sender,
-            repr,
-            dropper: Dropper::from_handle(handle),
+            repr: repr.clone(),
+            dropper: Dropper::from_handle(handle, format!("RemoteHandle<{}>", repr)),
         });
     }
 
@@ -705,12 +701,12 @@ impl UseResource<RemoteResource> for ExecOp {
             match resource.remote.start_exec(&s.0){
                 Ok(id) => {
                     self.state.transition::<Starting<String>, Progressing<_>>(Progressing(id));
-                    resource.queue.push(self);
+                    resource.queue.insert(0, self);
                 }
                 Err(e) => {
                     self.state.transition::<Starting<String>, Finished<Output>>(Finished(Err(
                         crate::primitives::Error::from(e))));
-                    resource.queue.push(self);
+                    resource.queue.insert(0, self);
                 }
             }
         }else if let Some(s) = self.state.to_state::<Progressing<Uuid>>(){
@@ -718,13 +714,13 @@ impl UseResource<RemoteResource> for ExecOp {
             match resource.remote.continue_exec(&s.0){
                 Ok(o) => {
                     self.state.transition::<Progressing<Uuid>, Finished<_>>(Finished(Ok(o)));
-                    resource.queue.push(self);
+                    resource.queue.insert(0, self);
                 }
-                Err(Error::WouldBlock) => resource.queue.push(self),
+                Err(Error::WouldBlock) => resource.queue.insert(0, self),
                 Err(e) => {
                     self.state.transition::<Progressing<Uuid>, Finished<Output>>(Finished(Err(
                         crate::primitives::Error::from(e))));
-                    resource.queue.push(self);
+                    resource.queue.insert(0, self);
                 }
             }
         } else if let Some(_) = self.state.to_state::<Finished<Output>>() {
@@ -766,12 +762,12 @@ impl UseResource<RemoteResource> for ScpSendOp {
                     self.state.transition::<Starting<(PathBuf, PathBuf)>, Progressing<_>>(
                         Progressing(id)
                     );
-                    resource.queue.push(self);
+                    resource.queue.insert(0, self);
                 }
                 Err(e) => {
                     self.state.transition::<Starting<(PathBuf, PathBuf)>, Finished<()>>(Finished(Err(
                         crate::primitives::Error::from(e))));
-                    resource.queue.push(self);
+                    resource.queue.insert(0, self);
                 }
             }
         }else if let Some(s) = self.state.to_state::<Progressing<Uuid>>(){
@@ -779,13 +775,13 @@ impl UseResource<RemoteResource> for ScpSendOp {
             match resource.remote.continue_scp_send(&s.0){
                 Ok(o) => {
                     self.state.transition::<Progressing<Uuid>, Finished<()>>(Finished(Ok(o)));
-                    resource.queue.push(self);
+                    resource.queue.insert(0, self);
                 }
-                Err(Error::WouldBlock) => resource.queue.push(self),
+                Err(Error::WouldBlock) => resource.queue.insert(0, self),
                 Err(e) => {
                     self.state.transition::<Progressing<Uuid>, Finished<()>>(Finished(Err(
                         crate::primitives::Error::from(e))));
-                    resource.queue.push(self);
+                    resource.queue.insert(0, self);
                 }
             }
         } else if let Some(_) = self.state.to_state::<Finished<()>>() {
@@ -827,12 +823,12 @@ impl UseResource<RemoteResource> for ScpFetchOp {
                     self.state.transition::<Starting<(PathBuf, PathBuf)>, Progressing<_>>(
                         Progressing(id)
                     );
-                    resource.queue.push(self);
+                    resource.queue.insert(0, self);
                 }
                 Err(e) => {
                     self.state.transition::<Starting<(PathBuf, PathBuf)>, Finished<()>>(Finished(Err(
                         crate::primitives::Error::from(e))));
-                    resource.queue.push(self);
+                    resource.queue.insert(0, self);
                 }
             }
         }else if let Some(s) = self.state.to_state::<Progressing<Uuid>>(){
@@ -840,13 +836,13 @@ impl UseResource<RemoteResource> for ScpFetchOp {
             match resource.remote.continue_scp_fetch(&s.0){
                 Ok(o) => {
                     self.state.transition::<Progressing<Uuid>, Finished<()>>(Finished(Ok(o)));
-                    resource.queue.push(self);
+                    resource.queue.insert(0, self);
                 }
-                Err(Error::WouldBlock) => resource.queue.push(self),
+                Err(Error::WouldBlock) => resource.queue.insert(0, self),
                 Err(e) => {
                     self.state.transition::<Progressing<Uuid>, Finished<()>>(Finished(Err(
                         crate::primitives::Error::from(e))));
-                    resource.queue.push(self);
+                    resource.queue.insert(0, self);
                 }
             }
         } else if let Some(_) = self.state.to_state::<Finished<()>>() {
@@ -940,6 +936,11 @@ fn read_bufcopy<R:Read, W:Write>(reader: &mut R, writer: &mut W) -> (u64, Result
 mod test {
     use super::*;
     use crate::ssh::config::SshProfile;
+
+    fn init_logger() {
+        std::env::set_var("RUST_LOG", "liborchestra::ssh=trace");
+        let _ = env_logger::builder().is_test(true).try_init();
+    }
 
     #[test]
     fn test_proxy_command_forwarder() {
@@ -1045,12 +1046,15 @@ mod test {
 
     #[test]
     fn test_async_concurrent_exec(){
+
+        init_logger();
+
         let profile = SshProfile{
-            name: "localhost".to_owned(),
+            name: "test".to_owned(),
             hostname: Some("127.0.0.1".to_owned()),
             user: Some("apere".to_owned()),
-            port: Some(22),
-            proxycommand: None,
+            port: None,
+            proxycommand: Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
         };
         let remote = RemoteHandle::spawn_resource(profile).unwrap();
         async fn connect_and_ls(remote: RemoteHandle) -> std::process::Output{
