@@ -1,24 +1,23 @@
-// liborchestra/repository/mod.rs
-// Author: Alexandre Péré
-/// This module contains a `Campaign` structure representing a campaign repository, and providing the
-/// main methods to act on it. An asynchronous interface `CampaignResourceHandle` allows to act on
-/// the repository using futures. It communicates with a `CampaignResource` that manages the operations
-/// executions on the actual `Campaign`. If you have difficulties with the asynchronous design, check
-/// the primitives module.
+//! liborchestra/repository/mod.rs
+//! Author: Alexandre Péré
+//! 
+//! This module contains a `Campaign` structure representing a campaign repository, and providing the
+//! main methods to act on it. An asynchronous interface `CampaignResourceHandle` allows to act on
+//! the repository using futures. It communicates with a `CampaignResource` that manages the operations
+//! executions on the actual `Campaign`. If you have difficulties with the asynchronous design, check
+//! the primitives module.
 
-//////////////////////////////////////////////////////////////////////////////////////////// IMPORTS
+
+//------------------------------------------------------------------------------------------ IMPORTS
+
+
 use super::{CMPCONF_RPATH, DATA_RPATH, EXCCONF_RPATH, EXCS_RPATH, XPRP_RPATH};
 use crate::misc;
-use crate::primitives::Error as PrimErr;
-use crate::primitives::{Dropper, Finished, Operation, OperationFuture, Starting, UseResource};
-use crate::stateful::Stateful;
+use crate::primitives::Dropper;
 use chrono::prelude::*;
-use crossbeam::channel::{unbounded, Receiver, Sender, TryRecvError};
 use git2;
 use serde_yaml;
 use std::collections::{HashMap, HashSet};
-use std::pin::Pin;
-use std::task::{Poll, Waker, Context};
 use std::{error, fmt, fs, io, path, str, thread};
 use std::sync::Arc;
 use futures::channel::{mpsc, oneshot};
@@ -26,17 +25,22 @@ use futures::executor;
 use futures::future::Future;
 use futures::prelude::*;
 use futures::task::LocalSpawnExt;
-use futures::task::SpawnExt;
 use futures::lock::Mutex;
 use url::Url;
 use uuid;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-///////////////////////////////////////////////////////////////////////////////////////////// MODULE
+
+//------------------------------------------------------------------------------------------- MODULE
+
+
 pub mod synchro;
 
-///////////////////////////////////////////////////////////////////////////////////////////// ERRORS
+
+//------------------------------------------------------------------------------------------- ERRORS
+
+
 #[derive(Debug, Clone)]
 pub enum Error {
     // Leaf Errors
@@ -116,7 +120,10 @@ impl From<Error> for crate::primitives::Error {
     }
 }
 
-///////////////////////////////////////////////////////////////////////////////////// CONFIGURATIONS
+
+//----------------------------------------------------------------------------------- CONFIGURATIONS
+
+
 /// Represents the configuration of a campaign repository.
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Clone)]
 pub struct CampaignConf {
@@ -435,6 +442,9 @@ impl ExecutionUpdateBuilder {
     }
 }
 
+
+//----------------------------------------------------------------------------------------- CAMPAIGN
+
 /// The inner synchronous resource. Contains the different basic methods to manipulate a repository.
 pub struct Campaign {
     pub conf: CampaignConf,
@@ -477,15 +487,14 @@ impl Campaign {
             version: env!("CARGO_PKG_VERSION").to_owned(),
         };
         fs::create_dir(campaign.get_executions_path())?;
-        campaign.to_file(&local_path.join(CMPCONF_RPATH));
+        campaign.to_file(&local_path.join(CMPCONF_RPATH)).unwrap();
         return Campaign::from(campaign);
     }
 
     /// Fetches the last experiment from its remote repository.
     async fn fetch_experiment(cmp: Arc<Mutex<Campaign>>) -> Result<CampaignConf, Error> {
         debug!("Campaign: Fetch experiment");
-        let mut cmp = cmp.lock().await;
-        let experiment_repo = git2::Repository::open(cmp.conf.get_experiment_path()).unwrap();
+        let experiment_repo = git2::Repository::open({cmp.lock().await.conf.get_experiment_path()}).unwrap();
         let mut remote = experiment_repo
             .find_remote("origin")
             .map_err(|_| Error::FetchExperiment("No origin remote found".to_owned()))?;
@@ -531,8 +540,11 @@ impl Campaign {
                 .map_err(|_| {
                     Error::FetchExperiment("Couldn't set reposity HEAD to target".to_owned())
                 })?;
-            cmp.synchro.fetch_experiment_hook(&cmp.conf)?;
-            return Ok(cmp.conf.clone());
+            {
+                let cmp = cmp.lock().await;
+                cmp.synchro.fetch_experiment_hook(&cmp.conf)?;
+                return Ok(cmp.conf.clone());
+            };
         } else {
             return Err(Error::NoFFPossible);
         }
@@ -546,7 +558,6 @@ impl Campaign {
         tags: Vec<ExecutionTag>,
     ) -> Result<ExecutionConf, Error> {
         debug!("Campaign: Creating Execution");
-        let mut cmp = cmp.lock().await;
         let mut exc_conf = ExecutionConf {
             commit,
             execution_message: None,
@@ -567,16 +578,20 @@ impl Campaign {
             tags: tags.clone(),
         };
         exc_conf.path = Some(
-            cmp.conf
-               .get_path()
-               .join(EXCS_RPATH)
-               .join(format!("{}", exc_conf.identifier)),
+            {
+                cmp.lock()
+                    .await
+                    .conf
+                    .get_path()
+                    .join(EXCS_RPATH)
+                    .join(format!("{}", exc_conf.identifier))
+            }
         );
         fs::create_dir(&exc_conf.get_path())
             .map_err(|_| Error::CreateExecution("Failed to create directory".to_owned()))?;
         let url = format!(
             "file://{}",
-            cmp.conf.get_experiment_path().to_str().unwrap()
+            {cmp.lock().await.conf.get_experiment_path().to_str().unwrap()}
         );
         let repo = git2::Repository::clone(&url, exc_conf.get_path())
             .map_err(|_| Error::CreateExecution("Failed to local clone".to_owned()))?;
@@ -605,9 +620,13 @@ impl Campaign {
         exc_conf
             .to_file(&exc_conf.get_path().join(EXCCONF_RPATH))
             .map_err(|_| Error::CreateExecution("Failed to write config file.".to_owned()))?;
-        cmp.synchro.create_execution_hook(&exc_conf)?;
-        cmp.cache
-            .insert(exc_conf.identifier.clone(), exc_conf.clone());
+        {cmp.lock().await.synchro.create_execution_hook(&exc_conf)?};
+        {
+            cmp.lock()
+                .await
+                .cache
+                .insert(exc_conf.identifier.clone(), exc_conf.clone())
+        };
         return Ok(exc_conf);
     }
 
@@ -618,47 +637,56 @@ impl Campaign {
         upd: ExecutionUpdate,
     ) -> Result<ExecutionConf, Error> {
         debug!("Campaign: Updating execution {}", id.0);
-        let mut cmp = cmp.lock().await;
-        let conf_path = cmp
-            .conf
-            .get_path()
-            .join(EXCS_RPATH)
-            .join(format!("{}", id))
-            .join(EXCCONF_RPATH);
-        let exc_conf = cmp
-            .cache
-            .remove(&id)
-            .ok_or(Error::UpdateExecution(format!(
-                "Tried to remove execution {} from cache but \
-                 it was not there.",
-                id.0
-            )))?;
+        let conf_path = 
+        {
+            cmp.lock()
+                .await
+                .conf
+                .get_path()
+                .join(EXCS_RPATH)
+                .join(format!("{}", id))
+                .join(EXCCONF_RPATH)
+        };
+        let exc_conf = 
+        {
+            cmp.lock()
+                .await
+                .cache
+                .remove(&id)
+                .ok_or(Error::UpdateExecution(format!(
+                    "Tried to remove execution {} from cache but \
+                    it was not there.",id.0)))?
+        };
         let exc_conf = upd.apply(exc_conf);
         exc_conf.to_file(&conf_path)?;
-        cmp.synchro.update_execution_hook(&exc_conf)?;
-        cmp.cache
-            .insert(exc_conf.identifier.clone(), exc_conf.clone());
+        {cmp.lock().await.synchro.update_execution_hook(&exc_conf)?};
+        {cmp.lock().await.cache.insert(exc_conf.identifier.clone(), exc_conf.clone())};
         Ok(exc_conf)
     }
 
     /// Finishes an execution.
     async fn finish_execution(cmp: Arc<Mutex<Campaign>>, id: ExecutionId) -> Result<ExecutionConf, Error> {
         debug!("Campaign: Finishing Execution {}", id.0);
-        let mut cmp = cmp.lock().await;
-        let conf_path = cmp
-            .conf
-            .get_path()
-            .join(EXCS_RPATH)
-            .join(format!("{}", id))
-            .join(EXCCONF_RPATH);
-        let mut exc_conf = cmp
-            .cache
-            .remove(&id)
-            .ok_or(Error::UpdateExecution(format!(
-                "Tried to remove execution {} from cache but \
-                 it was not there.",
-                id.0
-            )))?;
+        let conf_path = 
+        {
+            cmp.lock()
+                .await
+                .conf
+                .get_path()
+                .join(EXCS_RPATH)
+                .join(format!("{}", id))
+                .join(EXCCONF_RPATH)
+        };
+        let mut exc_conf = 
+        {
+            cmp.lock()
+                .await
+                .cache
+                .remove(&id)
+                .ok_or(Error::UpdateExecution(format!(
+                    "Tried to remove execution {} from cache but \
+                    it was not there.",id.0)))?
+        };
         exc_conf
             .experiment_elements
             .iter()
@@ -678,46 +706,52 @@ impl Campaign {
             .collect::<Result<Vec<()>, Error>>()?;
         exc_conf.state = ExecutionState::Completed;
         exc_conf.to_file(&conf_path)?;
-        cmp.synchro.finish_execution_hook(&exc_conf)?;
-        cmp.cache
-            .insert(exc_conf.identifier.clone(), exc_conf.clone());
+        {cmp.lock().await.synchro.finish_execution_hook(&exc_conf)?};
+        {cmp.lock().await.cache.insert(exc_conf.identifier.clone(), exc_conf.clone())};
         Ok(exc_conf)
     }
 
     /// Deletes an execution.
     async fn delete_execution(cmp: Arc<Mutex<Campaign>>, id: ExecutionId) -> Result<(), Error> {
         debug!("Campaign: Delete Execution {}", id.0);
-        let mut cmp = cmp.lock().await;
-        let conf_path = cmp
-            .conf
-            .get_path()
-            .join(EXCS_RPATH)
-            .join(format!("{}", id));
-        let exc_conf = cmp
-            .cache
-            .remove(&id)
-            .ok_or(Error::UpdateExecution(format!(
-                "Tried to remove execution {} from cache but \
-                 it was not there.",
-                id.0
-            )))?;
+        let conf_path = 
+        {
+            cmp.lock()
+                .await
+                .conf
+                .get_path()
+                .join(EXCS_RPATH)
+                .join(format!("{}", id))
+        };
+        let exc_conf = 
+        { 
+            cmp.lock()
+                .await
+                .cache
+                .remove(&id)
+                .ok_or(Error::UpdateExecution(format!("Tried to remove execution {} from cache but \
+                    it was not there.", id.0)))?
+        };
         fs::remove_dir_all(conf_path)
             .map_err(|_| Error::DeleteExecution("Failed to remove execution files".to_owned()))?;
-        cmp.synchro.delete_execution_hook(&exc_conf)?;
+        {cmp.lock().await.synchro.delete_execution_hook(&exc_conf)?};
         Ok(())
     }
 
     /// Fetches possibly distant executions. Fetches executions or not depending on the synchronizer.
     async fn fetch_executions(cmp: Arc<Mutex<Campaign>>) -> Result<Vec<ExecutionConf>, Error> {
         debug!("Campaign: Fetching Executions");
-        let mut cmp = cmp.lock().await;
-        let before: HashSet<path::PathBuf> = fs::read_dir(cmp.conf.get_executions_path())
+        let exc_path = {cmp.lock().await.conf.get_executions_path()};
+        let before: HashSet<path::PathBuf> = fs::read_dir(exc_path.clone())
             .unwrap()
             .map(|p| p.unwrap().path())
             .filter(|p| p.join(EXCCONF_RPATH).exists())
             .collect();
-        cmp.synchro.fetch_executions_hook(&cmp.conf)?;
-        let after: HashSet<path::PathBuf> = fs::read_dir(cmp.conf.get_executions_path())
+        {
+            let cmp = cmp.lock().await;
+            cmp.synchro.fetch_executions_hook(&cmp.conf)?;
+        }
+        let after: HashSet<path::PathBuf> = fs::read_dir(exc_path.clone())
             .unwrap()
             .map(|p| p.unwrap().path())
             .filter(|p| p.join(EXCCONF_RPATH).exists())
@@ -729,7 +763,7 @@ impl Campaign {
         } else {
             after
                 .difference(&before)
-                .map(|p| ExecutionConf::from_file(&cmp.conf.get_executions_path().join(p)))
+                .map(|_| ExecutionConf::from_file(&exc_path))
                 .collect::<Result<Vec<ExecutionConf>, Error>>()
         }
     }
@@ -742,7 +776,9 @@ impl Campaign {
     }
 }
 
-/////////////////////////////////////////////////////////////////////////////////////////// RESOURCE
+
+//------------------------------------------------------------------------------------------- HANDLE
+
 
 #[derive(Debug)]
 enum OperationInput{
@@ -781,9 +817,10 @@ impl CampaignHandle {
         debug!("CampaignHandle: Start campaign thread");
         let campaign = Campaign::from(camp_conf)?;
         let (sender, receiver) = mpsc::unbounded();
-        let handle = thread::Builder::new().name("campaign".to_owned()).spawn(move || {
+        let handle = thread::Builder::new().name(format!("orch-campaign"))
+        .spawn(move || {
             trace!("Campaign Thread: Creating resource in thread");
-            let mut res = Arc::new(Mutex::new(campaign));
+            let res = Arc::new(Mutex::new(campaign));
             trace!("Campaign Thread: Starting resource loop");
             let mut pool = executor::LocalPool::new();
             let mut spawner = pool.spawner();
@@ -797,7 +834,8 @@ impl CampaignHandle {
                                     .map(|a| {
                                         sender.send(OperationOutput::FetchExperiment(a))
                                             .map_err(|e| error!("Campaign Thread: Failed to \\
-                                            send an operation output: \n{:?}", e));
+                                            send an operation output: \n{:?}", e))
+                                            .unwrap();
                                     })
                             )
                         }
@@ -807,7 +845,8 @@ impl CampaignHandle {
                                     .map(|a|{
                                         sender.send(OperationOutput::CreateExecution(a))
                                             .map_err(|e| error!("Campaign Thread: Failed to \\
-                                            send an operation output: \n{:?}", e));
+                                            send an operation output: \n{:?}", e))
+                                            .unwrap();
                                     })
                             )
                         }
@@ -817,7 +856,8 @@ impl CampaignHandle {
                                     .map(|a|{
                                         sender.send(OperationOutput::UpdateExecution(a))
                                             .map_err(|e| error!("Campaign Thread: Failed to \\
-                                            send an operation output: \n{:?}", e));
+                                            send an operation output: \n{:?}", e))
+                                            .unwrap();
                                     })
                             )
                         }
@@ -827,7 +867,8 @@ impl CampaignHandle {
                                     .map(|a|{
                                         sender.send(OperationOutput::FinishExecution(a))
                                             .map_err(|e| error!("Campaign Thread: Failed to \\
-                                            send an operation output: \n{:?}", e));
+                                            send an operation output: \n{:?}", e))
+                                            .unwrap();
                                     })
                             )
                         }
@@ -837,7 +878,8 @@ impl CampaignHandle {
                                     .map(|a|{
                                         sender.send(OperationOutput::DeleteExecution(a))
                                             .map_err(|e| error!("Campaign Thread: Failed to \\
-                                            send an operation output: \n{:?}", e));
+                                            send an operation output: \n{:?}", e))
+                                            .unwrap();
                                     })
                             )
                         }
@@ -847,7 +889,8 @@ impl CampaignHandle {
                                     .map(|a|{
                                         sender.send(OperationOutput::FetchExecutions(a))
                                             .map_err(|e| error!("Campaign Thread: Failed to \\
-                                            send an operation output: \n{:?}", e));
+                                            send an operation output: \n{:?}", e))
+                                            .unwrap();
                                     })
                             )
                         }
@@ -857,25 +900,27 @@ impl CampaignHandle {
                                     .map(|a|{
                                         sender.send(OperationOutput::GetExecutions(a))
                                             .map_err(|e| error!("Campaign Thread: Failed to \\
-                                            send an operation output: \n{:?}", e));
+                                            send an operation output: \n{:?}", e))
+                                            .unwrap();
                                     })
                             )
                         }
-                        _ => unimplemented!()
-                    }.map_err(|e| error!("Campaign Thread: Failed to spawn the operation: \n{:?}", e));
+                    }.map_err(|e| error!("Campaign Thread: Failed to spawn the operation: \n{:?}", e))
+                    .unwrap();
                     future::ready(())
                 }
             );
             let mut spawner = pool.spawner();
             spawner.spawn_local(handling_stream)
-                .map_err(|_| error!("Campaign Thread: Failed to spawn handling stream"));
+                .map_err(|_| error!("Campaign Thread: Failed to spawn handling stream"))
+                .unwrap();
             trace!("Campaign Thread: Starting local executor.");
             pool.run();
             trace!("Campaign Thread: All futures executed. Leaving...");
         }).expect("Failed to spawn campaign thread.");
         Ok(CampaignHandle {
             _sender: sender,
-            _dropper: Dropper::from_handle(handle),
+            _dropper: Dropper::from_handle(handle, format!("CampaignHandle")),
         })
     }
 
@@ -884,7 +929,6 @@ impl CampaignHandle {
     pub fn async_fetch_experiment(&self) -> impl Future<Output=Result<CampaignConf,Error>> {
         debug!("CampaignHandle: Building async_fetch_experiment future");
         let mut chan = self._sender.clone();
-        let mut res = (*self).clone();
         async move {
             let (sender, receiver) = oneshot::channel();
             trace!("CampaignHandle::async_fetch_experiment_future: Sending input");
@@ -910,7 +954,6 @@ impl CampaignHandle {
     ) -> impl Future<Output=Result<ExecutionConf, Error>> {
         debug!("CampaignHandle: Building async_create_execution future");
         let mut chan = self._sender.clone();
-        let mut res = (*self).clone();
         let commit = commit.to_owned();
         let parameters = parameters.to_owned();
         let tags = tags.into_iter().map(|a| a.to_owned()).collect::<Vec<ExecutionTag>>();
@@ -938,7 +981,6 @@ impl CampaignHandle {
     ) -> impl Future<Output=Result<ExecutionConf, Error>>{
         debug!("CampaignHandle: Building async_update_execution future");
         let mut chan = self._sender.clone();
-        let mut res = (*self).clone();
         let id = id.to_owned();
         let upd = upd.to_owned();
         async move {
@@ -961,7 +1003,6 @@ impl CampaignHandle {
     pub fn async_finish_execution(&self, id: &ExecutionId) -> impl Future<Output=Result<ExecutionConf, Error>>{
         debug!("CampaignHandle: Building async_finish_execution future");
         let mut chan = self._sender.clone();
-        let mut res = (*self).clone();
         let id = id.to_owned();
         async move {
             let (sender, receiver) = oneshot::channel();
@@ -983,7 +1024,6 @@ impl CampaignHandle {
     pub fn async_delete_execution(&self, id: &ExecutionId) -> impl Future<Output=Result<(), Error>> {
         debug!("CampaignHandle: Building async_delete_execution future");
         let mut chan = self._sender.clone();
-        let mut res = (*self).clone();
         let id = id.to_owned();
         async move {
             let (sender, receiver) = oneshot::channel();
@@ -1005,7 +1045,6 @@ impl CampaignHandle {
     pub fn async_fetch_executions(&self) -> impl Future<Output=Result<Vec<ExecutionConf>, Error>> {
         debug!("CampaignHandle: Building async_fetch_executions future");
         let mut chan = self._sender.clone();
-        let mut res = (*self).clone();
         async move {
             let (sender, receiver) = oneshot::channel();
             trace!("CampaignHandle::async_fetch_executions_future: Sending input");
@@ -1025,7 +1064,6 @@ impl CampaignHandle {
     pub fn async_get_executions(&self) -> impl Future<Output=Result<Vec<ExecutionConf>, Error>> {
         debug!("CampaignHandle: Building async_get_executions future");
         let mut chan = self._sender.clone();
-        let mut res = (*self).clone();
         async move {
             let (sender, receiver) = oneshot::channel();
             trace!("CampaignHandle::async_get_executions_future: Sending input");
@@ -1042,7 +1080,10 @@ impl CampaignHandle {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////////////////// TESTS
+
+//-------------------------------------------------------------------------------------------- TESTS
+
+
 #[cfg(test)]
 mod tests {
 
