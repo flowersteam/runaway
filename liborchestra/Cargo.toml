@@ -12,7 +12,7 @@ serde = "1.0"
 serde_derive = "1.0"
 serde_yaml = "0.7"
 regex = "1"
-futures-preview = "=0.3.0-alpha.16"
+futures-preview = { version = "=0.3.0-alpha.16", features = ["async-await", "nightly"] } 
 yaml-rust="0.4"
 rust-crypto = "0.2"
 uuid = { version = "0.6", features = ["serde", "v4"] }
@@ -21,7 +21,7 @@ ssh2 = "0.3.3"
 dirs = "1.0"
 chashmap = "2.2.2"
 url = "1.7.2"
-git2 = "0.8"
+git2 = {version = "0.8"}
 crossbeam = "0.7.1"
 typetag = "0.1"
 tar = "0.4.26"
