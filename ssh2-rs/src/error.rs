@@ -147,3 +147,13 @@ impl From<NulError> for Error {
                     as as string")
     }
 }
+
+impl From<Error> for std::io::Error{
+    fn from(e: Error) -> std::io::Error{
+        if e.code() as i64 == -37{
+            std::io::Error::new(std::io::ErrorKind::WouldBlock, e)
+        } else {
+            std::io::Error::new(std::io::ErrorKind::Other, e)
+        }
+    }
+}
