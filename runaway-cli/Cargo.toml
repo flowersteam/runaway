@@ -1,12 +1,21 @@
 [package]
 name = "runaway-cli"
-version = "0.0.2"
+version = "0.1.0"
 authors = ["Alexandre Péré <alexandre.pere@protonmail.com>"]
+edition = "2018"
+
+[profile.release]
+debug = true
+
 
 [dependencies]
 log = "0.3"
-pretty_logger = "0.1"
+env_logger = "0.6"
 clap="2.31"
 yaml-rust="0.4"
+chrono="0.4"
+dirs = "2.0"
+ctrlc = "3.1.3"
 uuid = { version = "0.6", features = ["v4"] }
+futures-preview = "=0.3.0-alpha.16"
 liborchestra = { path = "../liborchestra"}
