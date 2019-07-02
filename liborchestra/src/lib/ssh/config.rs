@@ -1,18 +1,24 @@
-// liborchestra/ssh/config.rs
-// Author: Alexandre Péré
+//! liborchestra/ssh/config.rs
+//! Author: Alexandre Péré
+//! 
+//! This module contains structures to parse openssh profiles. 
+
+
+//------------------------------------------------------------------------------------------ IMPORTS
+
+
 use std::error;
 use std::fmt;
 use std::fs::File;
 use std::io::prelude::*;
 use std::iter::Peekable;
 use std::path::PathBuf;
-/// so much fun to learn about lexer/parsers :).
-
-//////////////////////////////////////////////////////////////////////////////////////////// IMPORTS
 use std::str::CharIndices;
 
 
-///////////////////////////////////////////////////////////////////////////////////////////// ERRORS
+//------------------------------------------------------------------------------------------- ERRORS
+
+
 #[derive(Debug, Clone)]
 pub enum Error {
     // Leaf Errors
@@ -49,7 +55,10 @@ impl fmt::Display for Error {
     }
 }
 
-/////////////////////////////////////////////////////////////////////////////////////// SSH-PROFILES
+
+//------------------------------------------------------------------------------------- SSH-PROFILES
+
+
 #[derive(Debug, Clone, Hash)]
 /// Represents a reduced ssh host configuration.
 pub struct SshProfile {
@@ -115,9 +124,11 @@ impl SshProfile {
     }
 }
 
-//////////////////////////////////////////////////////////////////////////////////// INDEXED STRINGS
-// The two following structures allow to work on located string slices. This helps to implement
-// parsing in a non-owning way.
+
+//---------------------------------------------------------------------------------- INDEXED STRINGS
+
+/// The two following structures allow to work on located string slices. This helps to implement
+/// parsing in a non-owning way.
 
 // This structure represents a(n explicitly indexed) slice of a string. Could either represents a
 // string span (if the first and second index are different), or a cursor (if the first and second
@@ -126,12 +137,7 @@ impl SshProfile {
 struct IndexedSlice<'s>(&'s str, usize, usize);
 
 impl<'s> IndexedSlice<'s> {
-    // Construct an indexed slice from a cursor position
-    fn from_cursor(slice: &'s str, pos: usize) -> IndexedSlice<'s> {
-        return IndexedSlice(slice, pos, pos);
-    }
-
-    // Construct an indexed slice which points to the beginning of the string.
+   // Constructs an indexed slice which points to the beginning of the string.
     fn beginning(slice: &'s str) -> IndexedSlice<'s> {
         return IndexedSlice(slice, 0, 0);
     }
@@ -139,11 +145,6 @@ impl<'s> IndexedSlice<'s> {
     // Construct an indexed slice which points to the end of the string.
     fn end(slice: &'s str) -> IndexedSlice<'s> {
         return IndexedSlice(slice, slice.len(), slice.len());
-    }
-
-    // Constructs an indexed slice from a span
-    fn from_span(slice: &'s str, begin: usize, end: usize) -> IndexedSlice<'s> {
-        return IndexedSlice(slice, begin, end);
     }
 
     // Moves begining to a new index
@@ -154,15 +155,6 @@ impl<'s> IndexedSlice<'s> {
     // Moves end to a new index
     fn move_end(&mut self, idx: usize) {
         self.2 = idx;
-    }
-
-    // Moves begining to a new index
-    fn move_begining_by(&mut self, idx: isize) {
-        match idx {
-            i if i < 0 => self.1 = self._before(self.1, -i as usize),
-            i if i > 0 => self.1 = self._after(self.1, i as usize),
-            _ => {}
-        }
     }
 
     // Moves end to a new index
@@ -230,8 +222,8 @@ impl<'s> fmt::Debug for IndexedSlice<'s> {
     }
 }
 
-// A public and owned counterpart to IndexedSlice. Used to print locations of unexpected characters
-// in errors.
+/// A public and owned counterpart to IndexedSlice. Used to print locations of unexpected characters
+/// in errors.
 #[derive(Clone)]
 pub struct IndexedString(String, usize, usize);
 
@@ -287,9 +279,11 @@ impl fmt::Display for IndexedString {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////////////////// LEXER
 
-// Represents the different tokens types expected in the config file.
+//-------------------------------------------------------------------------------------------- LEXER
+
+
+/// Represents the different tokens types expected in the config file.
 #[derive(Debug, Clone, PartialEq)]
 enum TokenType {
     Word,
@@ -298,13 +292,13 @@ enum TokenType {
     Tab,
 }
 
-// A token is tagged IndexedSlice.
+/// A token is tagged IndexedSlice.
 #[derive(Debug)]
 struct Token<'s>(TokenType, IndexedSlice<'s>);
 
-// An iterator that streams tokens out of a string. The `consume_*` methods returns Option<Token>.
-// If the output is None, than no token should be emitted. If the output is Some, then a token
-// should be emitted.
+//  An iterator that streams tokens out of a string. The `consume_*` methods returns Option<Token>.
+//  If the output is None, than no token should be emitted. If the output is Some, then a token
+//  should be emitted.
 struct Lexer<'s> {
     string: &'s str,
     iter: Peekable<CharIndices<'s>>,
@@ -337,7 +331,7 @@ impl<'s> Iterator for Lexer<'s> {
 }
 
 impl<'s> Lexer<'s> {
-    // Creates a lexer from a string.
+    /// Creates a lexer from a string.
     fn from(string: &str) -> Lexer {
         let iter = string.char_indices().peekable();
         Lexer {
@@ -347,7 +341,7 @@ impl<'s> Lexer<'s> {
         }
     }
 
-    // Consumes a newline token
+    /// Consumes a newline token
     fn consume_newline(&mut self) -> Option<Result<Token<'s>, Error>> {
         debug!("Lexer: Consuming newline");
         let mut ret = Token(TokenType::NewLine, IndexedSlice::beginning(self.string));
@@ -372,7 +366,7 @@ impl<'s> Lexer<'s> {
         return Some(Ok(ret));
     }
 
-    // Consumes a tab token
+    /// Consumes a tab token
     fn consume_tab(&mut self) -> Option<Result<Token<'s>, Error>> {
         debug!("Lexer: Consuming tab");
         let mut ret = Token(TokenType::Tab, IndexedSlice::beginning(self.string));
@@ -393,7 +387,7 @@ impl<'s> Lexer<'s> {
         return Some(Ok(ret));
     }
 
-    // Consumes a comment token
+    /// Consumes a comment token
     fn consume_comment(&mut self) -> Option<Result<Token<'s>, Error>> {
         debug!("Lexer: Consuming Comment");
         let mut ret = Token(TokenType::Comment, IndexedSlice::beginning(self.string));
@@ -424,7 +418,7 @@ impl<'s> Lexer<'s> {
         return Some(Ok(ret));
     }
 
-    // Consumes a word token
+    /// Consumes a word token
     fn consume_word(&mut self) -> Option<Result<Token<'s>, Error>> {
         debug!("Lexer: Consuming word");
         let mut ret = Token(TokenType::Word, IndexedSlice::beginning(self.string));
@@ -482,7 +476,7 @@ impl<'s> Lexer<'s> {
         }
     }
 
-    // Consume whitespaces
+    /// Consume whitespaces
     fn consume_whitespace(&mut self) -> Option<Result<Token<'s>, Error>> {
         debug!("Lexer: Consuming whitespace.");
         // We consume the first whitespace
@@ -502,9 +496,11 @@ impl<'s> Lexer<'s> {
     }
 }
 
-///////////////////////////////////////////////////////////////////////////////////////////// PARSER
 
-// Represents the different types a parsed node can be.
+//------------------------------------------------------------------------------------------- PARSER
+
+
+/// Represents the different types a parsed node can be.
 #[derive(Debug, PartialEq)]
 enum NodeType {
     Host,
@@ -514,11 +510,11 @@ enum NodeType {
     ProxyCommandClause,
 }
 
-// A node is a tagged indexed slice.
+/// A node is a tagged indexed slice.
 #[derive(Debug)]
 struct Node<'s>(NodeType, IndexedSlice<'s>);
 
-// An iterator that yields a stream of nodes out of a lexer iterator.
+/// An iterator that yields a stream of nodes out of a lexer iterator.
 struct Parser<'s> {
     string: &'s str,
     iter: Peekable<Lexer<'s>>,
@@ -553,7 +549,7 @@ impl<'s> Iterator for Parser<'s> {
 
 impl<'s> Parser<'s> {
 
-    // Creates a parser out of a lexer.
+    /// Creates a parser out of a lexer.
     fn from_lexer(lexer: Lexer) -> Parser {
         let string = lexer.string;
         let iter = lexer.peekable();
@@ -564,7 +560,7 @@ impl<'s> Parser<'s> {
         }
     }
 
-    // Consumes a host line, e.g. "Host myhost\n"
+    /// Consumes a host line, e.g. "Host myhost\n"
     fn consume_host(&mut self) -> Option<Result<Node<'s>, Error>> {
         debug!("Parser: Consuming host");
         let mut ret = Node(NodeType::Host, IndexedSlice::beginning(self.string));
@@ -624,7 +620,7 @@ impl<'s> Parser<'s> {
         }
     }
 
-    // Consume a clause, e.g. "\tClauseKeyword ClauseValue\n"
+    /// Consume a clause, e.g. "\tClauseKeyword ClauseValue\n"
     fn consume_clause(&mut self) -> Option<Result<Node<'s>, Error>> {
         debug!("Parser: Consuming clause");
         // We consume tab token
@@ -673,7 +669,7 @@ impl<'s> Parser<'s> {
         }
     }
 
-    // Consumes a hostname clause, e.g. "\tHostName locahost"
+    /// Consumes a hostname clause, e.g. "\tHostName locahost"
     fn consume_hostname_clause(&mut self) -> Option<Result<Node<'s>, Error>> {
         debug!("Parser: Consuming hostname clause");
         let mut ret = Node(
@@ -728,7 +724,7 @@ impl<'s> Parser<'s> {
         }
     }
 
-    // Consumes a user clause, e.g. "\tUser me\n"
+    /// Consumes a user clause, e.g. "\tUser me\n"
     fn consume_user_clause(&mut self) -> Option<Result<Node<'s>, Error>> {
         debug!("Parser: Consuming user clause");
         let mut ret = Node(NodeType::UserClause, IndexedSlice::beginning(self.string));
@@ -779,7 +775,7 @@ impl<'s> Parser<'s> {
         }
     }
 
-    // Consumes a port clause, e.g. "\tPort 22\n"
+    /// Consumes a port clause, e.g. "\tPort 22\n"
     fn consume_port_clause(&mut self) -> Option<Result<Node<'s>, Error>> {
         debug!("Parser: Consuming port clause");
         let mut ret = Node(NodeType::PortClause, IndexedSlice::beginning(self.string));
@@ -830,7 +826,7 @@ impl<'s> Parser<'s> {
         }
     }
 
-    // Cosumes a proxycommand clause e.g. "\t\ProxyCommand ssh...\n"
+    /// Cosumes a proxycommand clause e.g. "\t\ProxyCommand ssh...\n"
     fn consume_proxycommand_clause(&mut self) -> Option<Result<Node<'s>, Error>> {
         debug!("Parser: Consuming proxycommand clause");
         let mut ret = Node(
@@ -893,7 +889,7 @@ impl<'s> Parser<'s> {
         }
     }
 
-    // Consumes unnecessary newlines
+    /// Consumes unnecessary newlines
     fn consume_newline(&mut self) -> Option<Result<Node<'s>, Error>> {
         debug!("Parser: Consuming newline");
         match self.iter.next() {
@@ -902,7 +898,7 @@ impl<'s> Parser<'s> {
         }
     }
 
-    // Consumes unnecessary comments
+    /// Consumes unnecessary comments
     fn consume_comment(&mut self) -> Option<Result<Node<'s>, Error>> {
         debug!("Parser: Consuming comment");
         match self.iter.next() {
@@ -913,7 +909,10 @@ impl<'s> Parser<'s> {
 
 }
 
-////////////////////////////////////////////////////////////////////////////////////// CONFIG READER
+
+//------------------------------------------------------------------------------------ CONFIG READER
+
+
 /// This structure is an iterator over SshProfiles defined in a string following the openssh format.
 /// The following clauses are supported:
 /// + HostName
@@ -959,7 +958,7 @@ impl<'s> ConfigReader<'s> {
         return ConfigReader { iter: parser };
     }
 
-    // Consumes a host, e.g. a complete host declaration with starting line and clauses.
+    /// Consumes a host, e.g. a complete host declaration with starting line and clauses.
     fn _consume_host(&mut self) -> Option<Result<SshProfile, Error>> {
         debug!("Reader: Consuming host");
         // We consume the name
@@ -1026,6 +1025,9 @@ pub fn get_profile(config_path: &PathBuf, name: &str) -> Result<SshProfile, Erro
     })?;
     return Ok(profile.complete());
 }
+
+
+//--------------------------------------------------------------------------------------------- TEST
 
 
 #[cfg(test)]

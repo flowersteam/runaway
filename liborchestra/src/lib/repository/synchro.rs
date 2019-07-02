@@ -1,11 +1,17 @@
-// liborchestra/repository/synchro.rs
-// Author: Alexandre Péré
-/// This module contains synchronization mechanisms for the campaign repositories. Those can be used
-/// to save the results of experiments, or collaborate on a campaign.
-//////////////////////////////////////////////////////////////////////////////////////////// IMPORTS
+//! liborchestra/repository/synchro.rs
+//! Author: Alexandre Péré
+//! 
+//! This module contains synchronization mechanisms for the campaign repositories. Those can be used
+//! to save the results of experiments, or collaborate on a campaign.
+
+
+//------------------------------------------------------------------------------------------ IMPORTS
+
+
 use super::{CampaignConf, Error, ExecutionConf};
 
-///////////////////////////////////////////////////////////////////////// REPOSITORY SYNCHRONIZATION
+//----------------------------------------------------------------------- REPOSITORY SYNCHRONIZATION
+
 
 /// A Trait implements the methods used to synchronize the repository.
 pub trait SyncRepository

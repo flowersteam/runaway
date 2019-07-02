@@ -1,17 +1,23 @@
-// liborchestra/error.rs
-// Author: Alexandre Péré
+//! liborchestra/error.rs
+//! Author: Alexandre Péré
+//!
+//! This module contains module-level error type to interface with the error types implemented at
+//! the sub-module level. 
 
-/// This module contains module-level error type to interface with the error types implemented at
-/// the sub-module level. 
 
-//////////////////////////////////////////////////////////////////////////////////////////// IMPORTS
+//------------------------------------------------------------------------------------------ IMPORTS
+
+
 use crate::{ssh, repository, misc, primitives, derive_from_error};
 use std::{io, error, fmt};
 use regex;
 use git2;
 use yaml_rust;
 
-////////////////////////////////////////////////////////////////////////////////////////////// ERROR
+
+//-------------------------------------------------------------------------------------------- ERROR
+
+
 #[derive(Debug)]
 pub enum Error {
     // Leaf error

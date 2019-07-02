@@ -1,18 +1,18 @@
-// liborchestra/mod.rs
-// Author: Alexandre Péré
-
-/// This module contains structures that wraps the ssh2 session object to provide ways to handle 
-/// ssh configurations, authentications, and proxy-commands. In particular, since libssh2
-/// does not provide ways to handle proxy-commands, we use a threaded copy loop that open a
-/// proxy-command as a subprocess and copy the output on a random tcp socket.
-///
-/// After instantiation, the session object is used through new style futures. For this reason,
-/// after authentication the session will be placed in a thread that will take care about handling
-/// the operations that may be required by the user. The operations are made in a totally 
-/// asynchronous fashion: If a command blocks, it will be parked, until further data is available.
-///
-/// Note: Though ssh operations are handled asynchronously, the connection and the handshake are 
-/// made in a synchronous and blocking manner.
+//! liborchestra/mod.rs
+//! Author: Alexandre Péré
+//!
+//! This module contains structures that wraps the ssh2 session object to provide ways to handle 
+//! ssh configurations, authentications, and proxy-commands. In particular, since libssh2
+//! does not provide ways to handle proxy-commands, we use a threaded copy loop that open a
+//! proxy-command as a subprocess and copy the output on a random tcp socket.
+//!
+//! After instantiation, the session object is used through new style futures. For this reason,
+//! after authentication the session will be placed in a thread that will take care about handling
+//! the operations that may be required by the user. The operations are made in a totally 
+//! asynchronous fashion: If a command blocks, it will be parked, until further data is available.
+//!
+//! Note: Though ssh operations are handled asynchronously, the connection and the handshake are 
+//! made in a synchronous and blocking manner.
 
 
 //------------------------------------------------------------------------------------------ IMPORTS
@@ -242,7 +242,7 @@ impl ProxyCommandForwarder {
                         socket1.flush().unwrap()
                     }
                 }
-                socket1.shutdown(Shutdown::Write).unwrap();
+                socket1.shutdown(Shutdown::Write);
                 trace!("ProxyCommandForwarder: Exiting command -> socket thread");
             });
             let h2 = std::thread::spawn(move || {
@@ -253,7 +253,7 @@ impl ProxyCommandForwarder {
                         command_stdin.flush().unwrap();
                     }
                 }
-                socket2.shutdown(Shutdown::Read).unwrap();
+                socket2.shutdown(Shutdown::Read);
                 trace!("ProxyCommandForwarder: Exiting socket -> command thread");
             });
             let h3 = std::thread::spawn(move || {
@@ -477,7 +477,10 @@ impl Remote {
         );
         let mut channel  = match ret {
             Ok(c) => c,
-            Err(ref e) if e.code() == -21 => return Err(Error::ChannelNotAvailable),
+            Err(ref e) if e.code() == -21 => {
+                error!("Remote: Failed to obtain channel: {:?}", e);
+                return Err(Error::ChannelNotAvailable)
+            }
             Err(e) => return Err(Error::ExecutionFailed(format!("Failed to open channel: {}", e)))
         };
         if let Err(e) = await_wouldblock_ssh!(channel.exec(&command)) {
@@ -555,7 +558,10 @@ impl Remote {
         );
         let mut channel = match ret{
             Ok(chan) => chan,
-            Err(ref e) if e.code() == -21 => return Err(Error::ChannelNotAvailable),
+            Err(ref e) if e.code() == -21 => {
+                error!("Remote: Failed to obtain channel");
+                return Err(Error::ChannelNotAvailable)
+            },
             Err(e) => return Err(Error::ScpSendFailed(format!("Failed to open scp send channel: {}", e))),
         };
         let mut stream = channel.stream(0);
@@ -622,7 +628,10 @@ impl Remote {
         );
         let (mut channel, stats) = match ret {
             Ok(c) => c,
-            Err(ref e) if e.code() == -21 => return Err(Error::ChannelNotAvailable),
+            Err(ref e) if e.code() == -21 => {
+                error!("Remote: Failed to open channel...");
+                return Err(Error::ChannelNotAvailable)
+            }
             Err(e) => return Err(Error::ScpFetchFailed(format!("Failed to open scp recv channel: {}", e))),
         };
         let mut stream = channel.stream(0);
@@ -693,7 +702,7 @@ enum OperationOutput {
 pub struct RemoteHandle {
     sender: mpsc::UnboundedSender<(oneshot::Sender<OperationOutput>, OperationInput)>,
     repr: String,
-    _dropper: Dropper<()>,
+    dropper: Dropper<()>,
 }
 
 impl fmt::Debug for RemoteHandle{
@@ -783,12 +792,12 @@ impl RemoteHandle {
         Ok(RemoteHandle {
             sender: sender,
             repr: repr,
-            _dropper: Dropper::from_handle(handle, format!("RemoteHandle")),
+            dropper: Dropper::from_handle(handle, format!("RemoteHandle")),
         })
     }
 
-    /// A function that returns a future that resolves in a result over an empty type, after the 
-    /// execution was submitted.
+    /// A function that returns a future that resolves in a result over an output, after the command
+    /// was executed.
     pub fn async_exec(&self, command: String) -> impl Future<Output=Result<Output, Error>> {
         debug!("RemoteHandle: Building async_exec future to command: {}", command);
         let mut chan = self.sender.clone();
@@ -807,6 +816,8 @@ impl RemoteHandle {
         }
     }
 
+    /// A function that returns a future that resolves in a result over an empty type, after the 
+    /// file was sent.
     pub fn async_scp_send(&self, local_path: PathBuf, remote_path: PathBuf) -> impl Future<Output=Result<(), Error>> {
         debug!("RemoteHandle: Building async_scp_send future from local {} to remote {}", 
             local_path.to_str().unwrap(),
@@ -826,7 +837,9 @@ impl RemoteHandle {
             }
         }
     }
-
+    
+    /// A function that returns a future that resolves in a result over an empty type, after the 
+    /// file was fetch
     pub fn async_scp_fetch(&self, remote_path: PathBuf, local_path: PathBuf) -> impl Future<Output=Result<(), Error>> {
         debug!("RemoteHandle: Building async_scp_fetch future from remote {} to local {}", 
             remote_path.to_str().unwrap(),
@@ -847,6 +860,10 @@ impl RemoteHandle {
         }
     }
 
+    /// Returns the number of handles to the remote connection
+    pub fn handles_count(&self) -> usize{
+        self.dropper.strong_count()
+    }
 
 }
 
