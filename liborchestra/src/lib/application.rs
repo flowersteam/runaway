@@ -1,19 +1,21 @@
-// liborchestra/application.rs
-// Author: Alexandre Péré
+//! liborchestra/application.rs
+//! Author: Alexandre Péré
+//!
+//! This module contains a shared asynchronous resource, meant to be used to spawn jobs and handle 
+//! post-processing of jobs. It holds an inner threadpool that is used to drive the jobs to 
+//! completion.
 
-/// This module contains a shared asynchronous resource, meant to be used to spawn jobs and handle 
-/// post-processing of jobs. It holds an inner threadpool that is used to drive the jobs to 
-/// completion.
 
-//////////////////////////////////////////////////////////////////////////////////////////// IMPORTS
+//------------------------------------------------------------------------------------------ IMPORTS
+
+
 use crate::hosts;
 use crate::repository;
 use crate::repository::{ExecutionState, ExecutionUpdateBuilder};
-//use crate::schedulers;
 use crate::{
     FEATURES_RPATH, FETCH_ARCH_RPATH, FETCH_IGNORE_RPATH, SEND_ARCH_RPATH, SEND_IGNORE_RPATH,
 };
-use crate::primitives::Dropper;
+use crate::primitives::{Dropper, AsResult};
 use chrono::Utc;
 use fasthash;
 use fasthash::StreamHasher;
@@ -29,7 +31,6 @@ use std::process::Output;
 use std::os::unix::process::ExitStatusExt; 
 use tar;
 use tar::Archive;
-use uuid::Uuid;
 use futures::channel::{mpsc, oneshot};
 use futures::lock::Mutex;
 use futures::executor;
@@ -39,7 +40,10 @@ use futures::task::LocalSpawnExt;
 use futures::task::SpawnExt;
 use std::sync::Arc;
 
-////////////////////////////////////////////////////////////////////////////////////////////// ERROR
+
+//-------------------------------------------------------------------------------------------- ERROR
+
+
 #[derive(Debug, Clone)]
 pub enum Error {
     // Leaf Errors
@@ -75,35 +79,9 @@ impl fmt::Display for Error {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////////////////// TRAIT
 
-/// A trait allowing to turn a structure into a result.
-trait AsResult {
-    /// Consumes the object to make a result out of it.
-    fn result(self) -> Result<String, Error>;
-}
+//-------------------------------------------------------------------------------------- APPLICATION
 
-/// Implementation for `Ouput`. The exit code is used as a marker for failure. 
-impl AsResult for Output {
-    fn result(self) -> Result<String, Error> {
-        if self.status.success() {
-            Ok(format!(
-                "Successful execution\nstdout: {}\nstderr: {}",
-                String::from_utf8(self.stdout).unwrap(),
-                String::from_utf8(self.stderr).unwrap()
-            ))
-        } else {
-            Err(Error::ExecutionFailed(format!(
-                "Failed execution({})\nstdout: {}\nstderr: {}",
-                self.status.code().unwrap_or(911),
-                String::from_utf8(self.stdout).unwrap(),
-                String::from_utf8(self.stderr).unwrap()
-            )))
-        }
-    }
-}
-
-//////////////////////////////////////////////////////////////////////////////////////// APPLICATION
 
 /// The inner application resource. It holds a list of the known hosts, and a handle to the 
 /// repository. Also, it contains an threadpool executor on which the jobs will be spawned. It is 
@@ -131,20 +109,29 @@ impl Application {
                          -> Result<(), Error> {
         debug!("Application: Submitting execution to host {} at commit {} with parameters {}", 
             host, commit.0, parameters.0);
-        let mut app = app.lock().await;
-        let host = app.hosts
-            .get(&host)
-            .ok_or(Error::UnknownHost(format!("Unknown host {}", host)))?;
+        let host = 
+        {
+            app.lock()
+                .await
+                .hosts
+                .get(&host)
+                .ok_or(Error::UnknownHost(format!("Unknown host {}", host)))?
+                .to_owned()
+        };
         let fut = perform_new_job(host.to_owned(),
-                                  app.repo.clone(),
+                                  {app.lock().await.repo.clone()},
                                   application_handle,
                                   commit,
                                   parameters,
                                   tags);
         trace!("Application: Spawning job in executor");
-        app.jobs_executor
-            .spawn(fut)
-            .map_err(|e| Error::PerformExecFailed(format!("Failed to spawn future: {:?}", e)))?;
+        {
+            app.lock()
+                .await
+                .jobs_executor
+                .spawn(fut)
+                .map_err(|e| Error::PerformExecFailed(format!("Failed to spawn future: {:?}", e)))?;
+        }
         Ok(())        
     }
 
@@ -154,26 +141,39 @@ impl Application {
                                app_handle: ApplicationHandle) -> Result<(), Error>{
                                       use repository::ExecutionState::*;
         debug!("Application: Post processing execution {:?}", exec.identifier);
-        let mut app = app.lock().await;
-        match (exec.state, app.reschedule){
+        let resched = {app.lock().await.reschedule.clone()};
+        match (exec.state, resched){
             (Completed, _) => {
                 trace!("Application: Execution found completed. Ending...");
                 Ok(())},
             (_, true) => {
                 info!("Application: Execution found in uncompleted state. Rescheduling...");
-                let host = app.hosts
-                    .get(exec.executor.as_ref().ok_or(Error::UnknownHost(format!("No host provided")))?)
-                    .ok_or(Error::UnknownHost(format!("Unknown host {:?}", exec.executor)))?;  
+                let host = 
+                {  
+                    let h = exec.executor
+                        .as_ref()
+                        .ok_or(Error::UnknownHost(format!("No host provided")))?;
+                    app.lock()
+                        .await
+                        .hosts
+                        .get(h)
+                        .ok_or(Error::UnknownHost(format!("Unknown host {}", h)))?
+                        .to_owned()
+                };
                 let fut = reschedule_job(host.to_owned(),
-                                         app.repo.clone(),
+                                         {app.lock().await.repo.clone()},
                                          app_handle,
                                          exec.identifier,
                                          exec.commit,
                                          exec.parameters,
                                          exec.tags);
-                app.jobs_executor
-                    .spawn(fut)
-                    .map_err(|e| Error::PerformExecFailed(format!("Failed to spawn future: {:?}", e)))?;
+                {
+                    app.lock()
+                        .await
+                        .jobs_executor
+                        .spawn(fut)
+                        .map_err(|e| Error::PerformExecFailed(format!("Failed to spawn future: {:?}", e)))?;
+                }
                 Ok(())                
             }
             (_, false) =>{Ok(())}
@@ -285,7 +285,8 @@ impl ApplicationHandle {
                                     .map(|a| {
                                         sender.send(OperationOutput::SubmitExec(a))
                                             .map_err(|e| error!("Application Thread: Failed to \\
-                                            send an operation output: \n{:?}", e));
+                                            send an operation output: \n{:?}", e))
+                                            .unwrap();
                                     })
                             )
                         }
@@ -295,7 +296,8 @@ impl ApplicationHandle {
                                     .map(|a|{
                                         sender.send(OperationOutput::PostProcessExec(a))
                                             .map_err(|e| error!("Application Thread: Failed to \\
-                                            send an operation output: \n{:?}", e));
+                                            send an operation output: \n{:?}", e))
+                                            .unwrap();
                                     })
                             )
                         }
@@ -305,7 +307,8 @@ impl ApplicationHandle {
                                     .map(|r|{
                                         sender.send(OperationOutput::RegisterHost(r))
                                             .map_err(|e| error!("Application Thread: Failed to \\
-                                            send an operation output: \n{:?}", e));
+                                            send an operation output: \n{:?}", e))
+                                            .unwrap();
                                     })
                             )                        
                         }
@@ -315,7 +318,8 @@ impl ApplicationHandle {
                                     .map(|r|{
                                         sender.send(OperationOutput::UnregisterHost(r))
                                             .map_err(|e| error!("Application Thread: Failed to \\
-                                            send an operation output: \n{:?}", e));
+                                            send an operation output: \n{:?}", e))
+                                            .unwrap();
                                     })
                             )                        
                         }
@@ -325,7 +329,8 @@ impl ApplicationHandle {
                                     .map(|r|{
                                         sender.send(OperationOutput::ActivateRescheduling(r))
                                             .map_err(|e| error!("Application Thread: Failed to \\
-                                            send an operation output: \n{:?}", e));
+                                            send an operation output: \n{:?}", e))
+                                            .unwrap();
                                     })
                             )                        
                         }
@@ -335,25 +340,27 @@ impl ApplicationHandle {
                                     .map(|r|{
                                         sender.send(OperationOutput::DeactivateRescheduling(r))
                                             .map_err(|e| error!("Application Thread: Failed to \\
-                                            send an operation output: \n{:?}", e));
+                                            send an operation output: \n{:?}", e))
+                                            .unwrap();
                                     })
                             )                        
                         }
-                        _ => unimplemented!()
-                    }.map_err(|e| error!("Application Thread: Failed to spawn the operation: \n{:?}", e));
+                    }.map_err(|e| error!("Application Thread: Failed to spawn the operation: \n{:?}", e))
+                    .unwrap();
                     future::ready(())
                 }
             );
             let mut spawner = pool.spawner();
             spawner.spawn_local(handling_stream)
-                .map_err(|_| error!("Application Thread: Failed to spawn handling stream"));
+                .map_err(|_| error!("Application Thread: Failed to spawn handling stream"))
+                .unwrap();
             trace!("Application Thread: Starting local executor.");
             pool.run();
             trace!("Application Thread: All futures executed. Leaving...");
         }).expect("Failed to spawn application thread.");
         Ok(ApplicationHandle {
             _sender: sender,
-            _dropper: Some(Dropper::from_handle(handle)),
+            _dropper: Some(Dropper::from_handle(handle, format!("ApplicationHandle"))),
         })
     }
 
@@ -494,7 +501,9 @@ impl ApplicationHandle {
     }
 }
 
-//////////////////////////////////////////////////////////////////////////////////////////////// JOB
+
+//---------------------------------------------------------------------------------------------- JOB
+
 
 /// This asynchronous function contains the whole logic of a job execution. An instantiation of this 
 /// async function is refered to as a job.
@@ -543,28 +552,28 @@ async fn perform_new_job(host: hosts::HostHandle,
             let remote_defl = remote_dir.join(execution.identifier.0.to_string());
             let remote_ignore = remote_defl.join(FETCH_IGNORE_RPATH);
             let remote_fetch = remote_defl.join(FETCH_ARCH_RPATH);
-            let already_there = node.async_exec(&format!("ls {}", remote_dir.to_str().unwrap()))
+            let already_there = node.async_exec(format!("ls {}", remote_dir.to_str().unwrap()))
                 .await
                 .map_err(|e| Error::PerformExecFailed(format!("Failed to check for data: {}", e)))?;
             if !already_there.status.success() {
-                node.async_exec(&format!("mkdir {}", remote_dir.to_str().unwrap()))
+                node.async_exec(format!("mkdir {}", remote_dir.to_str().unwrap()))
                     .await
                     .map_err(|e| Error::PerformExecFailed(format!("Failed to make remote dir: {}", e)))
-                    .and_then(|e| e.result())?;
-                node.async_scp_send(&execution.get_path().join(SEND_ARCH_RPATH), &remote_send)
+                    .and_then(|e| e.result().map_err(|e| Error::ExecutionFailed(e)))?;
+                node.async_scp_send(execution.get_path().join(SEND_ARCH_RPATH), remote_send.clone())
                     .await
                     .map_err(|e| Error::PerformExecFailed(format!("Failed to send data: {}", e)))?;
             }
-            node.async_exec(&format!("mkdir {}", remote_defl.to_str().unwrap()))
+            node.async_exec(format!("mkdir {}", remote_defl.to_str().unwrap()))
                 .await
                 .map_err(|e| Error::PerformExecFailed(format!("Failed to make remote dir: {}", e)))
-                .and_then(|e| e.result())?;
-            node.async_exec(&format!("tar -xf {} -C {}",
+                .and_then(|e| e.result().map_err(|e| Error::ExecutionFailed(e)))?;
+            node.async_exec(format!("tar -xf {} -C {}",
                                      remote_send.to_str().unwrap(),
                                      remote_defl.to_str().unwrap()))
                 .await
                 .map_err(|e| Error::PerformExecFailed(format!("Failed to deflate data: {}", e)))
-                .and_then(|e| e.result())?;
+                .and_then(|e| e.result().map_err(|e| Error::ExecutionFailed(e)))?;
     
             trace!("Job: Starting execution");
             execution = repo.async_update_execution(
@@ -575,7 +584,7 @@ async fn perform_new_job(host: hosts::HostHandle,
                         .build())
                 .await
                 .map_err(|e| Error::PerformExecFailed(format!("Failed to update exec: {}", e)))?;
-            let output = node.async_exec(&format!("cd {} && ./run {}",
+            let output = node.async_exec(format!("cd {} && ./run {}",
                                                   remote_defl.to_str().unwrap(),
                                                   parameters.0))
                 .await
@@ -592,15 +601,15 @@ async fn perform_new_job(host: hosts::HostHandle,
                 .map_err(|e| Error::PerformExecFailed(format!("Failed to update exec: {}", e)))?;
     
             trace!("Job: Fetching data");
-            node.async_exec(&format!("cd {} && (tar -cf {} -X {} * || tar -cf {} *)",
+            node.async_exec(format!("cd {} && (tar -cf {} -X {} * || tar -cf {} *)",
                                      remote_defl.to_str().unwrap(),
                                      remote_fetch.to_str().unwrap(),
                                      remote_ignore.to_str().unwrap(),
                                      remote_fetch.to_str().unwrap()))
                 .await
                 .map_err(|e| Error::PerformExecFailed(format!("Failed to pack remote files: {}", e)))
-                .and_then(|e| e.result())?;
-            node.async_scp_fetch(&remote_fetch, &execution.get_path().join(FETCH_ARCH_RPATH))
+                .and_then(|e| e.result().map_err(|e| Error::ExecutionFailed(e)))?;
+            node.async_scp_fetch(remote_fetch, execution.get_path().join(FETCH_ARCH_RPATH))
                 .await
                 .map_err(|e| Error::PerformExecFailed(format!("Failed to fetch data: {}", e)))?;
             unpack_arch(execution.get_path().join(FETCH_ARCH_RPATH))?;
@@ -657,7 +666,8 @@ async fn perform_new_job(host: hosts::HostHandle,
         trace!("Job: Calling application post-processing");
         app.async_post_process_exec(execution)
             .await
-            .map_err(|e| error!("Job: Failed to post-process execution: {}", e));        
+            .map_err(|e| error!("Job: Failed to post-process execution: {}", e))
+            .unwrap();        
 }
 
 /// This asynchronous function contains the logic of code rescheduling.
@@ -682,7 +692,7 @@ async fn reschedule_job(host: hosts::HostHandle,
 
 
 /// This function allows to pack an experiment folder into a tar archive, and returns its hash.
-fn pack_folder(folder_path: path::PathBuf) -> Result<u64, Error> {
+pub fn pack_folder(folder_path: path::PathBuf) -> Result<u64, Error> {
     // We create the file iterator
     let mut walker = ignore::WalkBuilder::new(&folder_path);
     walker
@@ -718,22 +728,26 @@ fn pack_folder(folder_path: path::PathBuf) -> Result<u64, Error> {
     // We compute the hash of the archive
     let mut file = fs::File::open(folder_path.join(SEND_ARCH_RPATH)).unwrap();
     let mut hasher = fasthash::xx::Hasher64::default();
-    hasher.write_stream(&mut file);
+    hasher.write_stream(&mut file).unwrap();
     Ok(hasher.finish())
 }
 
 /// This function allows to unpack a tar archive into an experiment folder.
-fn unpack_arch(arch_path: path::PathBuf) -> Result<(), Error> {
+pub fn unpack_arch(arch_path: path::PathBuf) -> Result<(), Error> {
     let mut archive = Archive::new(fs::File::open(&arch_path).unwrap());
     archive.unpack(arch_path.parent().unwrap()).unwrap();
     Ok(())
 }
 
+
+//--------------------------------------------------------------------------------------------- TEST
+
+
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use std::fs;
-    use std::io::prelude::*;
     use std::process;
     use std::time::Duration;
     use url::Url;
@@ -741,7 +755,7 @@ mod tests {
     use futures::executor::block_on;
 
     fn init_logger() {
-        std::env::set_var("RUST_LOG", "liborchestra::application=trace");
+        std::env::set_var("RUST_LOG", "liborchestra::application=trace,liborchestra::host=debug,liborchestra::ssh=debug");
         let _ = env_logger::builder().is_test(true).try_init();
     }
 
@@ -783,9 +797,9 @@ os.utime(\".features\", None)").unwrap();
     }
 
     fn setup_ssh_server() -> std::process::Child{
-        dbg!(wrap_sh!("echo | ssh-keygen -t rsa -f /tmp/key"));
+        dbg!(wrap_sh!("ssh-keygen -t rsa -f /tmp/ssh_host_rsa_key -P ''"));
         process::Command::new("/usr/bin/sshd")
-            .args(&["-h", "/tmp/key", "-D", "-p", "55555"])
+            .args(&["-h", "/tmp/ssh_host_rsa_key", "-D", "-p", "55555"])
             .spawn()
             .unwrap()
     }
@@ -814,7 +828,7 @@ os.utime(\".features\", None)").unwrap();
     #[test]
     fn test_perform_new_execution() {
 
-        init_logger();
+        //init_logger();
         clean_expe_repo();
         clean_cmp_repo();
         setup_expe_repo();
@@ -832,23 +846,21 @@ os.utime(\".features\", None)").unwrap();
             name: "localhost".to_owned(),
             ssh_config: "localhost".to_owned(),
             node_proxy_command: "ssh -A -l apere localhost -W $NODENAME:55555".to_owned(),
-            start_alloc: "".to_owned(),
-            get_alloc_nodes: "echo localhost".to_owned(),
-            cancel_alloc: "".to_owned(),
+            start_alloc: vec!["".to_owned()],
+            get_alloc_nodes: vec!["echo localhost".to_owned()],
+            cancel_alloc: vec!["".to_owned()],
             alloc_duration: 5,
             executions_per_nodes: 2,
-            before_execution: "".to_owned(),
-            after_execution: "".to_owned(),
+            before_execution: vec!["".to_owned()],
+            after_execution: vec!["".to_owned()],
             directory: path::PathBuf::from("/home/apere/Executions"),
         };
-        let host = crate::hosts::HostHandle::spawn_resource(conf).unwrap();
+        let host = crate::hosts::HostHandle::spawn(conf).unwrap();
         let commit = get_expe_repo_head();
 
         let app = ApplicationHandle::spawn(repo.clone()).unwrap();
 
         block_on(app.async_register_host(host.clone())).unwrap();
-
-        block_on(app.async_activate_rescheduling()).unwrap();
 
         block_on(app.async_submit_exec(
             crate::repository::ExperimentCommit(commit.clone()),
@@ -890,16 +902,16 @@ os.utime(\".features\", None)").unwrap();
             name: "localhost".to_owned(),
             ssh_config: "localhost".to_owned(),
             node_proxy_command: "ssh -A -l apere localhost -W $NODENAME:55555".to_owned(),
-            start_alloc: "".to_owned(),
-            get_alloc_nodes: "echo localhost".to_owned(),
-            cancel_alloc: "".to_owned(),
+            start_alloc: vec!["".to_owned()],
+            get_alloc_nodes: vec!["echo localhost".to_owned()],
+            cancel_alloc: vec!["".to_owned()],
             alloc_duration: 10,
             executions_per_nodes: 2,
-            before_execution: "".to_owned(),
-            after_execution: "".to_owned(),
+            before_execution: vec!["".to_owned()],
+            after_execution: vec!["".to_owned()],
             directory: path::PathBuf::from("/home/apere/Executions"),
         };
-        let host = crate::hosts::HostHandle::spawn_resource(conf).unwrap();
+        let host = crate::hosts::HostHandle::spawn(conf).unwrap();
         let commit = get_expe_repo_head();
 
         let app = ApplicationHandle::spawn(repo.clone()).unwrap();
@@ -961,16 +973,16 @@ os.utime(\".features\", None)").unwrap();
             name: "localhost".to_owned(),
             ssh_config: "localhost".to_owned(),
             node_proxy_command: "ssh -A -l apere localhost -W $NODENAME:55555".to_owned(),
-            start_alloc: "".to_owned(),
-            get_alloc_nodes: "echo localhost".to_owned(),
-            cancel_alloc: "".to_owned(),
+            start_alloc: vec!["".to_owned()],
+            get_alloc_nodes: vec!["echo localhost".to_owned()],
+            cancel_alloc: vec!["".to_owned()],
             alloc_duration: 10,
             executions_per_nodes: 2,
-            before_execution: "".to_owned(),
-            after_execution: "".to_owned(),
+            before_execution: vec!["".to_owned()],
+            after_execution: vec!["".to_owned()],
             directory: path::PathBuf::from("/home/apere/Executions"),
         };
-        let host = crate::hosts::HostHandle::spawn_resource(conf).unwrap();
+        let host = crate::hosts::HostHandle::spawn(conf).unwrap();
         let commit = get_expe_repo_head();
 
         let app = ApplicationHandle::spawn(repo.clone()).unwrap();
@@ -1017,3 +1029,4 @@ os.utime(\".features\", None)").unwrap();
         fs::remove_dir_all("/tmp/pack_folder").unwrap();
     }
 }
+
