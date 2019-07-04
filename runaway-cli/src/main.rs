@@ -419,6 +419,7 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
         let remote_defl = remote_dir.join(format!("{}", id));
         let remote_fetch = remote_defl.join(FETCH_ARCH_RPATH);
         let remote_ignore = remote_defl.join(FETCH_IGNORE_RPATH);
+        let benchmark = matches.is_present("benchmark");
 
         let future = async move{
             let p = p.clone();
@@ -442,8 +443,10 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
                                           b,
                                           l,
                                           true).await);
-            println!("{}", String::from_utf8(out.stdout).unwrap());
-            eprintln!("{}", String::from_utf8(out.stderr).unwrap()); 
+            if !benchmark{
+                println!("{}", String::from_utf8(out.stdout).unwrap());
+                eprintln!("{}", String::from_utf8(out.stderr).unwrap()); 
+            }
             Ok(out.status.code().unwrap_or(911))
         };
         let handle = try_return_code!(executor.spawn_with_handle(future).map_err(|e| format!("{:?}", e)),
