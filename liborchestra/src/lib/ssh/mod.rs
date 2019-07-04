@@ -405,8 +405,8 @@ impl Remote {
             let mut known_hosts_path = dirs::home_dir()
                 .ok_or(Error::ConnectionFailed(format!("Failed to find the local home directory")))?;
             known_hosts_path.push(KNOWN_HOSTS_RPATH);
-            if !known_hosts_path.exists()!{
-                File::create(known_hosts_path)
+            if !known_hosts_path.exists(){
+                File::create(known_hosts_path.clone())
                     .map_err(|e| Error::ConnectionFailed(format!("Failed to create knownhost file")));
             }
             known_hosts.read_file(known_hosts_path.as_path(),
