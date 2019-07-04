@@ -106,6 +106,14 @@ macro_rules! await_wouldblock_ssh {
                             });
                         rx.await.unwrap();
                     }
+                    Err(ref e) if e.code() == -21 => {
+                        let(tx, rx) = oneshot::channel();
+                            thread::spawn(move || {
+                                thread::sleep(Duration::from_secs(1));
+                                tx.send(()).unwrap();
+                            });
+                        rx.await.unwrap();
+                    }
                     res => break res,
                 }
             }
