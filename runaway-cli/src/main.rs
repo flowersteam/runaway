@@ -304,7 +304,10 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
         std::env::set_var("RUST_LOG", "WARNING,runaway_cli=DEBUG,liborchestra=DEBUG,liborchestra::ssh=INFO");
     } else if matches.is_present("verbose"){
         std::env::set_var("RUST_LOG", "WARNING,runaway_cli=INFO,liborchestra=INFO,liborchestra::ssh=INFO");
+    } else if matches.is_present("benchmark"){
+        std::env::set_var("RUST_LOG", "WARNING,runaway_cli=INFO,liborchestra::hosts=TRACE/Host: Allocation succeeded|Allocation cancelling succeeded|Job: Starting execution");
     }
+
 
     env_logger::init();
 
@@ -654,6 +657,9 @@ fn main(){
             .arg(clap::Arg::with_name("vvverbose")
                 .long("vvverbose")
                 .help("Print all logs"))
+            .arg(clap::Arg::with_name("benchmark")
+                .long("benchmark")
+                .help("Print only allocations and executions messages for statistics purposes."))
             .arg(clap::Arg::with_name("leave")
                 .short("l")
                 .long("leave")

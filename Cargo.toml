@@ -2,7 +2,7 @@
 members = [
     "liborchestra",
     #"expegit-cli",
-    #"runaway-cli",
+    "runaway-cli",
     #"orchestra-cli",
     "liborchestra-derive",
     "remote-leak"]
@@ -10,7 +10,7 @@ members = [
 [replace]
 "liborchestra:0.0.2" = { path = "liborchestra"}
 #"expegit-cli:0.0.2" = { path = "expegit-cli"}
-#"runaway-cli:0.0.2" = { path = "runaway-cli"}
+"runaway-cli:0.0.2" = { path = "runaway-cli"}
 #"orchestra-cli:0.0.2" = { path = "orchestra-cli"}
 "liborchestra-derive:0.0.2" = {path = "liborchestra-derive"}
 "remote-leak:0.0.2" = {path = "remote-leak"}
