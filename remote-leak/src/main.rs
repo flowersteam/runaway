@@ -20,7 +20,7 @@ fn main(){
                 port: None,
                 proxycommand: Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
             };
-            let remote = ssh::RemoteHandle::spawn_resource(profile).unwrap();
+            let remote = ssh::RemoteHandle::spawn(profile).unwrap();
             let output = await!(remote.async_exec("echo kikou")).unwrap();
             println!("Executed and resulted in {:?}", String::from_utf8(output.stdout).unwrap());
         }
