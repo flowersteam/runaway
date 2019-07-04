@@ -448,7 +448,7 @@ impl Host {
                     trace!("Host: Allocation ongoing. Waiting...");
                     let(tx, rx) = oneshot::channel();
                         thread::spawn(move || {
-                            thread::sleep(std::time::Duration::from_nanos(10));
+                            thread::sleep(std::time::Duration::from_millis(500));
                             tx.send(()).unwrap();
                         });
                     rx.await.unwrap();
