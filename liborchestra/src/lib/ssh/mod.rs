@@ -405,6 +405,10 @@ impl Remote {
             let mut known_hosts_path = dirs::home_dir()
                 .ok_or(Error::ConnectionFailed(format!("Failed to find the local home directory")))?;
             known_hosts_path.push(KNOWN_HOSTS_RPATH);
+            if !known_hosts_path.exists()!{
+                File::create(known_hosts_path)
+                    .map_err(|e| Error::ConnectionFailed(format!("Failed to create knownhost file")));
+            }
             known_hosts.read_file(known_hosts_path.as_path(),
                                   KnownHostFileKind::OpenSSH)
                 .map_err(|e| Error::ConnectionFailed(format!("Failed to reach knownhost file:\n{}", e)))?;
@@ -523,6 +527,13 @@ impl Remote {
             }
             if eof{
                 break
+            } else {
+                let(tx, rx) = oneshot::channel();
+                     thread::spawn(move || {
+                         thread::sleep(Duration::from_millis(500));
+                         tx.send(()).unwrap();
+                     });
+                 rx.await.unwrap();
             }
         }
         if let Err(e) = await_wouldblock_ssh!(channel.wait_eof()){
