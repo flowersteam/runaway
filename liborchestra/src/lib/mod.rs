@@ -23,7 +23,6 @@ extern crate serde_derive;
 #[macro_use]
 extern crate log;
 #[macro_use]
-extern crate liborchestra_derive;
 extern crate chrono;
 extern crate regex;
 extern crate yaml_rust;

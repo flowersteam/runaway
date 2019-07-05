@@ -453,7 +453,7 @@ impl Remote {
                 .take_while(|id| {
                     let result = agent.userauth(user, id.as_ref().unwrap());
                     if result.is_err(){
-                        error!("Remote: Failed to authenticate to {} with {}: {:?}", 
+                        debug!("Remote: Failed to authenticate to {} with {}: {:?}", 
                                 host,
                                 id.as_ref().unwrap().comment(), 
                                 result);

@@ -29,7 +29,6 @@ ignore = "0.4.7"
 fasthash = "0.4.0"
 walkdir = "2.2.7"
 shells = "0.2"
-liborchestra-derive = {path = "../liborchestra-derive"}
 
 [lib]
 name="liborchestra"

@@ -28,6 +28,7 @@ use futures::executor::block_on;
 use futures::task::SpawnExt;
 use futures::future::{FutureExt, Future};
 use std::process::Output;
+use std::io;
 
 ////////////////////////////////////////////////////////////////////////////////////////// CONSTANTS
 const NAME: &'static str = env!("CARGO_PKG_NAME");
@@ -440,13 +441,20 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
                                           remote_dir.to_str().unwrap().to_owned(),
                                           remote_defl.to_str().unwrap().to_owned(),
                                           script_folder.into(),
-                                          b,
+                                          b.clone(),
                                           l,
                                           true).await);
             if !benchmark{
-                println!("{}", String::from_utf8(out.stdout).unwrap());
-                eprintln!("{}", String::from_utf8(out.stderr).unwrap()); 
+                println!("{}", String::from_utf8(out.stdout.clone()).unwrap());
+                eprintln!("{}", String::from_utf8(out.stderr.clone()).unwrap()); 
             }
+            let mut stdout_file = std::fs::File::create(b.join("stdout")).unwrap();
+            stdout_file.write_all(&out.stdout).unwrap();
+            let mut stderr_file = std::fs::File::create(b.join("stderr")).unwrap();
+            stderr_file.write_all(&out.stderr).unwrap();
+            let mut ecode_file = std::fs::File::create(b.join("ecode")).unwrap();
+            ecode_file.write_all(format!("{}", out.status.code().unwrap_or(911)).as_bytes()).unwrap();
+
             Ok(out.status.code().unwrap_or(911))
         };
         let handle = try_return_code!(executor.spawn_with_handle(future).map_err(|e| format!("{:?}", e)),
@@ -603,6 +611,7 @@ fn main(){
         .version(VERSION)
         .about(DESC)
         .author(AUTHOR)
+        .setting(clap::AppSettings::ArgRequiredElseHelp) 
         .about("Execute code on remote hosts")
         .subcommand(clap::SubCommand::with_name("exec")
             .about("Runs a single execution on a remote host")
