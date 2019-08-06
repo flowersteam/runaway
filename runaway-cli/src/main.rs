@@ -267,7 +267,7 @@ fn exec(matches: &clap::ArgMatches) -> i32 {
         let node = try_return_err!(acquire_node(host.clone()).await);
         try_return_err!(send_data(node.clone(),
                                   script_folder.join(SEND_ARCH_RPATH),
-                                  remote_defl.clone()).await);
+                                  remote_dir.clone()).await);
         let out = try_return_err!(perform_job(node.clone(),
                                               host.get_before_execution_command(),
                                               host.get_after_execution_command(),
