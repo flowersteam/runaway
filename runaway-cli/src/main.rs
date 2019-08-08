@@ -344,7 +344,7 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
             let repeats = try_return_code!(matches.value_of("repeats").unwrap().parse::<u32>(),
                                             "failed to read the number of repeats",
                                             8);
-            let params = matches.value_of("parameters").unwrap_or("");
+            let params = matches.value_of("parameters_string").unwrap_or("");
             let params = parse_parameters(&params, repeats as usize);
             info!("Parameters expansion: {:#?}",params);
             params
@@ -598,7 +598,7 @@ pub fn parse_parameters(param_string: &str, repeats: usize) -> Vec<String> {
                 .collect()
         }
     }
-    parameters_generator(param_string.split(";").collect(), repeats)
+    parameters_generator(param_string.split("&").collect(), repeats)
 }
 
 
