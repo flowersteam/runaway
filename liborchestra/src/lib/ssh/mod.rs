@@ -721,7 +721,7 @@ enum OperationOutput {
 pub struct RemoteHandle {
     sender: mpsc::UnboundedSender<(oneshot::Sender<OperationOutput>, OperationInput)>,
     repr: String,
-    dropper: Dropper<()>,
+    dropper: Dropper,
 }
 
 impl fmt::Debug for RemoteHandle{
@@ -808,10 +808,16 @@ impl RemoteHandle {
             trace!("Remote Thread: All futures executed. Leaving...");
         }).expect("Failed to spawn application thread.");
         start_rx.recv().unwrap()?;
+        let drop_sender = sender.clone();
         Ok(RemoteHandle {
             sender: sender,
             repr: repr,
-            dropper: Dropper::from_handle(handle, format!("RemoteHandle")),
+            dropper: Dropper::from_closure(
+                Box::new(move ||{
+                    drop_sender.close_channel();
+                    handle.join();
+                }), 
+                format!("RemoteHandle")),
         })
     }
 
@@ -878,12 +884,6 @@ impl RemoteHandle {
             }
         }
     }
-
-    /// Returns the number of handles to the remote connection
-    pub fn handles_count(&self) -> usize{
-        self.dropper.strong_count()
-    }
-
 }
 
 

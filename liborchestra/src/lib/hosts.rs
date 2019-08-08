@@ -4,9 +4,7 @@
 //! This module contains structure that manages host allocations. The resulting tool is the
 //! HostResource, which given an host configuration provide asynchronous nodes allocation. Put
 //! differently, it allows to await a node to be available for computation, given the restrictions
-//! of the configuration. The allocation are automatically started and revoked. If you have troubles
-//! understanding how pieces fit, check the primitives module test.
-
+//! of the configuration. The allocation are automatically started and revoked.
 
 //------------------------------------------------------------------------------------------ IMPORTS
 
@@ -25,6 +23,7 @@ use futures::executor;
 use futures::future;
 use futures::task::LocalSpawnExt;
 use futures::FutureExt;
+use futures::Stream;
 use std::thread;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use std::fmt::{Display, Debug};
@@ -47,6 +46,8 @@ pub enum Error {
     SpawningThread(String),
     Channel(String),
     OperationFetch(String),
+    Aborted,
+    Shutdown,
     // Chaining Errors
     Ssh(ssh::Error),
     SshConfigParse(ssh::config::Error),
@@ -78,7 +79,9 @@ impl fmt::Display for Error {
             }
             Error::SpawningThread(ref s) => write!(f, "Failed to spawn host: \n{}", s),
             Error::Channel(ref s) => write!(f, "A channel related error occurred: \n {}", s),
-            Error::OperationFetch(ref s) => write!(f, "Failed to fetch an operation: \n{}", s)
+            Error::OperationFetch(ref s) => write!(f, "Failed to fetch an operation: \n{}", s),
+            Error::Aborted => write!(f, "Execution Aborted."),
+            Error::Shutdown => write!(f, "Host Shutdown."),
         }
     }
 }
@@ -91,7 +94,6 @@ impl From<Error> for crate::primitives::Error {
 
 derive_from_error!(Error, ssh::Error, Ssh);
 derive_from_error!(Error, ssh::config::Error, SshConfigParse);
-
 
 //---------------------------------------------------------------------------- ENVIRONMENT VARIABLES
 
@@ -256,14 +258,46 @@ enum ChannelMessages{
     Node(DropBack<Expire<RemoteHandle>>),
     NoNodesLeft,
     WaitForNodes,
+    Abort,
+    Shutdown
 }
 
-// This structure is the executor of an host configuration. It connects to the host and allows to
-// perform the needed operations to provide execution nodes, under the forms of RemoteConnection
-// objects. It holds a main host connection, which is used to send the various command needed for
-// allocation management. When it is allocated, the pool field is filled with RemoteConnection that
-// each represent a specific node. The try acquire gives a node clone under the restrictions
-// (executions per nodes) of the configuration. It is synchronous over the host (main) connection.
+// This structure is the executor of an host configuration. It communicates with the host frontend 
+// and allows to perform the necessary operations to provide execution slots, i.e. connections to a 
+// node. In particular, the Host structure is responsible for a few key scheduling aspects:
+//     + Expiration of resource allocation. The Host periodically revokes and starts new allocations 
+//       on the frontend (provided that executions needs slots). This allows to ensure that no 
+//       executions will be cut while running. 
+//     + Management of the limited nodes slots. Only a few executions are allowed to run on the 
+//       same node at once. The Host structure takes care about that.
+//     + Management of abort. If the user wants to cancel the remaining executions, then we
+//       shouldn't deliver any more nodes slots, and return a specific error. The running executions
+//       are still able to run to completion.
+//     + Management of shutdown. If the user wants to shut the program down right away, we should 
+//       take care about cancelling the allocation on the platform. 
+// 
+// Implementing those functionalities while retaining the asynchronous aspect of the code is not 
+// straightforward. Some details about the implementations:
+//     + First, the asynchronous logic is handled in the same way every resources are in the library
+//       as documented in the module level documentation.
+//     + All the scheduling logic is implemented around the `chan` field, which is a stream of 
+//       `ChannelMessages`. It is basically the receiver end of an async channel followed by a 
+//       message asking for reallocation. The inner channel carries nodes slots when they are made 
+//       available, assuming that the allocation didn't expire. 
+//     + Nodes slots are sent as `RemoteHandles` wrapped in the `DropBack` and `Expire` 
+//       smart-pointers. The `Expire` smart-pointer is just a wrapper that attaches an expiration 
+//       date to a value. This allows to represent the fact that a node slot can be used until a 
+//       given time only (when a new allocation must be done). The `DropBack` smart-pointer allows 
+//       to send back a value through a channel when it is dropped rather than actually dropping it.
+//       This allows to send back non-expired node slots, back into the `chan` channel for further 
+//       use by other executions. 
+//     + When all nodes slots are expired, the channel is dropped, which triggers the send of the 
+//       reallocation message. The execution that encounters this message cancels the allocation 
+//       (since the channel was dropped, every executions that used the allocations are done), and 
+//       starts a new one. 
+//     + After reallocation, the `chan` is replaced by a new channel whose nodes slots dropbacks 
+//       points to.
+
 struct Host {
     conf: HostConf,
     conn: ssh::RemoteHandle,
@@ -414,6 +448,7 @@ impl Host {
         };
     }
 
+    // Acquire a node 
     async fn acquire_node(host: Arc<Mutex<Host>>) -> Result<DropBack<Expire<ssh::RemoteHandle>>, Error>{
         let conf = {host.lock().await.conf.clone()};
         debug!("Host: Acquiring node on {} ...", conf.name);
@@ -453,11 +488,44 @@ impl Host {
                         });
                     rx.await.unwrap();
                 }
+                Some(ChannelMessages::Abort) => {
+                    trace!("Host: Aborting...");
+                    Host::abort(host.clone()).await?;
+                    return Err(Error::Aborted);
+                }
+                Some(ChannelMessages::Shutdown) => {
+                    trace!("Host: Shutdown...");
+                    return Err(Error::Shutdown);
+                }
                 None => {
                     panic!("Unexpected");
                 }
             }
         }
+    }
+
+    // Allows to trigger abort. Every node acquisition will return an error after that.
+    async fn abort(host: Arc<Mutex<Host>>) -> Result<(), Error>{
+        let conf = {host.lock().await.conf.clone()};
+        debug!("Host: Aborting on {} ...", conf.name);
+        let mut host = host.lock().await;
+        let mut rem: Pin<Box<(dyn Stream<Item = ChannelMessages> + Send + 'static)>> 
+        = Box::pin(stream::once(future::ready(ChannelMessages::Abort)));
+        std::mem::swap(&mut host.chan, &mut rem);
+        host.chan = Box::pin(stream::once(future::ready(ChannelMessages::Abort))
+            .chain(rem));
+        return Ok(())
+    }
+
+    // Allows to trigger shutdown. Every node acquisition will return an error after that, and 
+    // allocation is cancelled right away. 
+    async fn shutdown(host: Arc<Mutex<Host>>) -> Result<(), Error>{
+        let conf = {host.lock().await.conf.clone()};
+        debug!("Host: Shutting down on {} ...", conf.name);
+        Host::cancel_alloc(host.clone()).await?;
+        let mut host = host.lock().await;
+        host.chan = Box::pin(stream::repeat(ChannelMessages::Shutdown));
+        return Ok(())
     }
 }
 
@@ -466,11 +534,15 @@ impl Host {
 #[derive(Debug)]
 enum OperationInput{
     AcquireNode,
+    Abort,
+    Shutdown
 }
 
 #[derive(Debug)]
 enum OperationOutput{
     AcquireNode(Result<DropBack<Expire<ssh::RemoteHandle>>, Error>),
+    Abort(Result<(), Error>),
+    Shutdown(Result<(), Error>)
 }
 
 #[derive(Clone)]
@@ -478,7 +550,7 @@ pub struct HostHandle {
     _sender: UnboundedSender<(oneshot::Sender<OperationOutput>, OperationInput)>,
     _conf: HostConf, 
     _conn: RemoteHandle,
-    _dropper: Dropper<()>,
+    _dropper: Dropper,
 }
 
 impl HostHandle {
@@ -512,6 +584,28 @@ impl HostHandle {
                                     })
                             )
                         }
+                        OperationInput::Abort => {
+                            spawner.spawn_local(
+                                Host::abort(res.clone())
+                                    .map(|a| {
+                                        sender.send(OperationOutput::Abort(a))
+                                            .map_err(|e| error!("Host Thread: Failed to \\
+                                            send an operation output: \n{:?}", e))
+                                            .unwrap();
+                                    })
+                            )
+                        }
+                        OperationInput::Shutdown => {
+                            spawner.spawn_local(
+                                Host::shutdown(res.clone())
+                                    .map(|a| {
+                                        sender.send(OperationOutput::Shutdown(a))
+                                            .map_err(|e| error!("Host Thread: Failed to \\
+                                            send an operation output: \n{:?}", e))
+                                            .unwrap();
+                                    })
+                            )
+                        }
                     }.map_err(|e| error!("Host Thread: Failed to spawn the operation: \n{:?}", e))
                     .unwrap();
                     future::ready(())
@@ -525,24 +619,50 @@ impl HostHandle {
             pool.run();
             trace!("Host Thread: All futures processed. Getting nodes back.");
             executor::block_on(async {
-                let mut res = reres.lock().await;
-                while let Some(ChannelMessages::Node(e)) = res.chan.next().await{
-                    trace!("Host Thread: Still getting nodes back: {:?}", e);
-                    // Forcing expiration. Otherwise we will wait for it to expire...
-                    e.consume();
+                loop {
+                    let mess = {
+                        let mut res = reres.lock().await;
+                        res.chan.next().await
+                    };
+                    match mess{
+                        Some(ChannelMessages::Abort) => {
+                            // Skip abort messages that may remain.
+                        },
+                        Some(ChannelMessages::Node(e)) => {
+                            debug!("Host Thread: Still getting nodes back: {:?}", e);
+                            // Forcing expiration. Otherwise we will wait for it to expire...
+                            e.consume();
+                        },
+                        Some(ChannelMessages::Shutdown) => {
+                            debug!("Host Thread: Encountered shutdown. Leaving.");
+                            // If we receive shutdown messages, the allocation was already cancelled
+                            break
+                        },
+                        _ => {
+                            // If anything else, we have to cancel the allocation and leave.
+                            debug!("Host Thread: Cancelling allocation ...");
+                            if let Err(e) = Host::cancel_alloc(reres.clone()).await{
+                                error!("Host Thread: Failed to cancel allocation on drop.");
+                            };
+                            break
+                        }
+                    }
                 }
             });
-            trace!("Host Thread: Cancelling allocation ...");
-            if let Err(e) = executor::block_on(Host::cancel_alloc(reres.clone())){
-                error!("Host Thread: Failed to cancel allocation on drop.");
-            };
             trace!("Host Thread: All good. Leaving...");
         }).expect("Failed to spawn host thread.");
+        let drop_sender = sender.clone();
         Ok(HostHandle {
             _sender: sender,
             _conf: host_conf,
             _conn: conn,
-            _dropper: Dropper::from_handle(handle, format!("HostHandle")),
+            _dropper: Dropper::from_closure(
+                Box::new(move || {
+                    drop_sender.close_channel();
+                    handle.join();
+                }), 
+                format!("HostHandle")
+            ),
         })
     }
 
@@ -562,6 +682,44 @@ impl HostHandle {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::AcquireNode(res)) => res,
                 Ok(e) => Err(Error::OperationFetch(format!("Expected AcquireNode, found {:?}", e)))
+            }
+        }
+    }
+
+    /// Async method, returning a future that ultimately resolves after the abortion was started.
+    pub fn async_abort(&self) -> impl Future<Output=Result<(),Error>> {
+        debug!("HostHandle: Building async_abort future");
+        let mut chan = self._sender.clone();
+        async move {
+            let (sender, receiver) = oneshot::channel();
+            trace!("HostHandle::async_abort_future: Sending input");
+            chan.send((sender, OperationInput::Abort))
+                .await
+                .map_err(|e| Error::Channel(e.to_string()))?;
+            trace!("HostHandle::async_abort_future: Awaiting output");
+            match receiver.await {
+                Err(e) => Err(Error::OperationFetch(format!("{}", e))),
+                Ok(OperationOutput::Abort(res)) => res,
+                Ok(e) => Err(Error::OperationFetch(format!("Expected Abort, found {:?}", e)))
+            }
+        }
+    }
+
+    /// Async method, returning a future that ultimately resolves after the shutdown was started.
+    pub fn async_shutdown(&self) -> impl Future<Output=Result<(),Error>> {
+        debug!("HostHandle: Building async_shutdown future");
+        let mut chan = self._sender.clone();
+        async move {
+            let (sender, receiver) = oneshot::channel();
+            trace!("HostHandle::async_shutdown_future: Sending input");
+            chan.send((sender, OperationInput::Shutdown))
+                .await
+                .map_err(|e| Error::Channel(e.to_string()))?;
+            trace!("HostHandle::async_shutdown_future: Awaiting output");
+            match receiver.await {
+                Err(e) => Err(Error::OperationFetch(format!("{}", e))),
+                Ok(OperationOutput::Shutdown(res)) => res,
+                Ok(e) => Err(Error::OperationFetch(format!("Expected Shutdown, found {:?}", e)))
             }
         }
     }
@@ -589,6 +747,11 @@ impl HostHandle {
     /// Returns a handle to the frontend connection. 
     pub fn get_frontend(&self) -> RemoteHandle{
         return self._conn.clone();
+    }
+
+    /// Downgrades the handle, meaning that the resource could be dropped before this guy.
+    pub fn downgrade(&mut self) {
+        self._dropper.downgrade();
     }
 
 }
