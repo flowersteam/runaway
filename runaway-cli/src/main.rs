@@ -1,15 +1,13 @@
-// runaway-cli/main.rs
-// Author: Alexandre Péré
+//! runaway-cli/main.rs
+//! Author: Alexandre Péré
+//! 
+//! Runaway command line tool. Allows to execute scripts and batches of scripts on remote hosts. 
+
+
+//------------------------------------------------------------------------------------------ IMPORTS
+
+
 #![feature(await_macro, async_await, futures_api)]
-
-use std::alloc::System;
-#[global_allocator]
-static GLOBAL: System = System;
-
-
-/// Runaway command line tool. Allows to execute scripts and batches of scripts on remote hosts.
-
-//////////////////////////////////////////////////////////////////////////////////////////// IMPORTS
 use std::path;
 use liborchestra::{hosts, SEND_ARCH_RPATH, FETCH_IGNORE_RPATH, FETCH_ARCH_RPATH,
                    PROFILES_FOLDER_RPATH};
@@ -27,16 +25,26 @@ use log::*;
 use futures::executor::block_on;
 use futures::task::SpawnExt;
 use futures::future::{FutureExt, Future};
+use futures::sink::SinkExt;
+use futures::stream::StreamExt;
 use std::process::Output;
 use std::io;
+use ctrlc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-////////////////////////////////////////////////////////////////////////////////////////// CONSTANTS
+
+//---------------------------------------------------------------------------------------- CONSTANTS
+
+
 const NAME: &'static str = env!("CARGO_PKG_NAME");
 const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 const AUTHOR: &'static str = env!("CARGO_PKG_AUTHORS");
 const DESC: &'static str = "Execute code on remote hosts.";
 
-////////////////////////////////////////////////////////////////////////////////////////////// MACRO
+
+//-------------------------------------------------------------------------------------------- MACRO
+
+
 #[macro_export]
 macro_rules! try_return_code {
     ($result:expr, $text:expr, $ecode:expr) => {
@@ -62,8 +70,11 @@ macro_rules! try_return_err {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////////////////// ASYNC
-// The different async pieces used to assemble a future that will be run to perform the job.
+
+//-------------------------------------------------------------------------------------------- ASYNC
+// 
+// The different async blocks used to assemble a future that will be run to perform the actual task.
+//
 
 /// Packs a folder into an archive and returns its hash.
 async fn pack_folder(folder: path::PathBuf) -> Result<u64, String>{
@@ -216,9 +227,13 @@ async fn cleaning_data(node: DropBack<Expire<RemoteHandle>>,
         Ok(())
 }
 
-//////////////////////////////////////////////////////////////////////////////////////////// HELPERS
 
-/// Executes the command arguments and returns exit code .
+//-------------------------------------------------------------------------------------- SUBCOMMANDS
+//
+// Functions representing every subcommands of the program. 
+//
+
+/// Executes a single execution of the script with the command arguments and returns exit code.
 fn exec(matches: &clap::ArgMatches) -> i32 {
 
     if matches.is_present("vvverbose"){
@@ -241,6 +256,8 @@ fn exec(matches: &clap::ArgMatches) -> i32 {
     let host = try_return_code!(HostHandle::spawn(config), 
                                  "failed to spawn host", 
                                  2);
+    install_ctrlc_handler(host.clone());
+
     let leave = LeaveConfig::from(matches.value_of("leave").unwrap());
     let script_path = matches.value_of("SCRIPT").unwrap();
 
@@ -296,7 +313,8 @@ fn exec(matches: &clap::ArgMatches) -> i32 {
                                6);
     return out;
 }
-    
+
+// Executes a batch of executions on a remote host.
 fn batch(matches: &clap::ArgMatches) -> i32 {
 
     if matches.is_present("vvverbose"){
@@ -308,7 +326,6 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
     } else if matches.is_present("benchmark"){
         std::env::set_var("RUST_LOG", "WARNING,runaway_cli=INFO,liborchestra::hosts=TRACE/Host: Allocation succeeded|Allocation cancelling succeeded|Job: Starting execution");
     }
-
 
     env_logger::init();
 
@@ -322,6 +339,8 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
     let host = try_return_code!(HostHandle::spawn(config), 
                                  "failed to spawn host", 
                                  2);
+    install_ctrlc_handler(host.clone());
+
     let leave = LeaveConfig::from(matches.value_of("leave").unwrap());
 
     let script_path = matches.value_of("SCRIPT").unwrap();
@@ -382,6 +401,7 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
         .create(),
         "failed to spawn worker",
         12);
+
     let script_abs_path = try_return_code!(std::fs::canonicalize(script_path),
                                             "failed to get absolute script path",
                                             3);
@@ -484,7 +504,6 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
             len);
         return 911;
     }
-
     0
 }
 
@@ -570,7 +589,7 @@ fn test(matches: &clap::ArgMatches) -> i32 {
     0
 }
 
-
+// Allows to parse cartesian product strings to generate a set of parameters. 
 pub fn parse_parameters(param_string: &str, repeats: usize) -> Vec<String> {
     // We compute the products of entered parameters recursively
     fn parameters_generator(p: Vec<&str>, repeat: usize) -> Vec<String> {
@@ -601,8 +620,41 @@ pub fn parse_parameters(param_string: &str, repeats: usize) -> Vec<String> {
     parameters_generator(param_string.split(";").collect(), repeats)
 }
 
+// Installs a ctrlc handler that takes care about cancelling the allocation on the host before 
+// leaving. 
+pub fn install_ctrlc_handler(signal_host: HostHandle){
+    // We have to downgrade the handle to the host, because the ctrl-c handler is not dropped during
+    // program execution. For this reason we have to downgrade the dropper. 
+    let mut signal_host = signal_host;
+    signal_host.downgrade();
+    let signal_counter = AtomicUsize::new(0);
+    ctrlc::set_handler(move || {
+        eprintln!("runaway: received ctrl-c.");
+        let mut host = signal_host.clone();
+        let n_ctrlc = signal_counter.fetch_add(1, Ordering::SeqCst);
+        match n_ctrlc{
+            0 => {
+                futures::executor::block_on(host.async_abort()).unwrap();
+                eprintln!("runaway: waiting for running execution to finish");
+            }
+            1 => {
+                futures::executor::block_on(host.async_shutdown()).unwrap();
+                eprintln!("runaway: host shutdown. Saving execution data.");
+            }
+            2 => {
+                eprintln!("runaway: you want to quit too hard. Leaving.");
+                std::process::exit(900);
+            }
+            _ => {
+                std::process::exit(901);
+            }
+        }
+    }).unwrap();
+}
 
-/////////////////////////////////////////////////////////////////////////////////////////////// MAIN
+
+//--------------------------------------------------------------------------------------------- MAIN
+
 
 fn main(){
     

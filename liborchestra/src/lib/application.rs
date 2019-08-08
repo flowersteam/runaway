@@ -246,9 +246,7 @@ enum OperationOutput {
 #[derive(Clone)]
 pub struct ApplicationHandle {
     _sender: mpsc::UnboundedSender<(oneshot::Sender<OperationOutput>, OperationInput)>,
-    _dropper: Option<Dropper<()>>,
-    // We use an option that will set to None when post-processing, to avoid having strong refs 
-    // which would bug the dropper. It is definately hacky and should be changed. (TODO)
+    _dropper: Dropper,
 }
 
 impl fmt::Debug for ApplicationHandle{
@@ -358,9 +356,15 @@ impl ApplicationHandle {
             pool.run();
             trace!("Application Thread: All futures executed. Leaving...");
         }).expect("Failed to spawn application thread.");
+        let drop_sender = sender.clone();
         Ok(ApplicationHandle {
             _sender: sender,
-            _dropper: Some(Dropper::from_handle(handle, format!("ApplicationHandle"))),
+            _dropper: Dropper::from_closure(
+                Box::new(move ||{
+                    drop_sender.close_channel();
+                    handle.join();
+                }), 
+                format!("ApplicationHandle")),
         })
     }
 
@@ -376,7 +380,7 @@ impl ApplicationHandle {
             host, commit.0, parameters.0);
         let mut chan = self._sender.clone();
         let mut app = (*self).clone();
-        app._dropper = None;
+        app._dropper.downgrade();
         async move {
             let (sender, receiver) = oneshot::channel();
             trace!("ApplicationHandle::async_submit_exec_future: Sending submit exec input");
@@ -400,7 +404,7 @@ impl ApplicationHandle {
         debug!("ApplicationHandle: Post-Processing execution {}", exec);
         let mut chan = self._sender.clone();
         let mut app = (*self).clone();
-        app._dropper = None;
+        app._dropper.downgrade();
         async move {
             let (sender, receiver) = oneshot::channel();
             trace!("ApplicationHandle: Sending post-process input");
