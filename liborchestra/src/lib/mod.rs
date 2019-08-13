@@ -44,7 +44,6 @@ pub mod hosts;
 pub mod repository;
 pub mod misc;
 pub mod primitives;
-pub mod stateful;
 pub mod application;
 #[macro_use]
 pub mod error;
