@@ -176,6 +176,16 @@ pub const LIBSSH2_SFTP_S_IFDIR: c_ulong = 0o040000;
 pub const LIBSSH2_SFTP_S_IFREG: c_ulong = 0o100000;
 pub const LIBSSH2_SFTP_S_IFLNK: c_ulong = 0o120000;
 
+pub const LIBSSH2_TRACE_TRANS: c_int = 1<<1 ;
+pub const LIBSSH2_TRACE_KEX: c_int = 1<<2 ;
+pub const LIBSSH2_TRACE_AUTH: c_int = 1<<3;
+pub const LIBSSH2_TRACE_CONN: c_int =  1<<4;
+pub const LIBSSH2_TRACE_SCP: c_int = 1<<5;
+pub const LIBSSH2_TRACE_SFTP: c_int = 1<<6;
+pub const LIBSSH2_TRACE_ERROR: c_int = 1<<7;
+pub const LIBSSH2_TRACE_PUBLICKEY: c_int = 1<<8;
+pub const LIBSSH2_TRACE_SOCKET: c_int = 1<<9;
+
 pub enum LIBSSH2_SESSION {}
 pub enum LIBSSH2_AGENT {}
 pub enum LIBSSH2_CHANNEL {}
@@ -561,6 +571,9 @@ extern {
     pub fn libssh2_sftp_unlink_ex(sftp: *mut LIBSSH2_SFTP,
                                   filename: *const c_char,
                                   filename_len: c_uint) -> c_int;
+
+    // debug
+    pub fn libssh2_trace(session: *mut LIBSSH2_SESSION, bitmask: c_int); 
 }
 
 #[test]

@@ -381,7 +381,7 @@ impl Host {
         let (mut tx, rx) = unbounded();
         let nodes = nodes
             .split("\n")
-            .inspect(|n| trace!("Host: Connecting to {}", n))
+            .inspect(|n| trace!("Host: Connecting to {:?}", n))
             .map(|n| {
                 let mut config = profile.clone();
                 let cmd = conf.node_proxy_command.replace("$NODENAME", n);

@@ -7,7 +7,7 @@
 //------------------------------------------------------------------------------------------ IMPORTS
 
 
-#![feature(await_macro, async_await, futures_api)]
+#![feature(async_await, futures_api)]
 use std::path;
 use liborchestra::{hosts, SEND_ARCH_RPATH, FETCH_IGNORE_RPATH, FETCH_ARCH_RPATH,
                    PROFILES_FOLDER_RPATH};
@@ -145,6 +145,8 @@ async fn perform_job(node: DropBack<Expire<RemoteHandle>>,
                      parameters: String,
                      remote_defl: String,
                      remote_send: String,
+                     stdout_cb: Box<dyn Fn(Vec<u8>)+Send+'static>,
+                     stderr_cb: Box<dyn Fn(Vec<u8>)+Send+'static>,
                      )
                      -> Result<Output, String>{
         info!("Job: Deflating input data");
@@ -157,12 +159,11 @@ async fn perform_job(node: DropBack<Expire<RemoteHandle>>,
             .map_err(|e| format!("Failed to deflate input data: {}", e))
             .and_then(|e| e.result().map_err(|e| format!("Failed to deflate input data: {}", e)))?;
         info!("Job: Starting execution");
-        node.async_exec(format!("{} && cd {} && ./{} {} && {}",
-                                              before_exec,
-                                              remote_defl,
-                                              script_name,
-                                              parameters,
-                                              after_exec))
+        node.async_pty(vec!(before_exec,
+                            format!("cd {} && ./{} {}", remote_defl, script_name, parameters),
+                            after_exec),
+                        Some(stdout_cb),
+                        Some(stderr_cb))
             .await
             .map_err(|e| format!("Failed to execute: {}", e))
 }
@@ -285,13 +286,23 @@ fn exec(matches: &clap::ArgMatches) -> i32 {
         try_return_err!(send_data(node.clone(),
                                   script_folder.join(SEND_ARCH_RPATH),
                                   remote_dir.clone()).await);
+        let stdout_callback = Box::new(|a|{
+            let string = String::from_utf8(a).unwrap().replace("\r\n", "");
+            println!("{}", string);
+        });
+        let stderr_callback = Box::new(|a|{
+            let string = String::from_utf8(a).unwrap().replace("\r\n", "");
+            eprintln!("{}", string);
+        });
         let out = try_return_err!(perform_job(node.clone(),
                                               host.get_before_execution_command(),
                                               host.get_after_execution_command(),
                                               script_name.to_str().unwrap().to_owned(),
                                               parameters.to_owned(),
                                               remote_defl.to_str().unwrap().to_owned(),
-                                              remote_send.to_str().unwrap().to_owned()).await);
+                                              remote_send.to_str().unwrap().to_owned(),
+                                              stdout_callback,
+                                              stderr_callback).await);
         try_return_err!(fetch_data(node.clone(),
                                    remote_defl.to_str().unwrap().to_owned(),
                                    remote_fetch.to_str().unwrap().to_owned(),
@@ -304,8 +315,6 @@ fn exec(matches: &clap::ArgMatches) -> i32 {
                                       script_folder.into(),
                                       leave,
                                       false).await);
-        println!("{}", String::from_utf8(out.stdout).unwrap());
-        eprintln!("{}", String::from_utf8(out.stderr).unwrap()); 
         Ok(out.status.code().unwrap_or(911))
     };
     let out = try_return_code!(block_on(future),
@@ -396,7 +405,7 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
     }
 
     let mut executor = try_return_code!(futures::executor::ThreadPoolBuilder::new()
-        .pool_size(1)
+        //.pool_size(1)
         .name_prefix("runaway-worker")
         .create(),
         "failed to spawn worker",
@@ -429,7 +438,7 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
     let len = outputs.len();
 
     let mut handles = Vec::new();
-    for (p, b) in params.into_iter().zip(outputs.into_iter()){
+    for (i, (p, b)) in params.into_iter().zip(outputs.into_iter()).enumerate(){
         let l = l.clone();
         let script_name = script_name.clone();
         let script_folder = script_folder.clone();
@@ -445,13 +454,31 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
         let future = async move{
             let p = p.clone();
             let node = try_return_err!(acquire_node(host.clone()).await);
+            let stdout_callback: Box<dyn Fn(Vec<u8>)+Send+'static>;
+            let stderr_callback: Box<dyn Fn(Vec<u8>)+Send+'static>;
+
+            if benchmark==true{
+                stdout_callback = Box::new(|_|{});
+                stderr_callback = Box::new(|_|{});
+            } else{
+                stdout_callback = Box::new(move |a|{
+                    let string = String::from_utf8(a).unwrap().replace("\r\n", "");
+                    println!("#{}: {}", i, string);
+                });
+                stderr_callback = Box::new(move |a|{
+                    let string = String::from_utf8(a).unwrap().replace("\r\n", "");
+                    eprintln!("#{}: {}", i, string);
+                });
+            }
             let out = try_return_err!(perform_job(node.clone(),
                                                   host.get_before_execution_command(),
                                                   host.get_after_execution_command(),
                                                   script_name.to_str().unwrap().to_owned(),
                                                   p,
                                                   remote_defl.to_str().unwrap().to_owned(),
-                                                  remote_send.to_str().unwrap().to_owned()).await);
+                                                  remote_send.to_str().unwrap().to_owned(),
+                                                  stdout_callback,
+                                                  stderr_callback).await);
             try_return_err!(fetch_data(node.clone(),
                                        remote_defl.to_str().unwrap().to_owned(),
                                        remote_fetch.to_str().unwrap().to_owned(),
@@ -464,10 +491,6 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
                                           b.clone(),
                                           l,
                                           true).await);
-            if !benchmark{
-                println!("{}", String::from_utf8(out.stdout.clone()).unwrap());
-                eprintln!("{}", String::from_utf8(out.stderr.clone()).unwrap()); 
-            }
             let mut stdout_file = std::fs::File::create(b.join("stdout")).unwrap();
             stdout_file.write_all(&out.stdout).unwrap();
             let mut stderr_file = std::fs::File::create(b.join("stderr")).unwrap();

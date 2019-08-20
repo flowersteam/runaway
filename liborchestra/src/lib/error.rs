@@ -11,7 +11,7 @@
 use crate::{ssh, repository, misc, primitives, derive_from_error};
 use std::{io, error, fmt};
 use regex;
-use git2;
+//use git2;
 use yaml_rust;
 
 
