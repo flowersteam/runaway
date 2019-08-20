@@ -32,6 +32,7 @@ fn main() {
     }
 
     let target = env::var("TARGET").unwrap();
+    let is_debug: bool = env::var("DEBUG").unwrap() == "true";
     let dst = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let mut cfg = cc::Build::new();
 
@@ -40,6 +41,7 @@ fn main() {
     println!("cargo:root={}", dst.display());
     let build = dst.join("build");
     cfg.out_dir(&build);
+
     fs::create_dir_all(&build).unwrap();
     fs::create_dir_all(&include).unwrap();
 
@@ -72,6 +74,10 @@ fn main() {
         .include("libssh2/src");
 
     cfg.define("HAVE_LONGLONG", None);
+    if is_debug{
+        cfg.define("HAVE_GETTIMEOFDAY", None);
+        cfg.define("ENABLE_DEBUG_LOGGING", Some("ON"));
+    }
 
     if target.contains("windows") {
         cfg.include("libssh2/win32");
@@ -92,6 +98,11 @@ fn main() {
         cfg.define("LIBSSH2_OPENSSL", None);
         cfg.define("HAVE_LIBCRYPT32", None);
         cfg.define("HAVE_EVP_AES_128_CTR", None);
+        cfg.define("LIBSSH2DEBUG", None);
+        if is_debug{
+            cfg.define("HAVE_GETTIMEOFDAY", None);
+            cfg.define("ENABLE_DEBUG_LOGGING", Some("ON"));
+        }
 
         cfg.file("libssh2/src/openssl.c");
 
@@ -150,6 +161,7 @@ fn main() {
     ).unwrap();
 
     cfg.warnings(false);
+    println!("COMPILING");
     cfg.compile("ssh2");
 
     if target.contains("windows") {

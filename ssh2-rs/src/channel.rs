@@ -220,7 +220,7 @@ impl<'sess> Channel<'sess> {
                                                           &mut msg, &mut msglen,
                                                           &mut lang,
                                                           &mut langlen);
-            try!(self.sess.rc(rc));
+            self.sess.rc(rc)?;
             return Ok(ExitSignal {
                 exit_signal: convert(self, sig, siglen),
                 error_message: convert(self, msg, msglen),
@@ -283,7 +283,7 @@ impl<'sess> Channel<'sess> {
                                                         force as c_uchar,
                                                         &mut ret)
         };
-        try!(self.sess.rc(rc));
+        self.sess.rc(rc)?;
         Ok(ret as u64)
     }
 

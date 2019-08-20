@@ -2,10 +2,10 @@
 members = [
     "liborchestra",
     "runaway-cli",
-    "remote-leak"]
+    "remote-leak",
+    "ssh2-rs",
+    "libssh2-sys"]
 
-[replace]
-"liborchestra:0.0.2" = { path = "liborchestra"}
-"runaway-cli:0.0.2" = { path = "runaway-cli"}
-"remote-leak:0.0.2" = {path = "remote-leak"}
-"ssh2:0.3.3" = { path = "ssh2-rs"}
+[patch.crates-io]
+"ssh2" = {path="ssh2-rs"}
+"libssh2-sys" = { path = "libssh2-sys"}
