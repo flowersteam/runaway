@@ -197,14 +197,11 @@ async fn fetch_data(node: DropBack<Expire<RemoteHandle>>,
         Ok(())
 }
 
-/// Cleans data on both local and remote hand. 
-async fn cleaning_data(node: DropBack<Expire<RemoteHandle>>,
-                       remote_dir: String,
-                       remote_defl: String,
-                       input_path: path::PathBuf,
-                       output_path: path::PathBuf,
-                       leave_config: LeaveConfig,
-                       keep_send: bool) -> Result<(), String>{
+/// Cleans data on remote hand. 
+async fn clean_data(node: DropBack<Expire<RemoteHandle>>,
+                    remote_dir: String,
+                    remote_defl: String,
+                    leave_config: LeaveConfig) -> Result<(), String>{
         info!("Job: Cleaning...");
         match leave_config{
             LeaveConfig::Nothing => {
@@ -220,12 +217,6 @@ async fn cleaning_data(node: DropBack<Expire<RemoteHandle>>,
             }
             LeaveConfig::Everything => {}
         }
-        if !keep_send{
-            std::fs::remove_file(&input_path.join(SEND_ARCH_RPATH))
-                .map_err(|e| format!("Failed to remove send archive"))?;
-        }
-        std::fs::remove_file(&output_path.join(FETCH_ARCH_RPATH))
-            .map_err(|e| format!("Failed to remove the fetch archive"))?;
         Ok(())
 }
 
@@ -261,8 +252,8 @@ fn exec(matches: &clap::ArgMatches) -> i32 {
     install_ctrlc_handler(host.clone());
 
     let leave = LeaveConfig::from(matches.value_of("leave").unwrap());
+    let leave_tar = matches.is_present("leave-tars");
     let script_path = matches.value_of("SCRIPT").unwrap();
-
     let parameters = matches.value_of("parameters").unwrap_or("");
 
     let script_abs_path = try_return_code!(std::fs::canonicalize(script_path),
@@ -309,13 +300,14 @@ fn exec(matches: &clap::ArgMatches) -> i32 {
                                    remote_fetch.to_str().unwrap().to_owned(),
                                    remote_ignore.to_str().unwrap().to_owned(),
                                    script_folder.into()).await);
-        try_return_err!(cleaning_data(node.clone(),
-                                      remote_dir.to_str().unwrap().to_owned(),
-                                      remote_defl.to_str().unwrap().to_owned(),
-                                      script_folder.into(),
-                                      script_folder.into(),
-                                      leave,
-                                      false).await);
+        try_return_err!(clean_data(node.clone(),
+                                   remote_dir.to_str().unwrap().to_owned(),
+                                   remote_defl.to_str().unwrap().to_owned(),
+                                   leave).await);
+        if !leave_tar{
+            std::fs::remove_file(script_folder.join(SEND_ARCH_RPATH)).unwrap();
+            std::fs::remove_file(script_folder.join(FETCH_ARCH_RPATH)).unwrap();
+        }
         Ok(out.status.code().unwrap_or(911))
     };
     let out = try_return_code!(block_on(future),
@@ -352,6 +344,7 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
     install_ctrlc_handler(host.clone());
 
     let leave = LeaveConfig::from(matches.value_of("leave").unwrap());
+    let leave_tars = matches.is_present("leave-tars");
 
     let script_path = matches.value_of("SCRIPT").unwrap();
 
@@ -429,10 +422,10 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
                      "failed to send data",
                      13);
 
-    let l = match leave{
-            LeaveConfig::Everything => LeaveConfig::Everything,
-            LeaveConfig::Nothing => LeaveConfig::Code,
-            LeaveConfig::Code => LeaveConfig::Code,
+    let l = match leave{ 
+        LeaveConfig::Everything => LeaveConfig::Everything,
+        LeaveConfig::Nothing => LeaveConfig::Code, 
+        LeaveConfig::Code => LeaveConfig::Code,
     };
 
     let len = outputs.len();
@@ -484,19 +477,20 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
                                        remote_fetch.to_str().unwrap().to_owned(),
                                        remote_ignore.to_str().unwrap().to_owned(),
                                        b.clone()).await);
-            try_return_err!(cleaning_data(node.clone(),
-                                          remote_dir.to_str().unwrap().to_owned(),
-                                          remote_defl.to_str().unwrap().to_owned(),
-                                          script_folder.into(),
-                                          b.clone(),
-                                          l,
-                                          true).await);
+            try_return_err!(clean_data(node.clone(),
+                                       remote_dir.to_str().unwrap().to_owned(),
+                                       remote_defl.to_str().unwrap().to_owned(),
+                                       l).await);
             let mut stdout_file = std::fs::File::create(b.join("stdout")).unwrap();
             stdout_file.write_all(&out.stdout).unwrap();
             let mut stderr_file = std::fs::File::create(b.join("stderr")).unwrap();
             stderr_file.write_all(&out.stderr).unwrap();
             let mut ecode_file = std::fs::File::create(b.join("ecode")).unwrap();
             ecode_file.write_all(format!("{}", out.status.code().unwrap_or(911)).as_bytes()).unwrap();
+
+            if !leave_tars{
+                std::fs::remove_file(b.join(FETCH_ARCH_RPATH)).unwrap();
+            }
 
             Ok(out.status.code().unwrap_or(911))
         };
@@ -517,6 +511,9 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
         executor.run(host.get_frontend()
             .async_exec(format!("rm -rf {}", remote_dir.to_str().unwrap())))
             .map_err(|e| error!("Failed to remove code."));
+    }
+    if !leave_tars{
+        std::fs::remove_file(script_folder.join(SEND_ARCH_RPATH)).unwrap();
     }
     if completed == len{
         eprintln!("runaway: brought all jobs to completion.");
@@ -713,7 +710,7 @@ fn install_completion(application: clap::App) -> i32 {
         }
         Err(e) => {
             eprintln!("runaway: shell {} is not available for completion. Use bash or zsh.", e);
-            std::process::exit(553);
+            return 553;
         }
         _ => unreachable!()
     }
@@ -802,14 +799,12 @@ fn main(){
             .about("Install bash completion script"))
         .subcommand(clap::SubCommand::with_name("exec")
             .about("Runs a single execution on a remote host")
-            .arg(clap::Arg::with_name("SCRIPT")
-                .help("File name of the script to be executed")
-                .index(2)
-                .required(true))
             .arg(clap::Arg::with_name("REMOTE")
                 .help("Name of remote profile to execute script with")
-                .index(1)
                 .possible_values(&profiles.iter().map(|a| a.as_str()).collect::<Vec<_>>()[..])
+                .required(true))
+            .arg(clap::Arg::with_name("SCRIPT")
+                .help("File name of the script to be executed")
                 .required(true))
             .arg(clap::Arg::with_name("verbose")
                 .long("verbose")
@@ -820,6 +815,9 @@ fn main(){
             .arg(clap::Arg::with_name("vvverbose")
                 .long("vvverbose")
                 .help("Print all logs"))
+            .arg(clap::Arg::with_name("leave-tars")
+                .long("leave-tars")
+                .help("Leave transfered tar files to debug .*ignore files."))
             .arg(clap::Arg::with_name("leave")
                 .short("l")
                 .long("leave")
@@ -827,28 +825,25 @@ fn main(){
                 .possible_value("nothing")
                 .possible_value("code")
                 .possible_value("everything")
-                .required(true)
-                .default_value("everything")
+                .default_value("nothing")
                 .help("What to leave on the remote host after execution"))
-            .arg(clap::Arg::with_name("parameters")
-                        .help("Script parameters. In normal mode, it should be written as they would \
-                               be for the program to execute. In batch mode, you can use a product \
-                               parameters string.")
-                        .multiple(true)
-                        .allow_hyphen_values(true)
-                        .last(true))
+           .arg(clap::Arg::with_name("parameters")
+                .help("Script parameters. In normal mode, it should be written as they would \
+                       be for the program to execute. In batch mode, you can use a product \
+                       parameters string.")
+                .multiple(true)
+                .allow_hyphen_values(true)
+                .last(true))
         )
         .subcommand(clap::SubCommand::with_name("batch")
             .about("Runs a batch of executions on a remote host")
-            .arg(clap::Arg::with_name("SCRIPT")
-                .help("File name of the script to be executed")
-                .index(2)
-                .required(true))
             .arg(clap::Arg::with_name("REMOTE")
                 .help("Name of remote profile to execute script with")
-                .index(1)
                 .possible_values(&profiles.iter().map(|a| a.as_str()).collect::<Vec<_>>()[..])
                 .required(true))
+            .arg(clap::Arg::with_name("SCRIPT")
+                .help("File name of the script to be executed")
+                .required(true)) 
             .arg(clap::Arg::with_name("verbose")
                 .long("verbose")
                 .help("Print light logs"))
@@ -861,6 +856,15 @@ fn main(){
             .arg(clap::Arg::with_name("benchmark")
                 .long("benchmark")
                 .help("Print only allocations and executions messages for statistics purposes."))
+            .arg(clap::Arg::with_name("leave-tars")
+                .long("leave-tars")
+                .help("Leave transfered tar files to debug .*ignore files."))
+            .arg(clap::Arg::with_name("repeats")
+                .short("R")
+                .long("repeats")
+                .takes_value(true)
+                .default_value("1")
+                .help("The number of time every parameter must be repeated. Used with product string."))
             .arg(clap::Arg::with_name("leave")
                 .short("l")
                 .long("leave")
@@ -869,14 +873,8 @@ fn main(){
                 .possible_value("code")
                 .possible_value("everything")
                 .required(true)
-                .default_value("everything")
+                .default_value("nothing")
                 .help("What to leave on the remote host after execution"))
-            .arg(clap::Arg::with_name("repeats")
-                .short("R")
-                .long("repeats")
-                .takes_value(true)
-                .default_value("1")
-                .help("The number of time every parameter must be repeated. Used with product string."))
             .arg(clap::Arg::with_name("parameters_file")
                 .short("f")
                 .long("parameters_file")
@@ -893,11 +891,11 @@ fn main(){
                 .takes_value(true)
                 .default_value("batch")
                 .help("The output folder to put the executions result in."))
-            .arg(clap::Arg::with_name("parameters_string")
-                        .help("Script parameters product string.")
-                        .multiple(true)
-                        .allow_hyphen_values(true)
-                        .last(true))
+           .arg(clap::Arg::with_name("parameters_string")
+                .help("Script parameters product string.")
+                .multiple(true)
+                .allow_hyphen_values(true)
+                .last(true))
         )
         .subcommand(clap::SubCommand::with_name("test")
              .about("Tests a remote profile")
