@@ -56,6 +56,7 @@ use futures::task::LocalSpawnExt;
 use futures::FutureExt;
 use futures::SinkExt;
 use futures::channel::{mpsc, oneshot};
+use std::time;
 
 
 //------------------------------------------------------------------------------------------  MODULE
@@ -66,6 +67,23 @@ pub mod config;
 
 //------------------------------------------------------------------------------------------- MACROS
 
+/// This macro allows to asynchronously wait for (at least) a given time. This means that the thread
+/// is yielded when it is done. For now, it creates a separate thread each time a sleep is needed, 
+/// which is far from ideal.
+#[macro_export] 
+macro_rules! async_sleep {
+    ($dur: expr) => {
+        {
+            let (tx, rx) = oneshot::channel();
+            thread::spawn(move || {
+                thread::sleep($dur);
+                tx.send(()).unwrap();
+            });
+            rx.await.unwrap();
+
+        }
+    };
+}
 
 /// This macro allows to intercept a wouldblock error returned by the expression evaluation, and 
 /// awaits for 1 ns (at least) before retrying. 
@@ -76,12 +94,7 @@ macro_rules! await_wouldblock_io {
             loop{
                 match $expr {
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        let(tx, rx) = oneshot::channel();
-                            thread::spawn(move || {
-                                thread::sleep(Duration::from_nanos(1));
-                                tx.send(()).unwrap();
-                            });
-                        rx.await.unwrap();
+                        async_sleep!(Duration::from_nanos(1))
                     }
                     res => break res,
                 }
@@ -99,25 +112,83 @@ macro_rules! await_wouldblock_ssh {
             loop{
                 match $expr {
                     Err(ref e) if e.code() == -37 => {
-                        let(tx, rx) = oneshot::channel();
-                            thread::spawn(move || {
-                                thread::sleep(Duration::from_nanos(1));
-                                tx.send(()).unwrap();
-                            });
-                        rx.await.unwrap();
+                        async_sleep!(Duration::from_nanos(1))
                     }
                     Err(ref e) if e.code() == -21 => {
-                        let(tx, rx) = oneshot::channel();
-                            thread::spawn(move || {
-                                thread::sleep(Duration::from_secs(1));
-                                tx.send(()).unwrap();
-                            });
-                        rx.await.unwrap();
+                        async_sleep!(Duration::from_nanos(1))
                     }
                     res => break res,
                 }
             }
         }
+    }
+}
+
+/// This macro allows to retry an ssh expression if the error code received was $code. It allows to 
+/// retry commands that fails every now and then for a limited amount of time.
+#[macro_export]
+macro_rules! await_retry_n_ssh {
+    ($expr:expr, $nb:expr, $($code:expr),*) => {
+       {    
+            let nb = $nb as usize;
+            let mut i = 1 as usize;
+            loop{
+                match $expr {
+                    Err(e)  => {
+                        if i == nb {
+                            break Err(e)
+                        }
+                        $(
+                            else if e.code() == $code as i32 {
+                                async_sleep!(Duration::from_nanos(1));
+                                i += 1;
+                            }
+                        )*
+                    }
+                    res => {
+                        break res
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// This macro allows to retry an ssh expression if the error code received was $code. It allows to 
+/// retry commands that fail but must be retried until it's ok. For example 
+#[macro_export]
+macro_rules! await_retry_ssh {
+    ($expr:expr, $($code:expr),*) => {
+       {    
+            loop{
+                match $expr {
+                    Err(e)  => {
+                        $(  if e.code() == $code as i32 {
+                                async_sleep!(Duration::from_nanos(1));
+                            } else  )*
+                        {
+                            break Err(e)
+                        }
+                    }
+                    res => {
+                        break res
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// This macro generates the pty exec string out of an actual string. Just intended to remove 
+/// boilerplate.
+#[macro_export]
+macro_rules! ptyxec {
+    ($expr: expr) =>{
+        format!("\\
+            {{ (({}); echo RUNAWAY_ECODE: $?) | sed 's/^/RUNAWAY_STDOUT: /'; }}  \\
+            2>&1 1>&3 | sed 's/^/RUNAWAY_STDERR: /'\n\\
+            ", $expr)
+            .as_bytes()
     }
 }
 
@@ -479,27 +550,24 @@ impl Remote {
     /// Asynchronous function used to execute a command on the remote. 
     async fn exec(remote: Arc<Mutex<Remote>>, command: String) -> Result<Output, Error>{
         debug!("Remote: Starting execution: {}", command);
-        let ret = await_wouldblock_ssh!(
+        // Error -21 corresponds to not enough channels available. It must be retried until an other 
+        // execution came to an end, and made a channel available. 
+        let ret = await_wouldblock_ssh!(await_retry_ssh!(
             {
                 remote.lock()
                     .await
                     .session()
                     .channel_session()
-            }
+            },
+            -21
+            )
         );
         let mut channel  = match ret {
             Ok(c) => c,
-            Err(ref e) if e.code() == -21 => {
-                error!("Remote: Failed to obtain channel: {:?}", e);
-                return Err(Error::ChannelNotAvailable)
-            }
             Err(e) => return Err(Error::ExecutionFailed(format!("Failed to open channel: {}", e)))
         };
-        if let Err(e) = await_wouldblock_ssh!(channel.exec(&command)) {
+        if let Err(e) = await_wouldblock_ssh!(channel.exec(&format!("{}\n", command))) {
             return Err(Error::ExecutionFailed(format!("Failed to exec command {}: {}", command, e)))
-        }
-        if let Err(e) = await_wouldblock_io!(channel.flush()){
-            return Err(Error::ExecutionFailed(format!("Failed to flush: {}", e)))
         }
         if let Err(e) = await_wouldblock_ssh!(channel.send_eof()){
             return Err(Error::ExecutionFailed(format!("Failed to send EOF: {}", e)))
@@ -509,20 +577,25 @@ impl Remote {
             stdout: Vec::new(),
             stderr: Vec::new(),
         };
+        let mut buf = [0 as u8; 8*1024];
         loop {
             let eof = channel.eof();
             {   
                 let mut stream = channel.stream(0);
-                match await_wouldblock_io!(stream.read_to_end(&mut output.stdout)){
+                match await_wouldblock_io!(stream.read(&mut buf)){
                     Err(e) => return Err(Error::ExecutionFailed(format!("Failed to read stdout: {:?}", e))),
-                    Ok(_) => {}
+                    Ok(b) => {
+                        output.stdout.write(&mut buf[..b]).unwrap();
+                    }
                 }
             }
             {
                 let mut stream = channel.stream(1);
-                match await_wouldblock_io!(stream.read_to_end(&mut output.stderr)){
+                match await_wouldblock_io!(stream.read(&mut buf)){
                     Err(e) => return Err(Error::ExecutionFailed(format!("Failed to read stderr: {:?}", e))),
-                    Ok(_) => {}
+                    Ok(b) => {
+                        output.stderr.write(&mut buf[..b]).unwrap();
+                    }
                 }
             }
             if eof{
@@ -530,7 +603,7 @@ impl Remote {
             } else {
                 let(tx, rx) = oneshot::channel();
                      thread::spawn(move || {
-                         thread::sleep(Duration::from_millis(500));
+                         thread::sleep(Duration::from_nanos(1));
                          tx.send(()).unwrap();
                      });
                  rx.await.unwrap();
@@ -554,6 +627,117 @@ impl Remote {
         output.status = ExitStatusExt::from_raw(ecode);
         trace!("Remote: Returning output {:?}", output);
 
+        return Ok(output);
+    }
+
+    /// Asynchronous function used to execute an interactive command on the remote. 
+    async fn pty (remote: Arc<Mutex<Remote>>, 
+        commands: Vec<String>, 
+        stdout_cb: Box<dyn Fn(Vec<u8>)+Send+'static>,
+        stderr_cb: Box<dyn Fn(Vec<u8>)+Send+'static>) -> Result<Output, Error>{
+        debug!("Remote: Starting pty: {:?}", commands);
+        let ret = await_wouldblock_ssh!(await_retry_ssh!(
+            {
+                remote.lock()
+                    .await
+                    .session()
+                    .channel_session()
+            },
+            -21)
+        );
+        let mut channel  = match ret {
+            Ok(c) => c,
+            Err(e) => return Err(Error::ExecutionFailed(format!("Failed to open channel: {}", e)))
+        }; 
+        if let Err(e) = await_wouldblock_ssh!(
+            await_retry_n_ssh!(channel.request_pty("xterm", None, Some((0,0,0,0))), 10, -14)){
+            return Err(Error::ExecutionFailed(format!("Failed to request pty: {}", e)));
+        }
+        if let Err(e) = await_wouldblock_ssh!(channel.shell()){
+            return Err(Error::ExecutionFailed(format!("Failed to request shell: {}", e)));
+        }
+        if let Err(e) = await_wouldblock_io!(channel.write_all("exec 3>&2;\nsh\n".as_bytes())){
+            return Err(Error::ExecutionFailed(format!("Failed to request shell: {}", e)));
+        }
+        let mut commands = commands;
+        let mut output = Output {
+            status: ExitStatusExt::from_raw(911),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        let mut stream = BufReader::new(channel);
+        let mut buffer = String::new(); 
+        let v = commands.remove(0);
+        if let Err(e) = await_wouldblock_io!(stream.get_mut().write_all(ptyxec!(v))){
+                return Err(Error::ExecutionFailed(format!("Failed to exec command '{}': {}", v, e)))
+        }
+        loop{
+            buffer.clear();
+            match await_wouldblock_io!(stream.read_line(&mut buffer)){
+                Ok(0) => break,
+                Ok(_) => {
+                    trace!("Buffer: {}", buffer);
+                    if buffer.contains("RUNAWAY_STDOUT: RUNAWAY_ECODE: "){
+                        let ecode = buffer.replace("RUNAWAY_STDOUT: RUNAWAY_ECODE: ", "")
+                            .replace("\r\n", "")
+                            .parse::<i32>()
+                            .unwrap(); 
+                        output.status = ExitStatusExt::from_raw(ecode);
+                        if ecode != 0{
+                            break
+                        }
+                        if commands.len() == 0{
+                            break
+                        } else {
+                            let v = commands.remove(0);
+                            if let Err(e) = await_wouldblock_io!(stream.get_mut().write_all(ptyxec!(v))){
+                                    return Err(Error::ExecutionFailed(format!("Failed to exec command '{}': {}", v, e)))
+                            }
+                        }
+                        await_wouldblock_io!(stream.get_mut().flush()).unwrap();
+                    } else if buffer.contains("RUNAWAY_STDOUT: ") && !buffer.contains("sed"){
+                        let out = buffer.replace("RUNAWAY_STDOUT: ", "");
+                        output.stdout.write(out.as_bytes()).unwrap();
+                        stdout_cb(out.as_bytes().to_vec());
+                    } else if buffer.contains("RUNAWAY_STDERR: ") && !buffer.contains("sed"){
+                        let err = buffer.replace("RUNAWAY_STDERR: ", "");
+                        output.stderr.write(err.as_bytes()).unwrap();
+                        stderr_cb(err.as_bytes().to_vec());
+                    } else if buffer.contains("sh: ") { // Intercept shell error 
+                        output.stderr.write_all(format!("sh failed to execute your command: '{}'",
+                                                buffer)
+                            .as_bytes());
+                        break
+                    }
+                },
+                Err(e) => {
+                    return Err(Error::ExecutionFailed(format!("Failed to read outputs: {}", e)));
+                }
+            }
+        }
+        if let Err(e) = await_wouldblock_io!(stream.get_mut().write_all(format!("exit\nexit\n")
+                                        .as_bytes())){
+            return Err(Error::ExecutionFailed(format!("Failed to exit shell.")))
+                                    }
+        if let Err(e) = await_wouldblock_ssh!(stream.get_mut().wait_eof()){
+            return Err(Error::ExecutionFailed(format!("Failed to wait eof: {}", e)))
+        }
+        if let Err(e) = await_wouldblock_ssh!(stream.get_mut().close()) {
+            return Err(Error::ExecutionFailed(format!("Failed to close channel: {}", e)))
+        }
+        if let Err(e) = await_wouldblock_ssh!(stream.get_mut().wait_close()) {
+            return Err(Error::ExecutionFailed(format!("Failed to wait to close channel: {}", e)));
+        }
+        output.stdout = String::from_utf8(output.stdout)
+            .unwrap()
+            .replace("\r\n", "\n")
+            .as_bytes()
+            .to_vec();
+        output.stderr = String::from_utf8(output.stderr)
+            .unwrap()
+            .replace("\r\n", "\n")
+            .as_bytes()
+            .to_vec();
         return Ok(output);
     }
 
@@ -700,17 +884,29 @@ impl Remote {
 }
 
 /// The operation inputs, sent by the outer futures and processed by inner thread.
-#[derive(Debug)]
 enum OperationInput {
     Exec(String),
+    Pty(Vec<String>, Box<dyn Fn(Vec<u8>)+Send+'static>, Box<dyn Fn(Vec<u8>)+Send+'static>),
     ScpSend(PathBuf, PathBuf),
     ScpFetch(PathBuf, PathBuf)
+}
+
+impl std::fmt::Debug for OperationInput{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self{
+            OperationInput::Exec(c) => write!(f, "Exec({:?})", c),
+            OperationInput::Pty(c, out, err) => write!(f, "Pty({:?}, {}, {})", c, stringify!(out), stringify!(err)),
+            OperationInput::ScpSend(a, b) => write!(f, "ScpSend({:?}, {:?})", a, b),
+            OperationInput::ScpFetch(a, b) => write!(f, "ScpFetch({:?}, {:?})", a, b),
+        }
+    }
 }
 
 /// The operation outputs, sent by the inner futures and processed by the outer thread.
 #[derive(Debug)]
 enum OperationOutput {
     Exec(Result<Output, Error>),
+    Pty(Result<Output, Error>),
     ScpSend(Result<(), Error>),
     ScpFetch(Result<(), Error>)
 }
@@ -721,7 +917,7 @@ enum OperationOutput {
 pub struct RemoteHandle {
     sender: mpsc::UnboundedSender<(oneshot::Sender<OperationOutput>, OperationInput)>,
     repr: String,
-    dropper: Dropper<()>,
+    dropper: Dropper,
 }
 
 impl fmt::Debug for RemoteHandle{
@@ -771,6 +967,17 @@ impl RemoteHandle {
                                     })
                             )
                         },
+                        OperationInput::Pty(commands, stdout_cb, stderr_cb) => {
+                            spawner.spawn_local(
+                                Remote::pty(remote.clone(), commands, stdout_cb, stderr_cb)
+                                    .map(|a| {
+                                        sender.send(OperationOutput::Pty(a))
+                                            .map_err(|e| error!("Remote Thread: Failed to \\
+                                            send an operation output: \n{:?}", e))
+                                            .unwrap();
+                                    })
+                            )
+                        },                        
                         OperationInput::ScpSend(local_path, remote_path) => {
                             spawner.spawn_local(
                                 Remote::scp_send(remote.clone(), local_path, remote_path)
@@ -808,10 +1015,16 @@ impl RemoteHandle {
             trace!("Remote Thread: All futures executed. Leaving...");
         }).expect("Failed to spawn application thread.");
         start_rx.recv().unwrap()?;
+        let drop_sender = sender.clone();
         Ok(RemoteHandle {
             sender: sender,
             repr: repr,
-            dropper: Dropper::from_handle(handle, format!("RemoteHandle")),
+            dropper: Dropper::from_closure(
+                Box::new(move ||{
+                    drop_sender.close_channel();
+                    handle.join();
+                }), 
+                format!("RemoteHandle")),
         })
     }
 
@@ -831,6 +1044,39 @@ impl RemoteHandle {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::Exec(res)) => res,
                 Ok(e) => Err(Error::OperationFetch(format!("Expected Exec, found {:?}", e)))
+            }
+        }
+    }
+
+    /// A function that returns a future that resolves in a result over an output, after the command
+    /// was executed in interactive mode. Callbacks can be provided to be called on stdout and 
+    /// stderr messages.  
+    pub fn async_pty(&self, 
+        commands: Vec<String>, 
+        stdout_cb: Option<Box<dyn Fn(Vec<u8>)+Send+'static>>,
+        stderr_cb: Option<Box<dyn Fn(Vec<u8>)+Send+'static>>) 
+        -> impl Future<Output=Result<Output, Error>> {
+        debug!("RemoteHandle: Building async_pty future to commands: {:?}", commands);
+        let mut chan = self.sender.clone();
+        let mut stdout_cb = stdout_cb;
+        if let None = stdout_cb{
+            stdout_cb = Some(Box::new(|_|{}));
+        }
+        let mut stderr_cb = stderr_cb;
+        if let None = stderr_cb{
+            stderr_cb = Some(Box::new(|_|{}));
+        }
+        async move {
+            let (sender, receiver) = oneshot::channel();
+            trace!("RemoteHandle::async_pty_future: Sending pty input");
+            chan.send((sender, OperationInput::Pty(commands, stdout_cb.unwrap(), stderr_cb.unwrap())))
+                .await
+                .map_err(|e| Error::Channel(e.to_string()))?;
+            trace!("RemoteHandle::async_pty_future: Awaiting pty output");
+            match receiver.await {
+                Err(e) => Err(Error::OperationFetch(format!("{}", e))),
+                Ok(OperationOutput::Pty(res)) => res,
+                Ok(e) => Err(Error::OperationFetch(format!("Expected Pty, found {:?}", e)))
             }
         }
     }
@@ -878,12 +1124,6 @@ impl RemoteHandle {
             }
         }
     }
-
-    /// Returns the number of handles to the remote connection
-    pub fn handles_count(&self) -> usize{
-        self.dropper.strong_count()
-    }
-
 }
 
 
@@ -903,7 +1143,7 @@ mod test {
 
     #[test]
     fn test_proxy_command_forwarder() {
-        let (_, address) = ProxyCommandForwarder::from_command("echo kikou").unwrap();
+        let (proxy_command, address) = ProxyCommandForwarder::from_command("echo kikou").unwrap();
         let mut stream = TcpStream::connect(address).unwrap();
         let mut buf = [0 as u8; 5];
         stream.read(&mut buf).unwrap();
@@ -914,7 +1154,7 @@ mod test {
     #[test]
     fn test_async_exec() {
         use futures::executor::block_on;
-        init_logger();
+        //init_logger();
         async fn connect_and_ls() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
@@ -924,8 +1164,36 @@ mod test {
                 proxycommand: Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
             };
             let remote = RemoteHandle::spawn(profile).unwrap();
-            let output = await!(remote.async_exec("echo kikou && sleep 10 && echo hello!".into())).unwrap();
-            println!("Executed and resulted in {:?}", output);
+            let output = remote.async_exec("echo kikou && sleep 1 && { echo hello! 1>&2 }".into()).await.unwrap();
+            println!("executed and resulted in {:?}", output);
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), "kikou\n");
+            assert_eq!(String::from_utf8(output.stderr).unwrap(), "hello!\n");
+            assert_eq!(output.status.code().unwrap(), 0);
+        }
+        block_on(connect_and_ls());
+    }
+
+    #[test]
+    fn test_async_pty() {
+        use futures::executor::block_on;
+        //init_logger();
+        async fn connect_and_ls() {
+            let profile = config::SshProfile{
+                name: "test".to_owned(),
+                hostname: Some("127.0.0.1".to_owned()),
+                user: Some("apere".to_owned()),
+                port: Some(22),
+                proxycommand: None,
+            };
+            let remote = RemoteHandle::spawn(profile).unwrap();
+            let output = remote.async_pty(vec!["echo kikou".into(), 
+                                               "sleep 1".into(), 
+                                               "echo 'hello!' 1>&2".into()], 
+                None, None).await.unwrap();
+            println!("executed and resulted in {:?}", output);
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), "kikou\n");
+            assert_eq!(String::from_utf8(output.stderr).unwrap(), "hello!\n");
+            assert_eq!(output.status.code().unwrap(), 0);
         }
         block_on(connect_and_ls());
     }
@@ -951,7 +1219,7 @@ mod test {
             let local_f = PathBuf::from("/tmp/local.txt");
             let remote_f = PathBuf::from("/tmp/remote.txt");
             let bef = std::time::Instant::now();
-            await!(remote.async_scp_send(local_f.clone(), remote_f.clone())).unwrap();
+            remote.async_scp_send(local_f.clone(), remote_f.clone()).await.unwrap();
             let dur = std::time::Instant::now().duration_since(bef);
             println!("Duration: {:?}", dur);
             println!("Check if files are the same");
@@ -989,7 +1257,7 @@ mod test {
             let local_f = PathBuf::from("/tmp/local.txt");
             let remote_f = PathBuf::from("/tmp/remote.txt");
             let bef = std::time::Instant::now();
-            await!(remote.async_scp_fetch(remote_f.clone(), local_f.clone())).unwrap();
+            remote.async_scp_fetch(remote_f.clone(), local_f.clone()).await.unwrap();
             let dur = std::time::Instant::now().duration_since(bef);
             println!("Duration = {:?}", dur);
             println!("checking files");
@@ -1009,24 +1277,24 @@ mod test {
     #[test]
     fn test_async_concurrent_exec(){
 
-        init_logger();
+        //init_logger();
 
         let profile = SshProfile{
             name: "test".to_owned(),
-            hostname: Some("127.0.0.1".to_owned()),
+            hostname: Some("localhost".to_owned()),
             user: Some("apere".to_owned()),
-            port: None,
-            proxycommand: Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
+            port: Some(22),
+            proxycommand: None // Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
         };
         let remote = RemoteHandle::spawn(profile).unwrap();
         async fn connect_and_ls(remote: RemoteHandle) -> std::process::Output{
-            return await!(remote.async_exec("echo 1 && sleep 1 && echo 2".into())).unwrap()
+            return remote.async_exec("echo 1 && sleep 1 && echo 2".into()).await.unwrap()
         }
         use futures::executor;
         use futures::task::SpawnExt;
         let mut executor = executor::ThreadPool::new().unwrap();
         let mut handles = Vec::new();
-        for _ in 1..10{
+        for _ in 1..50{
             handles.push(executor.spawn_with_handle(connect_and_ls(remote.clone())).unwrap())
         }
         let bef = std::time::Instant::now();
@@ -1035,6 +1303,40 @@ mod test {
         }
         let dur = std::time::Instant::now().duration_since(bef);
         println!("Duration: {:?}", dur);
+
+    }
+
+    #[test]
+    fn test_async_concurrent_pty(){
+
+        //init_logger();
+
+        let profile = SshProfile{
+            name: "test".to_owned(),
+            hostname: Some("localhost".to_owned()),
+            user: Some("apere".to_owned()),
+            port: Some(22),
+            proxycommand: None // Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
+        };
+        let remote = RemoteHandle::spawn(profile).unwrap();
+        async fn connect_and_ls(remote: RemoteHandle) -> std::process::Output{
+            return remote.async_pty(vec!["echo 1 && sleep 1 && echo 2".into()], None, None)
+                .await.unwrap()
+        }
+        use futures::executor;
+        use futures::task::SpawnExt;
+        let mut executor = executor::ThreadPool::new().unwrap();
+        let mut handles = Vec::new();
+        for _ in 1..100{
+            handles.push(executor.spawn_with_handle(connect_and_ls(remote.clone())).unwrap())
+        }
+        let bef = std::time::Instant::now();
+        for handle in handles{
+            assert_eq!(String::from_utf8(executor.run(handle).stdout).unwrap(), "1\n2\n".to_owned());
+        }
+        let dur = std::time::Instant::now().duration_since(bef);
+        println!("Duration: {:?}", dur);
+
     }
 }
 

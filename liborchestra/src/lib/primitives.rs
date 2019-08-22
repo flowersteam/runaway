@@ -10,7 +10,7 @@
 use std::error;
 use std::fmt;
 use std::fmt::Debug;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use futures::channel::mpsc::UnboundedSender;
 use chrono::prelude::*;
@@ -46,27 +46,54 @@ impl fmt::Display for Error {
 //------------------------------------------------------------------------------------------ DROPPER
 
 
-/// A helper structure that allows to wait for threads to exit when dropping. To use it, add it as 
-/// the last field of the structure so that the dropping works. 
-/// See https://github.com/rust-lang/rfcs/blob/246ff86b320a72f98ed2df92805e8e3d48b402d6/text/1857-stabilize-drop-order.md .
+/// Most of this library code relies on a structure that handles messages from the receiving end of 
+/// a channel in a separate thread. Handles to the transmitting end of the channel are freely cloned
+/// in the rest of the program with the insurance of the operations being synchronized by the 
+/// channel. When the last handle is dropped, it is important to clsoe the channel and wait for the 
+/// thread to cleanup and join. 
+/// 
+/// This structure allows to do just that. It holds a reference to a closure, and at drop time, 
+/// checks whether it is the last handle or not. If it is, it waits for the handle to join before 
+/// dropping. This dropper should be included as the __last__ field of the handles structure, to 
+/// ensure that it is dropped last (see https://github.com/rust-lang/rfcs/blob/246ff86b320a72f98ed2df92805e8e3d48b402d6/text/1857-stabilize-drop-order.md)
+/// 
+/// A Dropper could be either `Strong` or `Weak`. If Strong, the dropper is accounted for in the 
+/// dropping. In practice, a handle with a Strong dropper is guaranteed to access the resource (if 
+/// not crashed). On the other side, if Weak, the dropper is not accounted for in the dropping. This 
+/// means that a handle with a weak dropper is not guaranteed to access the resource. 
+/// 
+/// In practice, Weak droppers are used for reference that do not need to be waited for, and could 
+/// ruin the dropping strategy. Two cases can arise:
+///     + A self referential handle as seen in the application module
+///     + A handle that is never dropped during program execution, as seen in ctrl-c handling. 
 #[derive(Clone)]
-pub struct Dropper<M>(Arc<Mutex<Option<JoinHandle<M>>>>, String);
-impl<M> Dropper<M> {
-    pub fn from_handle(other: JoinHandle<M>, name: String) -> Dropper<M> {
-        return Dropper(Arc::new(Mutex::new(Some(other))), name);
+pub enum Dropper{
+    Strong(Arc<Mutex<Option<Box<dyn FnOnce()+Send+'static>>>>, String),
+    Weak,
+}
+impl Dropper {
+    pub fn from_closure(other: Box<dyn FnOnce()+Send+'static>, name: String) -> Dropper {
+        return Dropper::Strong(Arc::new(Mutex::new(Some(other))), name);
     }
 
-    pub fn strong_count(&self) -> usize{
-        return Arc::strong_count(&self.0);
+    pub fn downgrade(&mut self){
+        if let Dropper::Strong(r, s) = self{
+            *self = Dropper::Weak;
+        }
     }
 }
-impl<M> Drop for Dropper<M> {
+
+impl Drop for Dropper{
     fn drop(&mut self) {
-        if Arc::strong_count(&self.0) == 1 {
-            trace!("Dropper<{}>: Counter at 1. Joining...", self.1);
-            self.0.lock().unwrap().take().unwrap().join().unwrap();
-        } else{
-            trace!("Dropper<{}>: Counter at {}. Dropping...",self.1, Arc::strong_count(&self.0))
+        match &self{
+            Dropper::Weak => {},
+            Dropper::Strong(r, s) if Arc::strong_count(&r) == 1 => {
+                trace!("Dropper<{}>: Counter at 1. Joining...", s);
+                (r.lock().unwrap().take().unwrap())();
+            }
+            Dropper::Strong(r, s) =>{
+                trace!("Dropper<{}>: Counter at {}. Dropping...", s, Arc::strong_count(&r))
+            }
         }
     }
 }
@@ -146,7 +173,9 @@ impl<T> Drop for DropBack<T> where T:Clone+Send+Sync{
         trace!("DropBack: Dropping.");
         if self.inner.is_some(){
             trace!("DropBack: Still some data. Sending back.");
-            self.channel.unbounded_send(self.clone()).unwrap();
+            if self.channel.unbounded_send(self.clone()).is_err(){
+                error!("DropBack: Failed to send the value back.")
+            };
         } else {
             trace!("DropBack: No more data. Disconnecting");
         }

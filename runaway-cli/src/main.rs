@@ -1,15 +1,13 @@
-// runaway-cli/main.rs
-// Author: Alexandre Péré
-#![feature(await_macro, async_await, futures_api)]
-
-use std::alloc::System;
-#[global_allocator]
-static GLOBAL: System = System;
+//! runaway-cli/main.rs
+//! Author: Alexandre Péré
+//! 
+//! Runaway command line tool. Allows to execute scripts and batches of scripts on remote hosts. 
 
 
-/// Runaway command line tool. Allows to execute scripts and batches of scripts on remote hosts.
+//------------------------------------------------------------------------------------------ IMPORTS
 
-//////////////////////////////////////////////////////////////////////////////////////////// IMPORTS
+
+#![feature(async_await, futures_api)]
 use std::path;
 use liborchestra::{hosts, SEND_ARCH_RPATH, FETCH_IGNORE_RPATH, FETCH_ARCH_RPATH,
                    PROFILES_FOLDER_RPATH};
@@ -27,16 +25,27 @@ use log::*;
 use futures::executor::block_on;
 use futures::task::SpawnExt;
 use futures::future::{FutureExt, Future};
+use futures::sink::SinkExt;
+use futures::stream::StreamExt;
 use std::process::Output;
 use std::io;
+use ctrlc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::os::unix::fs::PermissionsExt;
 
-////////////////////////////////////////////////////////////////////////////////////////// CONSTANTS
+
+//---------------------------------------------------------------------------------------- CONSTANTS
+
+
 const NAME: &'static str = env!("CARGO_PKG_NAME");
 const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 const AUTHOR: &'static str = env!("CARGO_PKG_AUTHORS");
 const DESC: &'static str = "Execute code on remote hosts.";
 
-////////////////////////////////////////////////////////////////////////////////////////////// MACRO
+
+//-------------------------------------------------------------------------------------------- MACRO
+
+
 #[macro_export]
 macro_rules! try_return_code {
     ($result:expr, $text:expr, $ecode:expr) => {
@@ -62,8 +71,11 @@ macro_rules! try_return_err {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////////////////// ASYNC
-// The different async pieces used to assemble a future that will be run to perform the job.
+
+//-------------------------------------------------------------------------------------------- ASYNC
+// 
+// The different async blocks used to assemble a future that will be run to perform the actual task.
+//
 
 /// Packs a folder into an archive and returns its hash.
 async fn pack_folder(folder: path::PathBuf) -> Result<u64, String>{
@@ -134,6 +146,8 @@ async fn perform_job(node: DropBack<Expire<RemoteHandle>>,
                      parameters: String,
                      remote_defl: String,
                      remote_send: String,
+                     stdout_cb: Box<dyn Fn(Vec<u8>)+Send+'static>,
+                     stderr_cb: Box<dyn Fn(Vec<u8>)+Send+'static>,
                      )
                      -> Result<Output, String>{
         info!("Job: Deflating input data");
@@ -146,12 +160,11 @@ async fn perform_job(node: DropBack<Expire<RemoteHandle>>,
             .map_err(|e| format!("Failed to deflate input data: {}", e))
             .and_then(|e| e.result().map_err(|e| format!("Failed to deflate input data: {}", e)))?;
         info!("Job: Starting execution");
-        node.async_exec(format!("{} && cd {} && ./{} {} && {}",
-                                              before_exec,
-                                              remote_defl,
-                                              script_name,
-                                              parameters,
-                                              after_exec))
+        node.async_pty(vec!(before_exec,
+                            format!("cd {} && ./{} {}", remote_defl, script_name, parameters),
+                            after_exec),
+                        Some(stdout_cb),
+                        Some(stderr_cb))
             .await
             .map_err(|e| format!("Failed to execute: {}", e))
 }
@@ -216,9 +229,13 @@ async fn cleaning_data(node: DropBack<Expire<RemoteHandle>>,
         Ok(())
 }
 
-//////////////////////////////////////////////////////////////////////////////////////////// HELPERS
 
-/// Executes the command arguments and returns exit code .
+//-------------------------------------------------------------------------------------- SUBCOMMANDS
+//
+// Functions representing every subcommands of the program. 
+//
+
+/// Executes a single execution of the script with the command arguments and returns exit code.
 fn exec(matches: &clap::ArgMatches) -> i32 {
 
     if matches.is_present("vvverbose"){
@@ -241,6 +258,8 @@ fn exec(matches: &clap::ArgMatches) -> i32 {
     let host = try_return_code!(HostHandle::spawn(config), 
                                  "failed to spawn host", 
                                  2);
+    install_ctrlc_handler(host.clone());
+
     let leave = LeaveConfig::from(matches.value_of("leave").unwrap());
     let script_path = matches.value_of("SCRIPT").unwrap();
 
@@ -268,13 +287,23 @@ fn exec(matches: &clap::ArgMatches) -> i32 {
         try_return_err!(send_data(node.clone(),
                                   script_folder.join(SEND_ARCH_RPATH),
                                   remote_dir.clone()).await);
+        let stdout_callback = Box::new(|a|{
+            let string = String::from_utf8(a).unwrap().replace("\r\n", "");
+            println!("{}", string);
+        });
+        let stderr_callback = Box::new(|a|{
+            let string = String::from_utf8(a).unwrap().replace("\r\n", "");
+            eprintln!("{}", string);
+        });
         let out = try_return_err!(perform_job(node.clone(),
                                               host.get_before_execution_command(),
                                               host.get_after_execution_command(),
                                               script_name.to_str().unwrap().to_owned(),
                                               parameters.to_owned(),
                                               remote_defl.to_str().unwrap().to_owned(),
-                                              remote_send.to_str().unwrap().to_owned()).await);
+                                              remote_send.to_str().unwrap().to_owned(),
+                                              stdout_callback,
+                                              stderr_callback).await);
         try_return_err!(fetch_data(node.clone(),
                                    remote_defl.to_str().unwrap().to_owned(),
                                    remote_fetch.to_str().unwrap().to_owned(),
@@ -287,8 +316,6 @@ fn exec(matches: &clap::ArgMatches) -> i32 {
                                       script_folder.into(),
                                       leave,
                                       false).await);
-        println!("{}", String::from_utf8(out.stdout).unwrap());
-        eprintln!("{}", String::from_utf8(out.stderr).unwrap()); 
         Ok(out.status.code().unwrap_or(911))
     };
     let out = try_return_code!(block_on(future),
@@ -296,7 +323,8 @@ fn exec(matches: &clap::ArgMatches) -> i32 {
                                6);
     return out;
 }
-    
+
+// Executes a batch of executions on a remote host.
 fn batch(matches: &clap::ArgMatches) -> i32 {
 
     if matches.is_present("vvverbose"){
@@ -308,7 +336,6 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
     } else if matches.is_present("benchmark"){
         std::env::set_var("RUST_LOG", "WARNING,runaway_cli=INFO,liborchestra::hosts=TRACE/Host: Allocation succeeded|Allocation cancelling succeeded|Job: Starting execution");
     }
-
 
     env_logger::init();
 
@@ -322,6 +349,8 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
     let host = try_return_code!(HostHandle::spawn(config), 
                                  "failed to spawn host", 
                                  2);
+    install_ctrlc_handler(host.clone());
+
     let leave = LeaveConfig::from(matches.value_of("leave").unwrap());
 
     let script_path = matches.value_of("SCRIPT").unwrap();
@@ -377,11 +406,11 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
     }
 
     let mut executor = try_return_code!(futures::executor::ThreadPoolBuilder::new()
-        .pool_size(1)
         .name_prefix("runaway-worker")
         .create(),
         "failed to spawn worker",
         12);
+
     let script_abs_path = try_return_code!(std::fs::canonicalize(script_path),
                                             "failed to get absolute script path",
                                             3);
@@ -409,7 +438,7 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
     let len = outputs.len();
 
     let mut handles = Vec::new();
-    for (p, b) in params.into_iter().zip(outputs.into_iter()){
+    for (i, (p, b)) in params.into_iter().zip(outputs.into_iter()).enumerate(){
         let l = l.clone();
         let script_name = script_name.clone();
         let script_folder = script_folder.clone();
@@ -425,13 +454,31 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
         let future = async move{
             let p = p.clone();
             let node = try_return_err!(acquire_node(host.clone()).await);
+            let stdout_callback: Box<dyn Fn(Vec<u8>)+Send+'static>;
+            let stderr_callback: Box<dyn Fn(Vec<u8>)+Send+'static>;
+
+            if benchmark==true{
+                stdout_callback = Box::new(|_|{});
+                stderr_callback = Box::new(|_|{});
+            } else{
+                stdout_callback = Box::new(move |a|{
+                    let string = String::from_utf8(a).unwrap().replace("\r\n", "");
+                    println!("#{}: {}", i, string);
+                });
+                stderr_callback = Box::new(move |a|{
+                    let string = String::from_utf8(a).unwrap().replace("\r\n", "");
+                    eprintln!("#{}: {}", i, string);
+                });
+            }
             let out = try_return_err!(perform_job(node.clone(),
                                                   host.get_before_execution_command(),
                                                   host.get_after_execution_command(),
                                                   script_name.to_str().unwrap().to_owned(),
                                                   p,
                                                   remote_defl.to_str().unwrap().to_owned(),
-                                                  remote_send.to_str().unwrap().to_owned()).await);
+                                                  remote_send.to_str().unwrap().to_owned(),
+                                                  stdout_callback,
+                                                  stderr_callback).await);
             try_return_err!(fetch_data(node.clone(),
                                        remote_defl.to_str().unwrap().to_owned(),
                                        remote_fetch.to_str().unwrap().to_owned(),
@@ -444,10 +491,6 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
                                           b.clone(),
                                           l,
                                           true).await);
-            if !benchmark{
-                println!("{}", String::from_utf8(out.stdout.clone()).unwrap());
-                eprintln!("{}", String::from_utf8(out.stderr.clone()).unwrap()); 
-            }
             let mut stdout_file = std::fs::File::create(b.join("stdout")).unwrap();
             stdout_file.write_all(&out.stdout).unwrap();
             let mut stderr_file = std::fs::File::create(b.join("stderr")).unwrap();
@@ -484,7 +527,6 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
             len);
         return 911;
     }
-
     0
 }
 
@@ -570,7 +612,7 @@ fn test(matches: &clap::ArgMatches) -> i32 {
     0
 }
 
-
+// Allows to parse cartesian product strings to generate a set of parameters. 
 pub fn parse_parameters(param_string: &str, repeats: usize) -> Vec<String> {
     // We compute the products of entered parameters recursively
     fn parameters_generator(p: Vec<&str>, repeat: usize) -> Vec<String> {
@@ -601,18 +643,163 @@ pub fn parse_parameters(param_string: &str, repeats: usize) -> Vec<String> {
     parameters_generator(param_string.split("&").collect(), repeats)
 }
 
+// Installs a ctrlc handler that takes care about cancelling the allocation on the host before 
+// leaving. 
+pub fn install_ctrlc_handler(signal_host: HostHandle){
+    // We have to downgrade the handle to the host, because the ctrl-c handler is not dropped during
+    // program execution. For this reason we have to downgrade the dropper. 
+    let mut signal_host = signal_host;
+    signal_host.downgrade();
+    let signal_counter = AtomicUsize::new(0);
+    ctrlc::set_handler(move || {
+        eprintln!("runaway: received ctrl-c.");
+        let mut host = signal_host.clone();
+        let n_ctrlc = signal_counter.fetch_add(1, Ordering::SeqCst);
+        match n_ctrlc{
+            0 => {
+                futures::executor::block_on(host.async_abort()).unwrap();
+                eprintln!("runaway: waiting for running execution to finish");
+            }
+            1 => {
+                futures::executor::block_on(host.async_shutdown()).unwrap();
+                eprintln!("runaway: host shutdown. Saving execution data.");
+            }
+            2 => {
+                eprintln!("runaway: you want to quit too hard. Leaving.");
+                std::process::exit(900);
+            }
+            _ => {
+                std::process::exit(901);
+            }
+        }
+    }).unwrap();
+}
 
-/////////////////////////////////////////////////////////////////////////////////////////////// MAIN
+// Output completion for profiles.
+fn install_completion(application: clap::App) -> i32 {
+    match which_shell(){
+        Ok(clap::Shell::Zsh) => {
+            eprintln!("runaway: zsh recognized. Proceeding.");
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .append(true)
+                .open(dirs::home_dir().unwrap().join(".zshrc"))
+                .unwrap_or_else(|e| {
+                    eprintln!("runaway: impossible to open .zshrc file: {}", e);
+                    std::process::exit(551);
+                });
+            file.write_all("\n# Added by Runaway for zsh completion\n".as_bytes()).unwrap();
+            file.write_all(format!("fpath=(~/{} $fpath)\n", PROFILES_FOLDER_RPATH).as_bytes()).unwrap();
+            file.write_all("autoload -U compinit\ncompinit".as_bytes()).unwrap();
+            generate_zsh_completion(application);
+            eprintln!("runaway: zsh completion installed. Open a new terminal to use it.");
+        }
+        Ok(clap::Shell::Bash) => {
+            eprintln!("runaway: bash recognized. Proceeding.");
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .append(true)
+                .open(dirs::home_dir().unwrap().join(".bashrc"))
+                .unwrap_or_else(|e| {
+                    eprintln!("runaway: impossible to open .bashrc file: {}", e);
+                    std::process::exit(551);
+                });
+            file.write_all("\n# Added by Runaway for bash completion\n".as_bytes()).unwrap();
+            file.write_all(format!("source ~/{}/{}.bash\n", 
+                                    PROFILES_FOLDER_RPATH, 
+                                    get_bin_name()).as_bytes()).unwrap();
+            generate_bash_completion(application);
+            eprintln!("runaway: bash completion installed. Open a new terminal to use it.");
+        }
+        Err(e) => {
+            eprintln!("runaway: shell {} is not available for completion. Use bash or zsh.", e);
+            std::process::exit(553);
+        }
+        _ => unreachable!()
+    }
+
+    return 0
+}
+
+// Returns current shell.
+fn which_shell() -> Result<clap::Shell, String>{
+    let shell = std::env::var("SHELL")
+        .unwrap()
+        .split("/")
+        .map(|a| a.to_owned())
+        .last()
+        .unwrap();
+    match shell.as_ref(){
+        "zsh" => Ok(clap::Shell::Zsh),
+        "bash" => Ok(clap::Shell::Bash),
+        shell => Err(shell.into()),
+    }
+}
+
+// Returns the name of the binary.
+fn get_bin_name() -> String{
+    std::env::args()
+        .next()
+        .unwrap()
+        .split("/")
+        .map(|a| a.to_owned())
+        .collect::<Vec<String>>()
+        .last()
+        .unwrap()
+        .to_owned()
+}
+
+// Generates zsh completion
+fn generate_zsh_completion(application: clap::App) {
+    let bin_name = get_bin_name();
+    let file_path = dirs::home_dir()
+        .unwrap()
+        .join(PROFILES_FOLDER_RPATH)
+        .join(format!("_{}", &bin_name));
+    let mut application = application;
+    std::fs::remove_file(&file_path);
+    application.gen_completions(bin_name, clap::Shell::Zsh, file_path.parent().unwrap());
+    std::fs::set_permissions(file_path, std::fs::Permissions::from_mode(0o755));
+}
+
+// Generates bash completion
+fn generate_bash_completion(application: clap::App) {
+    let bin_name = get_bin_name();
+    let file_path = dirs::home_dir()
+        .unwrap()
+        .join(PROFILES_FOLDER_RPATH)
+        .join(format!("{}.bash", &bin_name));
+    let mut application = application;
+    std::fs::remove_file(&file_path);
+    application.gen_completions(bin_name, clap::Shell::Bash, file_path.parent().unwrap());
+    std::fs::set_permissions(file_path, std::fs::Permissions::from_mode(0o755));
+}
+
+// Retrieve available profiles.
+fn get_available_profiles() -> Vec<String>{
+    std::fs::read_dir(dirs::home_dir().unwrap().join(PROFILES_FOLDER_RPATH))
+        .unwrap()
+        .map(|a| a.unwrap().file_name().into_string().unwrap())
+        .filter_map(|a| if a.contains(".yml"){Some(a.replace(".yml", ""))} else { None })
+        .collect::<Vec<_>>()
+}
+
+//--------------------------------------------------------------------------------------------- MAIN
 
 fn main(){
-    
-    // We parse the arguments
-    let matches = clap::App::new(NAME)
+
+    // We get available profiles
+    let profiles = get_available_profiles();
+
+    // We define the arguments parser
+    let application = clap::App::new(NAME)
         .version(VERSION)
         .about(DESC)
         .author(AUTHOR)
         .setting(clap::AppSettings::ArgRequiredElseHelp) 
         .about("Execute code on remote hosts")
+        .subcommand(clap::SubCommand::with_name("install-completion")
+            .about("Install bash completion script"))
         .subcommand(clap::SubCommand::with_name("exec")
             .about("Runs a single execution on a remote host")
             .arg(clap::Arg::with_name("SCRIPT")
@@ -622,6 +809,7 @@ fn main(){
             .arg(clap::Arg::with_name("REMOTE")
                 .help("Name of remote profile to execute script with")
                 .index(1)
+                .possible_values(&profiles.iter().map(|a| a.as_str()).collect::<Vec<_>>()[..])
                 .required(true))
             .arg(clap::Arg::with_name("verbose")
                 .long("verbose")
@@ -659,6 +847,7 @@ fn main(){
             .arg(clap::Arg::with_name("REMOTE")
                 .help("Name of remote profile to execute script with")
                 .index(1)
+                .possible_values(&profiles.iter().map(|a| a.as_str()).collect::<Vec<_>>()[..])
                 .required(true))
             .arg(clap::Arg::with_name("verbose")
                 .long("verbose")
@@ -718,9 +907,23 @@ fn main(){
              .arg(clap::Arg::with_name("FILE")
                  .help("The yaml profile to test.")
                  .index(1)
-                 .required(true)))
+                 .required(true)));
 
-        .get_matches();
+    // If the completion_file already exists, we update it to account for the new available profiles
+    let bin_name = get_bin_name(); 
+    match which_shell(){
+        Ok(clap::Shell::Zsh) => {
+            generate_zsh_completion(application.clone());
+        }
+        Ok(clap::Shell::Bash) => {
+            generate_bash_completion(application.clone());
+        }
+        Err(v) => {},
+        _ => unreachable!()
+    }
+
+    // We parse (leaving the parser available for _complete subcommand.)
+    let matches = application.clone().get_matches();
 
     // We execute and exit;
     if let Some(matches) = matches.subcommand_matches("test"){
@@ -729,5 +932,7 @@ fn main(){
         std::process::exit(exec(matches));
     } else if let Some(matches) = matches.subcommand_matches("batch"){
         std::process::exit(batch(matches));
+    } else if let Some(matches) = matches.subcommand_matches("install-completion"){
+        std::process::exit(install_completion(application));
     }
 }
