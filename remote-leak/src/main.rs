@@ -1,4 +1,4 @@
-#![feature(await_macro, async_await, futures_api)]
+#![feature(async_await, futures_api)]
 extern crate liborchestra;
 use liborchestra::ssh;
 
@@ -21,7 +21,7 @@ fn main(){
                 proxycommand: Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
             };
             let remote = ssh::RemoteHandle::spawn(profile).unwrap();
-            let output = await!(remote.async_exec("echo kikou".to_owned())).unwrap();
+            let output = remote.async_exec("echo kikou".to_owned()).await.unwrap();
             println!("Executed and resulted in {:?}", String::from_utf8(output.stdout).unwrap());
         }
         println!("{}", i);

@@ -106,7 +106,7 @@ impl<'sess> Sftp<'sess> {
     /// Open a handle to a file.
     pub fn open_mode(&self, filename: &Path, flags: OpenFlags,
                      mode: i32, open_type: OpenType) -> Result<File, Error> {
-        let filename = try!(util::path2bytes(filename));
+        let filename = util::path2bytes(filename)?;
         unsafe {
             let ret = raw::libssh2_sftp_open_ex(self.raw,
                                                 filename.as_ptr() as *const _,
@@ -143,7 +143,7 @@ impl<'sess> Sftp<'sess> {
     /// paths `.` and `..` are filtered out of the returned list.
     pub fn readdir(&self, dirname: &Path)
                    -> Result<Vec<(PathBuf, FileStat)>, Error> {
-        let mut dir = try!(self.opendir(dirname));
+        let mut dir = self.opendir(dirname)?;
         let mut ret = Vec::new();
         loop {
             match dir.readdir() {
@@ -163,7 +163,7 @@ impl<'sess> Sftp<'sess> {
     /// Create a directory on the remote file system.
     pub fn mkdir(&self, filename: &Path, mode: i32)
                  -> Result<(), Error> {
-        let filename = try!(util::path2bytes(filename));
+        let filename = util::path2bytes(filename)?;
         self.rc(unsafe {
             raw::libssh2_sftp_mkdir_ex(self.raw,
                                        filename.as_ptr() as *const _,
@@ -174,7 +174,7 @@ impl<'sess> Sftp<'sess> {
 
     /// Remove a directory from the remote file system.
     pub fn rmdir(&self, filename: &Path) -> Result<(), Error> {
-        let filename = try!(util::path2bytes(filename));
+        let filename = util::path2bytes(filename)?;
         self.rc(unsafe {
             raw::libssh2_sftp_rmdir_ex(self.raw,
                                        filename.as_ptr() as *const _,
@@ -184,7 +184,7 @@ impl<'sess> Sftp<'sess> {
 
     /// Get the metadata for a file, performed by stat(2)
     pub fn stat(&self, filename: &Path) -> Result<FileStat, Error> {
-        let filename = try!(util::path2bytes(filename));
+        let filename = util::path2bytes(filename)?;
         unsafe {
             let mut ret = mem::zeroed();
             let rc = raw::libssh2_sftp_stat_ex(self.raw,
@@ -192,14 +192,14 @@ impl<'sess> Sftp<'sess> {
                                                filename.len() as c_uint,
                                                raw::LIBSSH2_SFTP_STAT,
                                                &mut ret);
-            try!(self.rc(rc));
+            self.rc(rc)?;
             Ok(FileStat::from_raw(&ret))
         }
     }
 
     /// Get the metadata for a file, performed by lstat(2)
     pub fn lstat(&self, filename: &Path) -> Result<FileStat, Error> {
-        let filename = try!(util::path2bytes(filename));
+        let filename = util::path2bytes(filename)?;
         unsafe {
             let mut ret = mem::zeroed();
             let rc = raw::libssh2_sftp_stat_ex(self.raw,
@@ -207,14 +207,14 @@ impl<'sess> Sftp<'sess> {
                                                filename.len() as c_uint,
                                                raw::LIBSSH2_SFTP_LSTAT,
                                                &mut ret);
-            try!(self.rc(rc));
+            self.rc(rc)?;
             Ok(FileStat::from_raw(&ret))
         }
     }
 
     /// Set the metadata for a file.
     pub fn setstat(&self, filename: &Path, stat: FileStat) -> Result<(), Error> {
-        let filename = try!(util::path2bytes(filename));
+        let filename = util::path2bytes(filename)?;
         self.rc(unsafe {
             let mut raw = stat.raw();
             raw::libssh2_sftp_stat_ex(self.raw,
@@ -227,8 +227,8 @@ impl<'sess> Sftp<'sess> {
 
     /// Create a symlink at `target` pointing at `path`.
     pub fn symlink(&self, path: &Path, target: &Path) -> Result<(), Error> {
-        let path = try!(util::path2bytes(path));
-        let target = try!(util::path2bytes(target));
+        let path = util::path2bytes(path)?;
+        let target = util::path2bytes(target)?;
         self.rc(unsafe {
             raw::libssh2_sftp_symlink_ex(self.raw,
                                          path.as_ptr() as *const _,
@@ -250,7 +250,7 @@ impl<'sess> Sftp<'sess> {
     }
 
     fn readlink_op(&self, path: &Path, op: c_int) -> Result<PathBuf, Error> {
-        let path = try!(util::path2bytes(path));
+        let path = util::path2bytes(path)?;
         let mut ret = Vec::<u8>::with_capacity(128);
         let mut rc;
         loop {
@@ -294,8 +294,8 @@ impl<'sess> Sftp<'sess> {
         let flags = flags.unwrap_or(
             RenameFlags::ATOMIC | RenameFlags::OVERWRITE | RenameFlags::NATIVE
         );
-        let src = try!(util::path2bytes(src));
-        let dst = try!(util::path2bytes(dst));
+        let src = util::path2bytes(src)?;
+        let dst = util::path2bytes(dst)?;
         self.rc(unsafe {
             raw::libssh2_sftp_rename_ex(self.raw,
                                         src.as_ptr() as *const _,
@@ -308,7 +308,7 @@ impl<'sess> Sftp<'sess> {
 
     /// Remove a file on the remote filesystem
     pub fn unlink(&self, file: &Path) -> Result<(), Error> {
-        let file = try!(util::path2bytes(file));
+        let file = util::path2bytes(file)?;
         self.rc(unsafe {
             raw::libssh2_sftp_unlink_ex(self.raw,
                                         file.as_ptr() as *const _,
@@ -370,7 +370,7 @@ impl<'sftp> File<'sftp> {
     pub fn stat(&mut self) -> Result<FileStat, Error> {
         unsafe {
             let mut ret = mem::zeroed();
-            try!(self.sftp.rc(raw::libssh2_sftp_fstat_ex(self.raw, &mut ret, 0)));
+            self.sftp.rc(raw::libssh2_sftp_fstat_ex(self.raw, &mut ret, 0))?;
             Ok(FileStat::from_raw(&ret))
         }
     }
@@ -379,7 +379,7 @@ impl<'sftp> File<'sftp> {
     pub fn statvfs(&mut self) -> Result<raw::LIBSSH2_SFTP_STATVFS, Error> {
         unsafe {
             let mut ret = mem::zeroed();
-            try!(self.sftp.rc(raw::libssh2_sftp_fstatvfs(self.raw, &mut ret)));
+            self.sftp.rc(raw::libssh2_sftp_fstatvfs(self.raw, &mut ret))?;
             Ok(ret)
         }
     }

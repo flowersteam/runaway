@@ -140,7 +140,7 @@ pub use channel::{Channel, ExitSignal, ReadWindow, WriteWindow, Stream};
 pub use error::Error;
 pub use knownhosts::{KnownHosts, Hosts, Host};
 pub use listener::Listener;
-pub use session::{Session, ScpFileStat};
+pub use session::{Session, ScpFileStat, Trace};
 pub use sftp::{Sftp, OpenFlags, RenameFlags};
 pub use sftp::{OpenType, File, FileStat, FileType};
 pub use DisconnectCode::{HostNotAllowedToConnect, ProtocolError};

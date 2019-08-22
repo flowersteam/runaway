@@ -807,7 +807,7 @@ enum OperationOutput{
 #[derive(Clone)]
 pub struct CampaignHandle {
     _sender: mpsc::UnboundedSender<(oneshot::Sender<OperationOutput>, OperationInput)>,
-    _dropper: Dropper<()>,
+    _dropper: Dropper,
 }
 
 impl CampaignHandle {
@@ -918,9 +918,15 @@ impl CampaignHandle {
             pool.run();
             trace!("Campaign Thread: All futures executed. Leaving...");
         }).expect("Failed to spawn campaign thread.");
+        let drop_sender = sender.clone();
         Ok(CampaignHandle {
             _sender: sender,
-            _dropper: Dropper::from_handle(handle, format!("CampaignHandle")),
+            _dropper: Dropper::from_closure(
+                Box::new(move ||{
+                    drop_sender.close_channel();
+                    handle.join();
+                }), 
+                format!("CampaignHandle")),
         })
     }
 
