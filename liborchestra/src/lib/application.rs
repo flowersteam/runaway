@@ -39,6 +39,7 @@ use futures::prelude::*;
 use futures::task::LocalSpawnExt;
 use futures::task::SpawnExt;
 use std::sync::Arc;
+use std::convert::TryInto;
 
 
 //-------------------------------------------------------------------------------------------- ERROR
@@ -712,10 +713,11 @@ pub fn pack_folder(folder_path: path::PathBuf) -> Result<u64, Error> {
     // We append file
     let archive_file = fs::File::create(folder_path.join(SEND_ARCH_RPATH)).unwrap();
     let mut archive = tar::Builder::new(archive_file);
-    walk.filter(|e| e.is_ok())
+    let mut files = walk.filter(|e| e.is_ok())
         .map(|e| e.unwrap().into_path())
         .filter(|p| p.is_file())
-        .filter(|p| p.file_name().unwrap() != SEND_ARCH_RPATH)
+        .filter(|p| !vec![SEND_ARCH_RPATH, FETCH_ARCH_RPATH, SEND_IGNORE_RPATH]
+            .contains(&p.file_name().unwrap().to_str().unwrap()))
         .inspect(|p| trace!("Pack Folder: found file {:?}", p))
         .map(|p| {
             archive
@@ -723,9 +725,32 @@ pub fn pack_folder(folder_path: path::PathBuf) -> Result<u64, Error> {
                     &p.strip_prefix(&folder_path).unwrap(),
                     &mut fs::File::open(&p).unwrap(),
                 )
-                .map_err(|e| Error::ExecutionFailed(format!("Failed to add file to the archive: {}", e)))
+                .map_err(|e| Error::ExecutionFailed(format!("Failed to add file to the archive: {}", e)))?;
+            Ok(p.strip_prefix(&folder_path).unwrap().to_str().unwrap().to_owned())
         })
-        .collect::<Result<Vec<()>, Error>>()?;
+        .collect::<Result<Vec<String>, Error>>()?;
+    // We take care about always adding the fetchignore if it exists.
+    if folder_path.join(FETCH_IGNORE_RPATH).exists() && !files.contains(&FETCH_IGNORE_RPATH.to_string()){
+        warn!("Pack Folder: fetchignore present but ignored ! Adding it.");
+        archive.append_file(
+            FETCH_IGNORE_RPATH,
+            &mut fs::File::open(&FETCH_IGNORE_RPATH).unwrap()
+        )
+        .map_err(|e| Error::ExecutionFailed(format!("Failed to add missing fetchignore: {}", e)))?;
+    } 
+    // We automatically add an ignore file if not present and a sendignore exist. This assumes that
+    // the results files will be ignored in the file. If it is not, then it will not work.
+    if !folder_path.join(FETCH_IGNORE_RPATH).exists() && folder_path.join(SEND_IGNORE_RPATH).exists(){
+        warn!("Pack Folder: fetchingore not there. Adding it.");
+        files.push(String::from(FETCH_IGNORE_RPATH));
+        let data = files.join("\n");
+        let mut header = tar::Header::new_gnu();
+        header.set_path(FETCH_IGNORE_RPATH).unwrap();
+        header.set_size(data.as_bytes().len().try_into().unwrap());
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive.append(&header, data.as_bytes()).unwrap();
+    }
     archive
         .finish()
         .map_err(|e| Error::ExecutionFailed(format!("Failed to finish the archive: {}", e)))?;

@@ -289,7 +289,7 @@ enum TokenType {
     Word,
     Comment,
     NewLine,
-    Tab,
+    Indent,
 }
 
 /// A token is tagged IndexedSlice.
@@ -315,9 +315,9 @@ impl<'s> Iterator for Lexer<'s> {
             // We perform a 1-lookahead to decide which consumer to use.
             let ret = match self.iter.peek() {
                 Some((_, '\n')) => self.consume_newline(),
-                Some((_, '\t')) => self.consume_tab(),
+                Some((_, '\t')) => self.consume_indent(),
                 Some((_, '#')) => self.consume_comment(),
-                Some((_, ' ')) => self.consume_whitespace(),
+                Some((_, ' ')) => self.consume_indent(),
                 Some((_, _)) => self.consume_word(),
                 None => return None, // If a None is seen, then the lexer iterator is consumed.
             };
@@ -366,24 +366,37 @@ impl<'s> Lexer<'s> {
         return Some(Ok(ret));
     }
 
-    /// Consumes a tab token
-    fn consume_tab(&mut self) -> Option<Result<Token<'s>, Error>> {
-        debug!("Lexer: Consuming tab");
-        let mut ret = Token(TokenType::Tab, IndexedSlice::beginning(self.string));
+    /// Consumes an indent token
+    fn consume_indent(&mut self) -> Option<Result<Token<'s>, Error>> {
+        debug!("Lexer: Consuming Indent");
+        let mut ret = Token(TokenType::Indent, IndexedSlice::beginning(self.string));
         // We consume the first character which should match our expectations if the dispatch is
         // working
-        if let Some((b, '\t')) = self.iter.next() {
-            (ret.1).move_begining(b);
-            (ret.1).move_end(b);
-        } else {
-            panic!("Consume tab called on wrong character.")
+        match self.iter.next() {
+            Some((b, '\t')) | Some((b, ' '))=> {
+                (ret.1).move_begining(b);
+                (ret.1).move_end(b);
+            }
+            _ =>{
+                panic!("Consume indent called on wrong character.")
+            }
         }
-        // We look ahead to retrieve the next character index.
-        match self.iter.peek() {
-            Some((e, _)) => (ret.1).move_end(*e),
-            None => (ret.1).move_end(self.string.len()),
+        // While whitespace or tabs are encountered, we keep consuming characters.
+        loop {
+            match self.iter.peek() {
+                Some((_, ' ')) | Some((_, '\t')) => {
+                    self.iter.next();
+                }
+                None => {
+                    (ret.1).move_end(self.string.len());
+                    break;
+                }
+                Some((e, _)) => {
+                    (ret.1).move_end(*e);
+                    break;
+                }
+            }
         }
-        // There is no more to do, as tabs shall not be coerced into one.
         return Some(Ok(ret));
     }
 
@@ -529,7 +542,7 @@ impl<'s> Iterator for Parser<'s> {
                 trace!("Parser: Consuming a new token: {:?}", self.iter.peek());
                 let ret = match self.iter.peek() {
                     Some(Ok(Token(TokenType::Word, _))) => self.consume_host(),
-                    Some(Ok(Token(TokenType::Tab, _))) => self.consume_clause(),
+                    Some(Ok(Token(TokenType::Indent, _))) => self.consume_clause(),
                     Some(Ok(Token(TokenType::NewLine, _))) => self.consume_newline(),
                     Some(Ok(Token(TokenType::Comment, _))) => self.consume_comment(),
                     Some(Err(_)) => return Some(Err(self.iter.next().unwrap().unwrap_err())),
@@ -604,7 +617,7 @@ impl<'s> Parser<'s> {
                     self.iter.next();
                     return Some(Ok(ret));
                 }
-                Some(Ok(Token(TokenType::Tab, _))) => {
+                Some(Ok(Token(TokenType::Indent, _))) => {
                     self.iter.next();
                 }
                 Some(Ok(Token(TokenType::Comment, _))) => {
@@ -623,9 +636,9 @@ impl<'s> Parser<'s> {
     /// Consume a clause, e.g. "\tClauseKeyword ClauseValue\n"
     fn consume_clause(&mut self) -> Option<Result<Node<'s>, Error>> {
         debug!("Parser: Consuming clause");
-        // We consume tab token
+        // We consume indent token
         match self.iter.next() {
-            Some(Ok(Token(TokenType::Tab, _))) => {}
+            Some(Ok(Token(TokenType::Indent, _))) => {}
             _ => panic!("Consume host called on wrong token"),
         }
         // We dispatch with next keyword
@@ -641,6 +654,9 @@ impl<'s> Parser<'s> {
             }
             Some(Ok(Token(TokenType::Word, ib))) if ib.as_str() == "ProxyCommand" => {
                 return self.consume_proxycommand_clause();
+            }
+            Some(Ok(Token(TokenType::NewLine, ib))) => {
+                return None;
             }
             Some(Ok(Token(TokenType::Word, ib))) => {
                 self.exhausted = true;
@@ -1035,6 +1051,8 @@ mod tests {
     use super::*;
 
     fn init() {
+        
+        std::env::set_var("RUST_LOG", "liborchestra::ssh=trace");
         let _ = env_logger::builder().is_test(true).try_init();
     }
 
@@ -1044,34 +1062,38 @@ mod tests {
         let a = "\tHost \t plafrim   #kalbfezjk \t jjja -p  \n\n\n   ".to_owned();
         let mut lexer = Lexer::from(&a);
         let n = lexer.next().unwrap().unwrap();
-        println!("n: {:?}", n);
-        assert_eq!(n.0, TokenType::Tab);
+        println!("n1: {:?}", n);
+        assert_eq!(n.0, TokenType::Indent);
         assert_eq!(n.1.as_str(), "\t");
         let n = lexer.next().unwrap().unwrap();
-        println!("n: {:?}", n);
+        println!("n2: {:?}", n);
         assert_eq!(n.0, TokenType::Word);
         assert_eq!(n.1.as_str(), "Host");
         let n = lexer.next().unwrap().unwrap();
-        println!("n: {:?}", n);
-        assert_eq!(n.0, TokenType::Tab);
-        assert_eq!(n.1.as_str(), "\t");
+        println!("n3: {:?}", n);
+        assert_eq!(n.0, TokenType::Indent);
+        assert_eq!(n.1.as_str(), "\t ");
         let n = lexer.next().unwrap().unwrap();
-        println!("n: {:?}", n);
+        println!("n4: {:?}", n);
         assert_eq!(n.0, TokenType::Word);
         assert_eq!(n.1.as_str(), "plafrim");
         let n = lexer.next().unwrap().unwrap();
-        println!("n: {:?}", n);
+        println!("n5: {:?}", n);
         assert_eq!(n.0, TokenType::Comment);
         assert_eq!(n.1.as_str(), "#kalbfezjk \t jjja -p  ");
         let n = lexer.next().unwrap().unwrap();
-        println!("n: {:?}", n);
+        println!("n6: {:?}", n);
         assert_eq!(n.0, TokenType::NewLine);
         assert_eq!(n.1.as_str(), "\n");
+        let n = lexer.next().unwrap().unwrap();
+        println!("n7: {:?}", n);
+        assert_eq!(n.0, TokenType::Indent);
+        assert_eq!(n.1.as_str(), "   ");
         assert!(lexer.next().is_none());
     }
 
     #[test]
-    fn test_lexer_error() {
+    fn test_lexing_error() {
         let a = "Höst pla\n\tHostName plafrim".to_owned();
         let mut lexer = Lexer::from(&a);
         let n = lexer.next().unwrap().unwrap_err();
@@ -1081,41 +1103,42 @@ mod tests {
 
     #[test]
     fn test_parser() {
+        init();
         let a = "# my configurations\n\
-                 Host localhost #Kikou \n\
-                 \tHostName localhost # comments \t \n\
+                 Host localhost #Kikou \n HostName localhost # comments \t \n\
                  # Some comments\n\n\
-                 \tUser apere #some comments \n\
-                 \tPort 222 #not classic\n\
+                 \t User apere #some comments \n\
+                 \t\tPort 222 #not classic\n\
                  \tProxyCommand ssh -A -l apere localhost -W localhost:22 # some comments"
             .to_owned();
         let lexer = Lexer::from(&a);
         let mut parser = Parser::from_lexer(lexer);
         let n = parser.next().unwrap().unwrap();
-        println!("n: {:?}", n);
+        println!("n1: {:?}", n);
         assert_eq!(n.0, NodeType::Host);
         assert_eq!(n.1.as_str(), "localhost");
+        println!("now");
         let n = parser.next().unwrap().unwrap();
-        println!("n: {:?}", n);
+        println!("n2: {:?}", n);
         assert_eq!(n.0, NodeType::HostNameClause);
         assert_eq!(n.1.as_str(), "localhost");
         let n = parser.next().unwrap().unwrap();
-        println!("n: {:?}", n);
+        println!("n3: {:?}", n);
         assert_eq!(n.0, NodeType::UserClause);
         assert_eq!(n.1.as_str(), "apere");
         let n = parser.next().unwrap().unwrap();
-        println!("n: {:?}", n);
+        println!("n4: {:?}", n);
         assert_eq!(n.0, NodeType::PortClause);
         assert_eq!(n.1.as_str(), "222");
         let n = parser.next().unwrap().unwrap();
-        println!("n: {:?}", n);
+        println!("n5: {:?}", n);
         assert_eq!(n.0, NodeType::ProxyCommandClause);
         assert_eq!(n.1.as_str(), "ssh -A -l apere localhost -W localhost:22");
         assert!(parser.next().is_none());
     }
 
     #[test]
-    fn test_parser_error() {
+    fn test_parsing_error() {
         let a = "\tPort 222a".to_owned();
         let lexer = Lexer::from(&a);
         let mut parser = Parser::from_lexer(lexer);
@@ -1125,12 +1148,13 @@ mod tests {
 
     #[test]
     fn test_config_reader() {
+        init();
         let a = "# My configurations\n\
-            \n
+            \t \n\
             Host test # first profile for testing purpose\n\
             \tHostName localhost\n\
             \tPort 222 # not the usual port \n\
-            \n
+            \n\
             \tUser apere\n\
             \tProxyCommand ssh -a -l blahblah bhal \n\
             \n\
