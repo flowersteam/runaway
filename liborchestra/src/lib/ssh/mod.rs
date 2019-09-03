@@ -56,7 +56,7 @@ use futures::task::LocalSpawnExt;
 use futures::FutureExt;
 use futures::SinkExt;
 use futures::channel::{mpsc, oneshot};
-use std::time;
+use crate::*;
 
 
 //------------------------------------------------------------------------------------------  MODULE
@@ -67,117 +67,6 @@ pub mod config;
 
 //------------------------------------------------------------------------------------------- MACROS
 
-/// This macro allows to asynchronously wait for (at least) a given time. This means that the thread
-/// is yielded when it is done. For now, it creates a separate thread each time a sleep is needed, 
-/// which is far from ideal.
-#[macro_export] 
-macro_rules! async_sleep {
-    ($dur: expr) => {
-        {
-            let (tx, rx) = oneshot::channel();
-            thread::spawn(move || {
-                thread::sleep($dur);
-                tx.send(()).unwrap();
-            });
-            rx.await.unwrap();
-
-        }
-    };
-}
-
-/// This macro allows to intercept a wouldblock error returned by the expression evaluation, and 
-/// awaits for 1 ns (at least) before retrying. 
-#[macro_export]
-macro_rules! await_wouldblock_io {
-    ($expr:expr) => {
-        {
-            loop{
-                match $expr {
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        async_sleep!(Duration::from_nanos(1))
-                    }
-                    res => break res,
-                }
-            }
-        }
-    }
-}
-
-/// This macro allows to intercept a wouldblock error returned by the expression evaluation, and 
-/// awaits for 1 ns (at least) before retrying. 
-#[macro_export]
-macro_rules! await_wouldblock_ssh {
-    ($expr:expr) => {
-        {
-            loop{
-                match $expr {
-                    Err(ref e) if e.code() == -37 => {
-                        async_sleep!(Duration::from_nanos(1))
-                    }
-                    Err(ref e) if e.code() == -21 => {
-                        async_sleep!(Duration::from_nanos(1))
-                    }
-                    res => break res,
-                }
-            }
-        }
-    }
-}
-
-/// This macro allows to retry an ssh expression if the error code received was $code. It allows to 
-/// retry commands that fails every now and then for a limited amount of time.
-#[macro_export]
-macro_rules! await_retry_n_ssh {
-    ($expr:expr, $nb:expr, $($code:expr),*) => {
-       {    
-            let nb = $nb as usize;
-            let mut i = 1 as usize;
-            loop{
-                match $expr {
-                    Err(e)  => {
-                        if i == nb {
-                            break Err(e)
-                        }
-                        $(
-                            else if e.code() == $code as i32 {
-                                async_sleep!(Duration::from_nanos(1));
-                                i += 1;
-                            }
-                        )*
-                    }
-                    res => {
-                        break res
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// This macro allows to retry an ssh expression if the error code received was $code. It allows to 
-/// retry commands that fail but must be retried until it's ok. For example 
-#[macro_export]
-macro_rules! await_retry_ssh {
-    ($expr:expr, $($code:expr),*) => {
-       {    
-            loop{
-                match $expr {
-                    Err(e)  => {
-                        $(  if e.code() == $code as i32 {
-                                async_sleep!(Duration::from_nanos(1));
-                            } else  )*
-                        {
-                            break Err(e)
-                        }
-                    }
-                    res => {
-                        break res
-                    }
-                }
-            }
-        }
-    }
-}
 
 /// This macro generates the pty exec string out of an actual string. Just intended to remove 
 /// boilerplate.

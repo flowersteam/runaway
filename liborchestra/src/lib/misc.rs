@@ -1,15 +1,20 @@
-// liborchestra/misc.rs
-//
-// Author: Alexandre Péré
-///
-/// A few miscellaneous functions publicly available.
+//! liborchestra/misc.rs
+//! Author: Alexandre Péré
+//!
+//! A few miscellaneous available library wide.
 
-// IMPORTS
+
+//------------------------------------------------------------------------------------------ IMPORTS
+
+
 use std::{process, path, fs, error, fmt};
 use regex;
 use super::CMPCONF_RPATH;
 
-// ERRORS
+
+//------------------------------------------------------------------------------------------- ERRORS
+
+
 #[derive(Debug)]
 pub enum Error {
     InvalidRepository,
@@ -27,7 +32,125 @@ impl fmt::Display for Error {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////////////// FUNCTIONS
+
+//------------------------------------------------------------------------------------------- MACROS
+
+
+/// This macro allows to asynchronously wait for (at least) a given time. This means that the thread
+/// is yielded when it is done. For now, it creates a separate thread each time a sleep is needed, 
+/// which is far from ideal.
+#[macro_export] 
+macro_rules! async_sleep {
+    ($dur: expr) => {
+        {
+            let (tx, rx) = oneshot::channel();
+            thread::spawn(move || {
+                thread::sleep($dur);
+                tx.send(()).unwrap();
+            });
+            rx.await.unwrap();
+
+        }
+    };
+}
+
+/// This macro allows to intercept a wouldblock error returned by the expression evaluation, and 
+/// awaits for 1 ns (at least) before retrying. 
+#[macro_export]
+macro_rules! await_wouldblock_io {
+    ($expr:expr) => {
+        {
+            loop{
+                match $expr {
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        async_sleep!(std::time::Duration::from_nanos(1))
+                    }
+                    res => break res,
+                }
+            }
+        }
+    }
+}
+
+/// This macro allows to intercept a wouldblock error returned by the expression evaluation, and 
+/// awaits for 1 ns (at least) before retrying. 
+#[macro_export]
+macro_rules! await_wouldblock_ssh {
+    ($expr:expr) => {
+        {
+            loop{
+                match $expr {
+                    Err(ref e) if e.code() == -37 => {
+                        async_sleep!(Duration::from_nanos(1))
+                    }
+                    Err(ref e) if e.code() == -21 => {
+                        async_sleep!(Duration::from_nanos(1))
+                    }
+                    res => break res,
+                }
+            }
+        }
+    }
+}
+
+/// This macro allows to retry an ssh expression if the error code received was $code. It allows to 
+/// retry commands that fails every now and then for a limited amount of time.
+#[macro_export]
+macro_rules! await_retry_n_ssh {
+    ($expr:expr, $nb:expr, $($code:expr),*) => {
+       {    
+            let nb = $nb as usize;
+            let mut i = 1 as usize;
+            loop{
+                match $expr {
+                    Err(e)  => {
+                        if i == nb {
+                            break Err(e)
+                        }
+                        $(
+                            else if e.code() == $code as i32 {
+                                async_sleep!(Duration::from_nanos(1));
+                                i += 1;
+                            }
+                        )*
+                    }
+                    res => {
+                        break res
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// This macro allows to retry an ssh expression if the error code received was $code. It allows to 
+/// retry commands that fail but must be retried until it's ok. For example 
+#[macro_export]
+macro_rules! await_retry_ssh {
+    ($expr:expr, $($code:expr),*) => {
+       {    
+            loop{
+                match $expr {
+                    Err(e)  => {
+                        $(  if e.code() == $code as i32 {
+                                async_sleep!(Duration::from_nanos(1));
+                            } else  )*
+                        {
+                            break Err(e)
+                        }
+                    }
+                    res => {
+                        break res
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+
+//---------------------------------------------------------------------------------------- FUNCTIONS
 
 /// Returns a tuple containing the git and git-lfs versions.
 pub fn check_git_lfs_versions() -> Result<(String, String), crate::Error> {
@@ -53,7 +176,8 @@ pub fn check_git_lfs_versions() -> Result<(String, String), crate::Error> {
 
 /// Returns the absolute path to the higher expegit folder starting from `start_path`.
 pub fn search_expegit_root(start_path: &path::PathBuf) -> Result<path::PathBuf, crate::Error> {
-    debug!("Searching expegit repository root from {}", fs::canonicalize(start_path).unwrap().to_str().unwrap());
+    debug!("Searching expegit repository root from {}", 
+        fs::canonicalize(start_path).unwrap().to_str().unwrap());
     let start_path = fs::canonicalize(start_path)?;
     if start_path.is_file() { panic!("Should provide a folder path.") };
     // We add a dummy folder that will be popped directly to check for .
@@ -118,8 +242,9 @@ pub fn get_hostname() -> Result<String, crate::Error> {
 }
 
 
+//-------------------------------------------------------------------------------------------- TESTS
 
-// TESTS
+
 #[cfg(test)]
 mod test {
     use std::fs;

@@ -10,8 +10,7 @@
 use std::error;
 use std::fmt;
 use std::fmt::Debug;
-use std::sync::{Arc, Mutex, Weak};
-use std::thread::JoinHandle;
+use std::sync::{Arc, Mutex};
 use futures::channel::mpsc::UnboundedSender;
 use chrono::prelude::*;
 use std::ops::Deref;

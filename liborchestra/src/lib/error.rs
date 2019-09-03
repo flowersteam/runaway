@@ -8,11 +8,26 @@
 //------------------------------------------------------------------------------------------ IMPORTS
 
 
-use crate::{ssh, repository, misc, primitives, derive_from_error};
+use crate::{ssh, repository, misc, primitives};
 use std::{io, error, fmt};
 use regex;
 //use git2;
 use yaml_rust;
+
+
+//------------------------------------------------------------------------------------------- MACROS
+
+
+#[macro_export]
+macro_rules! derive_from_error {
+    ($error:ident, $from_type:ty, $variant:ident) => {
+        impl From<$from_type> for $error {
+            fn from(err: $from_type) -> $error {
+                    $error::$variant(err)
+            }
+        }
+    }
+}
 
 
 //-------------------------------------------------------------------------------------------- ERROR
