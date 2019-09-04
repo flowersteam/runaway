@@ -13,6 +13,7 @@ use crate::derive_from_error;
 use crate::primitives::{Dropper, DropBack, Expire};
 use crate::ssh;
 use crate::ssh::RemoteHandle;
+use crate::async_sleep;
 use dirs;
 use futures::Future;
 use std::{error, fmt, fs, path, str};
@@ -449,7 +450,9 @@ impl Host {
     }
 
     // Acquire a node 
-    async fn acquire_node(host: Arc<Mutex<Host>>) -> Result<DropBack<Expire<ssh::RemoteHandle>>, Error>{
+    async fn acquire_node(host: Arc<Mutex<Host>>, 
+                          wait: bool) -> Result<Option<DropBack<Expire<ssh::RemoteHandle>>>, Error>
+    {
         let conf = {host.lock().await.conf.clone()};
         debug!("Host: Acquiring node on {} ...", conf.name);
         loop{
@@ -471,7 +474,7 @@ impl Host {
                         r.consume();
                     } else {
                         trace!("Host: node {:?} still good. Returning it...", r);
-                        return Ok(r);
+                        return Ok(Some(r));
                     }
                 }
                 Some(ChannelMessages::NoNodesLeft) => {
@@ -480,13 +483,14 @@ impl Host {
                     Host::start_alloc(host.clone()).await?;
                 }
                 Some(ChannelMessages::WaitForNodes) => {
-                    trace!("Host: Allocation ongoing. Waiting...");
-                    let(tx, rx) = oneshot::channel();
-                        thread::spawn(move || {
-                            thread::sleep(std::time::Duration::from_millis(500));
-                            tx.send(()).unwrap();
-                        });
-                    rx.await.unwrap();
+                    trace!("Host: Allocation ongoing, but no nodes available");
+                    if wait{
+                        trace!("Host: Sleeping....");
+                        async_sleep!(std::time::Duration::from_millis(500));
+                    } else {
+                        trace!("Host: Returning....");
+                        return Ok(None)
+                    }
                 }
                 Some(ChannelMessages::Abort) => {
                     trace!("Host: Aborting...");
@@ -534,6 +538,7 @@ impl Host {
 #[derive(Debug)]
 enum OperationInput{
     AcquireNode,
+    TryAcquireNode,
     Abort,
     Shutdown
 }
@@ -541,6 +546,7 @@ enum OperationInput{
 #[derive(Debug)]
 enum OperationOutput{
     AcquireNode(Result<DropBack<Expire<ssh::RemoteHandle>>, Error>),
+    TryAcquireNode(Result<Option<DropBack<Expire<ssh::RemoteHandle>>>, Error>),
     Abort(Result<(), Error>),
     Shutdown(Result<(), Error>)
 }
@@ -575,9 +581,21 @@ impl HostHandle {
                     match operation {
                         OperationInput::AcquireNode => {
                             spawner.spawn_local(
-                                Host::acquire_node(res.clone())
+                                Host::acquire_node(res.clone(), true)
                                     .map(|a| {
-                                        sender.send(OperationOutput::AcquireNode(a))
+                                        sender.send(OperationOutput::AcquireNode(a
+                                                .and_then(|a| Ok(a.unwrap()))))
+                                            .map_err(|e| error!("Host Thread: Failed to \\
+                                            send an operation output: \n{:?}", e))
+                                            .unwrap();
+                                    })
+                            )
+                        }
+                        OperationInput::TryAcquireNode => {
+                            spawner.spawn_local(
+                                Host::acquire_node(res.clone(), false)
+                                    .map(|a| {
+                                        sender.send(OperationOutput::TryAcquireNode(a))
                                             .map_err(|e| error!("Host Thread: Failed to \\
                                             send an operation output: \n{:?}", e))
                                             .unwrap();
@@ -682,6 +700,27 @@ impl HostHandle {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::AcquireNode(res)) => res,
                 Ok(e) => Err(Error::OperationFetch(format!("Expected AcquireNode, found {:?}", e)))
+            }
+        }
+    }
+
+    /// Async method, returning a future that ultimately resolves in a campaign, after having
+    /// fetched the origin changes on the experiment repository.
+    pub fn async_try_acquire(&self) 
+        -> impl Future<Output=Result<Option<DropBack<Expire<ssh::RemoteHandle>>>,Error>> {
+        debug!("HostHandle: Building async_try_acquire_node future");
+        let mut chan = self._sender.clone();
+        async move {
+            let (sender, receiver) = oneshot::channel();
+            trace!("HostHandle::async_try_acquire_future: Sending input");
+            chan.send((sender, OperationInput::TryAcquireNode))
+                .await
+                .map_err(|e| Error::Channel(e.to_string()))?;
+            trace!("HostHandle::async_Tryacquire_future: Awaiting output");
+            match receiver.await {
+                Err(e) => Err(Error::OperationFetch(format!("{}", e))),
+                Ok(OperationOutput::TryAcquireNode(res)) => res,
+                Ok(e) => Err(Error::OperationFetch(format!("Expected TryAcquireNode, found {:?}", e)))
             }
         }
     }
