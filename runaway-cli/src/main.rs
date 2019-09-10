@@ -158,7 +158,7 @@ async fn perform_job(node: DropBack<Expire<NodeHandle>>,
             .map_err(|e| format!("Failed to deflate input data: {}", e))
             .and_then(|e| e.result().map_err(|e| format!("Failed to deflate input data: {}", e)))?;
         info!("Job: Starting execution");
-        let execution = format!("cd {} && ./{}", 
+        let execution = format!("cd {} && {}", 
             remote_defl,
             node.execution.replace("$RUNAWAY_COMMAND", &format!("./{} {}", script_name, parameters)));
         node.async_pty(vec!(node.before_execution.clone(),
