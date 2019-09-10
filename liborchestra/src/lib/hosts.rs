@@ -436,6 +436,7 @@ impl Host {
             let node = node?;
             let output = node.async_exec(conf.executions_per_nodes()).await.unwrap();
             let n_handles = String::from_utf8(output.stdout).unwrap().parse::<u64>().unwrap();
+            info!("Host: Number of nodes: {}", n_handles);
             for i in 1..n_handles{
                 let handle = NodeHandle{
                     remote_handle: node.clone(),
@@ -448,6 +449,7 @@ impl Host {
             }
         }
 
+        info!("Host: Sending nodes!");
         let mut nodes_stream = stream::iter(nodes_list);
         tx.send_all(&mut nodes_stream).await
             .map_err(|e| Error::AllocationFailed(format!("Failed to send nodes: {}", e)))?;
