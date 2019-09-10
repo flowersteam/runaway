@@ -152,7 +152,7 @@ pub struct HostConf {
     pub get_alloc_nodes: Vec<String>,
     pub cancel_alloc: Vec<String>, 
     pub alloc_duration: usize, 
-    pub executions_per_nodes: Vec<String>,
+    pub executions_per_nodes: usize,
     pub directory: path::PathBuf, 
     pub before_execution: Vec<String>, 
     pub execution: String,
@@ -209,11 +209,6 @@ impl HostConf {
     /// Returns the cancel_alloc string
     pub fn cancel_alloc(&self) -> String{
         return self.cancel_alloc.join(" && ");
-    }
-
-    /// Returns the executions_per_nodes string
-    pub fn executions_per_nodes(&self) -> String{
-        return self.executions_per_nodes.join(" && ");
     }
 
     /// Returns the before_execution string
@@ -434,10 +429,7 @@ impl Host {
                 };
             }
             let node = node?;
-            let output = node.async_exec(conf.executions_per_nodes()).await.unwrap();
-            let n_handles = String::from_utf8(output.stdout).unwrap().parse::<u64>().unwrap();
-            info!("Host: Number of nodes: {}", n_handles);
-            for i in 1..n_handles{
+            for i in 1..conf.executions_per_nodes{
                 let handle = NodeHandle{
                     remote_handle: node.clone(),
                     before_execution: conf.before_execution().replace("$RUNAWAY_EID", &format!("{}", i)),
@@ -834,7 +826,7 @@ mod test {
             get_alloc_nodes: vec!["while read LINE; do scontrol show hostnames \"$LINE\"; done <<< $(squeue -j $ALLOCRET -o \"%N\" | sed '1d' -E)".to_owned()],
             cancel_alloc: vec!["scancel -j $ALLOCRET".to_owned()],
             alloc_duration: 10000,
-            executions_per_nodes: vec!["echo 16".to_owned()],
+            executions_per_nodes: 16,
             before_execution: vec!["".to_owned()],
             execution: "$RUNAWAY_COMMAND".to_owned(),
             after_execution: vec!["".to_owned()],
@@ -868,7 +860,7 @@ mod test {
             get_alloc_nodes: vec!["echo localhost".to_owned()],
             cancel_alloc: vec!["".to_owned()],
             alloc_duration: 1,
-            executions_per_nodes: vec!["echo 16".to_owned()],
+            executions_per_nodes: 16,
             before_execution: vec!["".to_owned()],
             execution: "$RUNAWAY_COMMAND".to_owned(),
             after_execution: vec!["".to_owned()],
@@ -939,7 +931,7 @@ mod test {
             get_alloc_nodes: vec!["echo localhost".to_owned()],
             cancel_alloc: vec!["".to_owned()],
             alloc_duration: 1,
-            executions_per_nodes: vec!["echo 16".to_owned()],
+            executions_per_nodes: 16,
             before_execution: vec!["".to_owned()],
             execution: "$RUNAWAY_COMMAND".to_owned(),
             after_execution: vec!["".to_owned()],
@@ -969,5 +961,4 @@ mod test {
         let out = pool.run(fut);
         
     }
-
 }
