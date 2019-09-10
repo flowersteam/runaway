@@ -152,9 +152,10 @@ pub struct HostConf {
     pub get_alloc_nodes: Vec<String>,
     pub cancel_alloc: Vec<String>, 
     pub alloc_duration: usize, 
-    pub executions_per_nodes: usize,
-    pub directory: path::PathBuf,      
+    pub executions_per_nodes: Vec<String>,
+    pub directory: path::PathBuf, 
     pub before_execution: Vec<String>, 
+    pub execution: String,
     pub after_execution: Vec<String>, 
 }
 
@@ -210,9 +211,19 @@ impl HostConf {
         return self.cancel_alloc.join(" && ");
     }
 
+    /// Returns the executions_per_nodes string
+    pub fn executions_per_nodes(&self) -> String{
+        return self.executions_per_nodes.join(" && ");
+    }
+
     /// Returns the before_execution string
     pub fn before_execution(&self) -> String{
         return self.before_execution.join(" && ");
+    }
+
+    /// Returns the execution string
+    pub fn execution(&self) -> String{
+        return self.execution.clone();
     }
 
     /// Returns the after_execution string
@@ -240,6 +251,27 @@ impl<'a> From<&'a str> for LeaveConfig {
     }
 }
 
+//-------------------------------------------------------------------------------------------- NODES
+
+#[derive(Clone, Debug)]
+pub struct NodeHandle{
+    remote_handle: RemoteHandle,
+    pub before_execution: String,
+    pub execution: String,
+    pub after_execution:String,
+
+}
+
+use std::ops::Deref;
+
+impl Deref for NodeHandle{
+
+    type Target = RemoteHandle;
+
+    fn deref(&self) -> &RemoteHandle {
+        &self.remote_handle
+    }
+}
 
 //--------------------------------------------------------------------------------------------- HOST
 
@@ -255,7 +287,7 @@ use futures::StreamExt;
 #[derive(Clone)] 
 enum ChannelMessages{
     NoAllocationsMade,
-    Node(DropBack<Expire<RemoteHandle>>),
+    Node(DropBack<Expire<NodeHandle>>),
     NoNodesLeft,
     WaitForNodes,
     Abort,
@@ -379,38 +411,44 @@ impl Host {
         trace!("Host: Connecting to nodes...");
         let expiration = Utc::now() + chrono::Duration::minutes(conf.alloc_duration as i64);
         let (mut tx, rx) = unbounded();
-        let nodes = nodes
-            .split("\n")
-            .inspect(|n| trace!("Host: Connecting to {:?}", n))
-            .map(|n| {
-                let mut config = profile.clone();
-                let cmd = conf.node_proxy_command.replace("$NODENAME", n);
-                config.proxycommand.replace(cmd);
-                config.hostname.replace(format!("{}::{}", config.name, n));
-                trace!("Host: Spawning node configuration: {:?}", config);
-                let mut node = Err(Error::ConnectingNodes("".into()));
-                for _ in 1..10{
-                    match ssh::RemoteHandle::spawn(config.clone()){
-                        Err(e) =>{
-                            error!("Host: Failed to connect to node {}: {}\nWaiting and trying again.", n, e);
-                            std::thread::sleep(std::time::Duration::from_secs(2));
-                        }
-                        Ok(o) =>{
-                            info!("Host: Successfully connect node {}", n);
-                            node = Ok(DropBack::new(Expire::new(o,expiration), tx.clone()));
-                            break
-                        }
-                    };
-                }
-                let mut ns = Vec::new();
-                for _ in 1..conf.executions_per_nodes{
-                    ns.push(node.clone());
-                }
-                ns
-            })
-            .flatten()
-            .collect::<Result<Vec<DropBack<Expire<ssh::RemoteHandle>>>, Error>>()?;
-        let mut nodes_stream = stream::iter(nodes);
+        let mut nodes_list = Vec::new();
+
+        for node_name in nodes.split("\n"){
+            let mut config = profile.clone();
+            let cmd = conf.node_proxy_command.replace("$NODENAME", node_name);
+            config.proxycommand.replace(cmd);
+            config.hostname.replace(format!("{}::{}", config.name, node_name));
+            trace!("Host: Spawning node configuration: {:?}", config);
+            let mut node = Err(Error::ConnectingNodes("Failed to connect nodes".into()));
+            for _ in 1..10{
+                match ssh::RemoteHandle::spawn(config.clone()){
+                    Err(e) =>{
+                        error!("Host: Failed to connect to node {}: {}\nWaiting and trying again.", node_name, e);
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                    }
+                    Ok(o) =>{
+                        info!("Host: Successfully connect node {}", node_name);
+                        node = Ok(o);
+                        break
+                    }
+                };
+            }
+            let node = node?;
+            let output = node.async_exec(conf.executions_per_nodes()).await.unwrap();
+            let n_handles = String::from_utf8(output.stdout).unwrap().parse::<u64>().unwrap();
+            for i in 1..n_handles{
+                let handle = NodeHandle{
+                    remote_handle: node.clone(),
+                    before_execution: conf.before_execution().replace("$RUNAWAY_EID", &format!("{}", i)),
+                    execution: conf.execution().replace("$RUNAWAY_EID", &format!("{}", i)),
+                    after_execution: conf.after_execution().replace("$RUNAWAY_EID", &format!("{}", i)),
+                };
+                let out = DropBack::new(Expire::new(handle,expiration), tx.clone());
+                nodes_list.push(out);
+            }
+        }
+
+        let mut nodes_stream = stream::iter(nodes_list);
         tx.send_all(&mut nodes_stream).await
             .map_err(|e| Error::AllocationFailed(format!("Failed to send nodes: {}", e)))?;
         {
@@ -449,7 +487,7 @@ impl Host {
     }
 
     // Acquire a node 
-    async fn acquire_node(host: Arc<Mutex<Host>>) -> Result<DropBack<Expire<ssh::RemoteHandle>>, Error>{
+    async fn acquire_node(host: Arc<Mutex<Host>>) -> Result<DropBack<Expire<NodeHandle>>, Error>{
         let conf = {host.lock().await.conf.clone()};
         debug!("Host: Acquiring node on {} ...", conf.name);
         loop{
@@ -540,7 +578,7 @@ enum OperationInput{
 
 #[derive(Debug)]
 enum OperationOutput{
-    AcquireNode(Result<DropBack<Expire<ssh::RemoteHandle>>, Error>),
+    AcquireNode(Result<DropBack<Expire<NodeHandle>>, Error>),
     Abort(Result<(), Error>),
     Shutdown(Result<(), Error>)
 }
@@ -668,7 +706,7 @@ impl HostHandle {
 
     /// Async method, returning a future that ultimately resolves in a campaign, after having
     /// fetched the origin changes on the experiment repository.
-    pub fn async_acquire(&self) -> impl Future<Output=Result<DropBack<Expire<ssh::RemoteHandle>>,Error>> {
+    pub fn async_acquire(&self) -> impl Future<Output=Result<DropBack<Expire<NodeHandle>>,Error>> {
         debug!("HostHandle: Building async_acquire_node future");
         let mut chan = self._sender.clone();
         async move {
@@ -794,8 +832,9 @@ mod test {
             get_alloc_nodes: vec!["while read LINE; do scontrol show hostnames \"$LINE\"; done <<< $(squeue -j $ALLOCRET -o \"%N\" | sed '1d' -E)".to_owned()],
             cancel_alloc: vec!["scancel -j $ALLOCRET".to_owned()],
             alloc_duration: 10000,
-            executions_per_nodes: 10,
+            executions_per_nodes: vec!["echo 16".to_owned()],
             before_execution: vec!["".to_owned()],
+            execution: "$RUNAWAY_COMMAND".to_owned(),
             after_execution: vec!["".to_owned()],
             directory: path::PathBuf::from("/projets/flowers/alex/executions"),
         };
@@ -827,8 +866,9 @@ mod test {
             get_alloc_nodes: vec!["echo localhost".to_owned()],
             cancel_alloc: vec!["".to_owned()],
             alloc_duration: 1,
-            executions_per_nodes: 2,
+            executions_per_nodes: vec!["echo 16".to_owned()],
             before_execution: vec!["".to_owned()],
+            execution: "$RUNAWAY_COMMAND".to_owned(),
             after_execution: vec!["".to_owned()],
             directory: path::PathBuf::from("/projets/flowers/alex/executions"),
         };
@@ -897,8 +937,9 @@ mod test {
             get_alloc_nodes: vec!["echo localhost".to_owned()],
             cancel_alloc: vec!["".to_owned()],
             alloc_duration: 1,
-            executions_per_nodes: 2,
+            executions_per_nodes: vec!["echo 16".to_owned()],
             before_execution: vec!["".to_owned()],
+            execution: "$RUNAWAY_COMMAND".to_owned(),
             after_execution: vec!["".to_owned()],
             directory: path::PathBuf::from("/projets/flowers/alex/executions"),
         };
