@@ -181,7 +181,7 @@ macro_rules! await_retry_ssh {
 
 //---------------------------------------------------------------------------------------------- PTY
 
-static linux_pty_agent_prelude: &str = "
+static LINUX_PTY_AGENT_PRELUDE: &str = "
 bash
 PS1=
 stty -echo 
@@ -238,7 +238,7 @@ run() {
 }
 ";
 
-static linux_pty_agent_postlude: &str = "
+static LINUX_PTY_AGENT_POSTLUDE: &str = "
 rm $stdout_fifo
 rm $stderr_fifo
 exit
@@ -311,6 +311,10 @@ impl From<Error> for crate::primitives::Error{
         return crate::primitives::Error::Operation(format!("{}", other));
     }
 }
+
+
+//--------------------------------------------------------------------------------------- STRUCTURES
+
 
 
 //------------------------------------------------------------------------------------ PROXY-COMMAND
@@ -517,6 +521,7 @@ impl Remote {
     fn start_session(stream: &TcpStream, host: &str, user: &str) -> Result<Session, Error> {
         debug!("Remote: Opening remote connection to host {} as user {}", host, user);
         let mut session = Session::new().unwrap();
+
         session.method_pref(MethodType::HostKey, "ssh-rsa")
             .map_err(|_| Error::ConnectionFailed(format!("Failed to preferences")))?;
         trace!("Remote: Performing handshake");
@@ -599,11 +604,12 @@ impl Remote {
         return Ok(session);
     }
 
-    /// Asynchronous function used to execute a command on the remote. 
+    /// Asynchronous function used to execute a command on the remote. It is meant as a lightweight 
+    /// execution facility, and as such, does only provide options
     async fn exec(remote: Arc<Mutex<Remote>>, command: String) -> Result<Output, Error>{
         debug!("Remote: Starting execution: {}", command);
-        // Error -21 corresponds to not enough channels available. It must be retried until an other 
-        // execution came to an end, and made a channel available. 
+        // Error -21 corresponds to missing available channels. It must be retried until an other 
+        // execution comes to an end, and makes a channel available. 
         let ret = await_wouldblock_ssh!(await_retry_ssh!(
             {
                 remote.lock()
@@ -696,7 +702,7 @@ impl Remote {
             .map_err(|e| Error::ExecutionFailed(format!("Failed to start pty channel: {}", e)))?;
 
         // We setup the linux pty agent on the remote end.
-        if let Err(e) = await_wouldblock_io!(channel.write_all(linux_pty_agent_prelude.as_bytes())){
+        if let Err(e) = await_wouldblock_io!(channel.write_all(LINUX_PTY_AGENT_PRELUDE.as_bytes())){
             return Err(Error::ExecutionFailed(format!("Failed to request shell: {}", e)));
         }        
 
@@ -773,7 +779,7 @@ impl Remote {
         }
 
         // We teardown the linux pty agent on the remote end.
-        if let Err(e) = await_wouldblock_io!(stream.get_mut().write_all(linux_pty_agent_postlude.as_bytes())){
+        if let Err(e) = await_wouldblock_io!(stream.get_mut().write_all(LINUX_PTY_AGENT_POSTLUDE.as_bytes())){
             return Err(Error::ExecutionFailed(format!("Failed to exit shell: {}", e)));
         }
 
@@ -1195,6 +1201,8 @@ async fn start_pty_channel(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Channel<
     await_wouldblock_ssh!(channel.shell())?;
     Ok(channel)
 }
+
+
 
 
 //--------------------------------------------------------------------------------------------- TEST
