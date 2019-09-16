@@ -1,7 +1,6 @@
 //! liborchestra/mod.rs
 //! Author: Alexandre Péré
-#![feature(trace_macros, async_await, result_map_or_else, trait_alias,
-try_blocks)]
+#![feature(trace_macros, async_await, result_map_or_else, trait_alias, try_blocks)]
 //! Liborchestra gives tools to manipulate expegit repositories, run scripts on user-defined hosts,
 //! and orchestrate the executions of batches of experiments under variations of parameters.
 //! 
