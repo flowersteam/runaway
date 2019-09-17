@@ -230,12 +230,6 @@ pub struct TerminalContext<P:AsPa, S:AsRef<str>, T:AsRef<str>>{
     envs: Vec<EnvironmentVariable<S,T>>
 }
 
-/// Represents the output of a runnable
-#[derive(Debug)]
-pub struct Runned<C,R>{
-    context:C,
-    output:R,
-}
 
 pub struct LocalCodeRoot<P:AsRef<Path>>(P);
 impl<P:AsRef<Path>> AsRef<Path> for LocalCodeRoot<P>{ 

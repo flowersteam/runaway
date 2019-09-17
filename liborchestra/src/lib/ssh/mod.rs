@@ -248,7 +248,7 @@ exit
 
 //-------------------------------------------------------------------------------------------- TYPES
 
-use crate::{InContext, Cwd, EnvironmentVariable, RawCommand, Folder, AbsolutePath, Runned, TerminalContext};
+use crate::{InContext, Cwd, EnvironmentVariable, RawCommand, Folder, AbsolutePath, TerminalContext};
 
 
 /// This type represents an ssh-exec runnable command. The context is a cwd to execute 
@@ -267,7 +267,7 @@ impl Default for ExecRunnable{
 }
 
 /// This type represents an ssh-exec runned output
-pub type ExecRunned = Runned<(), Output>;
+pub type ExecRunned = InContext<(), Output>;
 
 /// This type represents an ssh-pty runnable command. The context is a cwd to execute 
 /// the command in, along with a set of environment variables. The runable is a set of string raw 
@@ -286,7 +286,7 @@ impl Default for PtyRunnable{
 }
 
 /// This type represents an ssh-pty runned output
-pub type PtyRunned = Runned<TerminalContext<PathBuf, String, String>, Vec<Output>>; 
+pub type PtyRunned = InContext<TerminalContext<PathBuf, String, String>, Vec<Output>>; 
 
 
 //------------------------------------------------------------------------------------------- ERRORS
@@ -1334,7 +1334,7 @@ mod test {
             let remote = RemoteHandle::spawn(profile).unwrap();
             let mut exec_runnable = ExecRunnable::default(); 
             exec_runnable.inner = RawCommand("echo kikou && sleep 1 && { echo hello! 1>&2 }".into());
-            let Runned{context:_, output: output} = remote.async_exec(exec_runnable).await.unwrap();
+            let InContext{context:_, inner: output} = remote.async_exec(exec_runnable).await.unwrap();
             assert_eq!(String::from_utf8(output.stdout).unwrap(), "kikou\n");
             assert_eq!(String::from_utf8(output.stderr).unwrap(), "hello!\n");
             assert_eq!(output.status.code().unwrap(), 0);
@@ -1356,7 +1356,7 @@ mod test {
             let remote = RemoteHandle::spawn(profile).unwrap();
             let mut exec_runnable = ExecRunnable::default(); 
             exec_runnable.inner = RawCommand("echo $(pwd) && echo $RW_TEST".into());
-            let Runned{context:_, output: output} = remote.async_exec(exec_runnable).await.unwrap();
+            let InContext{context:_, inner: output} = remote.async_exec(exec_runnable).await.unwrap();
             assert_eq!(String::from_utf8(output.stdout).unwrap(), "kikou\n");
             assert_eq!(output.status.code().unwrap(), 0);
         }
@@ -1389,7 +1389,7 @@ mod test {
                           RawCommand("echo 10".into()),
                           RawCommand("echo 11".into()),
                           RawCommand("echo 12 && echo 13".into())];
-            let Runned{context:_, output:outputs} = remote.async_pty(pty_runnable, None, None).await.unwrap();
+            let InContext{context:_, inner:outputs} = remote.async_pty(pty_runnable, None, None).await.unwrap();
             let output = misc::compact_outputs(outputs);
             assert_eq!(String::from_utf8(output.stdout).unwrap(), "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n");
             assert_eq!(output.status.code().unwrap(), 0);
@@ -1413,7 +1413,7 @@ mod test {
             let mut pty_runnable = PtyRunnable::default();
             pty_runnable.inner = vec![RawCommand("cd /tmp".into()), 
                           RawCommand("pwd".into())];
-            let Runned{context:_, output:outputs} = remote.async_pty(pty_runnable, None, None).await.unwrap();
+            let InContext{context:_, inner:outputs} = remote.async_pty(pty_runnable, None, None).await.unwrap();
             let output = misc::compact_outputs(outputs);
             assert_eq!(String::from_utf8(output.stdout).unwrap(), "/tmp\n");
             assert_eq!(output.status.code().unwrap(), 0);
@@ -1437,7 +1437,7 @@ mod test {
             let mut pty_runnable = PtyRunnable::default();
             pty_runnable.inner = vec![RawCommand("a=KIKOU".into()), 
                           RawCommand("echo $a".into())];
-            let Runned{context:_, output:outputs} = remote.async_pty(pty_runnable, None, None).await.unwrap();
+            let InContext{context:_, inner:outputs} = remote.async_pty(pty_runnable, None, None).await.unwrap();
             let output = misc::compact_outputs(outputs);
             assert_eq!(String::from_utf8(output.stdout).unwrap(), "KIKOU\n");
             assert_eq!(output.status.code().unwrap(), 0);
@@ -1461,7 +1461,7 @@ mod test {
             let mut pty_runnable = PtyRunnable::default();
             pty_runnable.inner = vec![RawCommand("echo kikou_stdout".into()), 
                           RawCommand("echo kikou_stderr 1>&2".into())];
-            let Runned{context:_, output:outputs} = remote.async_pty(pty_runnable, None, None).await.unwrap();
+            let InContext{context:_, inner:outputs} = remote.async_pty(pty_runnable, None, None).await.unwrap();
             let output = misc::compact_outputs(outputs);
             assert_eq!(String::from_utf8(output.stdout).unwrap(), "kikou_stdout\n");
             assert_eq!(String::from_utf8(output.stderr).unwrap(), "kikou_stderr\n");
@@ -1486,7 +1486,7 @@ mod test {
             let mut pty_runnable = PtyRunnable::default();
             pty_runnable.context.cwd = Cwd(Folder{path: AbsolutePath{path: "/tmp".into()}});
             pty_runnable.context.envs.push(EnvironmentVariable{name:"RW_TEST".into(), value:"VAL1".into()});
-            let Runned{context:context, output:outputs} = remote.async_pty(pty_runnable, None, None).await.unwrap();
+            let InContext{context:context, inner:outputs} = remote.async_pty(pty_runnable, None, None).await.unwrap();
             let output = misc::compact_outputs(outputs);
             assert_eq!(String::from_utf8(output.stdout).unwrap(), "/tmp\nVAL1\n");
             assert!(context.envs.contains(&EnvironmentVariable{name:"RW_TEST".into(), value:"VAL2".into()}));
@@ -1599,7 +1599,7 @@ mod test {
         }
         let bef = std::time::Instant::now();
         for handle in handles{
-            let Runned{context:_, output} = executor.run(handle);
+            let InContext{context:_, inner: output} = executor.run(handle);
             assert_eq!(String::from_utf8(output.stdout).unwrap(), "1\n2\n".to_owned());
         }
         let dur = std::time::Instant::now().duration_since(bef);
@@ -1637,7 +1637,7 @@ mod test {
         }
         let bef = std::time::Instant::now();
         for handle in handles{
-            let Runned{context: _, output: outputs} = executor.run(handle);
+            let InContext{context: _, inner: outputs} = executor.run(handle);
             let output = misc::compact_outputs(outputs);
             assert_eq!(String::from_utf8(output.stdout).unwrap(), "1\n2\n".to_owned());
         }
