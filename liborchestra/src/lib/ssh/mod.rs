@@ -246,6 +246,49 @@ exit
 ";
 
 
+//-------------------------------------------------------------------------------------------- TYPES
+
+use crate::{InContext, Cwd, EnvironmentVariable, RawCommand, Folder, AbsolutePath, Runned, TerminalContext};
+
+
+/// This type represents an ssh-exec runnable command. The context is a cwd to execute 
+/// the command in, along with a set of environment variables. The runable is a string raw command.
+pub type ExecRunnable = InContext<TerminalContext<PathBuf, String, String>, RawCommand<String>>;
+impl Default for ExecRunnable{
+     fn default() -> Self{
+         InContext{
+             context: TerminalContext{
+                 cwd: Cwd(Folder{path: AbsolutePath{path:"/".into()}}),
+                 envs: Vec::new(),
+             },
+             inner: RawCommand("".into())
+         }
+     }
+}
+
+/// This type represents an ssh-exec runned output
+pub type ExecRunned = Runned<(), Output>;
+
+/// This type represents an ssh-pty runnable command. The context is a cwd to execute 
+/// the command in, along with a set of environment variables. The runable is a set of string raw 
+/// commands
+pub type PtyRunnable = InContext<TerminalContext<PathBuf, String, String>, Vec<RawCommand<String>>>;
+impl Default for PtyRunnable{
+     fn default() -> Self{
+         InContext{
+             context: TerminalContext{
+                 cwd: Cwd(Folder{path: AbsolutePath{path:"/".into()}}),
+                 envs: Vec::new()
+             },
+             inner: vec!()
+         }
+     }
+}
+
+/// This type represents an ssh-pty runned output
+pub type PtyRunned = Runned<TerminalContext<PathBuf, String, String>, Vec<Output>>; 
+
+
 //------------------------------------------------------------------------------------------- ERRORS
 
 
@@ -311,10 +354,6 @@ impl From<Error> for crate::primitives::Error{
         return crate::primitives::Error::Operation(format!("{}", other));
     }
 }
-
-
-//--------------------------------------------------------------------------------------- STRUCTURES
-
 
 
 //------------------------------------------------------------------------------------ PROXY-COMMAND
@@ -604,12 +643,22 @@ impl Remote {
         return Ok(session);
     }
 
-    /// Asynchronous function used to execute a command on the remote. It is meant as a lightweight 
-    /// execution facility, and as such, does only provide options
-    async fn exec(remote: Arc<Mutex<Remote>>, command: String) -> Result<Output, Error>{
-        debug!("Remote: Starting execution: {}", command);
+
+    /// Asynchronous function used to execute a command on the remote.
+    async fn exec(remote: Arc<Mutex<Remote>>, command: ExecRunnable) -> Result<ExecRunned, Error>{
         // Error -21 corresponds to missing available channels. It must be retried until an other 
         // execution comes to an end, and makes a channel available. 
+
+        // We unpack the arguments
+        let InContext{
+            context: TerminalContext{
+                cwd: Cwd(Folder{path: AbsolutePath{path: cwd}}),
+                envs: envs
+                }, 
+            inner: RawCommand(cmd)
+            } = command; 
+
+        // We acquire a channel.
         let ret = await_wouldblock_ssh!(await_retry_ssh!(
             {
                 remote.lock()
@@ -624,12 +673,22 @@ impl Remote {
             Ok(c) => c,
             Err(e) => return Err(Error::ExecutionFailed(format!("Failed to open channel: {}", e)))
         };
-        if let Err(e) = await_wouldblock_ssh!(channel.exec(&format!("{}\n", command))) {
-            return Err(Error::ExecutionFailed(format!("Failed to exec command {}: {}", command, e)))
-        }
-        if let Err(e) = await_wouldblock_ssh!(channel.send_eof()){
-            return Err(Error::ExecutionFailed(format!("Failed to send EOF: {}", e)))
-        }
+
+        // We set the environment variables
+        for EnvironmentVariable{name:n, value: v} in envs.iter(){
+            await_wouldblock_ssh!(channel.setenv(n, v))
+                .map_err(|e| Error::ExecutionFailed(format!("Failed to set envs: {}", e)))?;
+        } 
+            
+        // We execute the command in the cwd.
+        await_wouldblock_ssh!(channel.exec(&format!("cd {} && {}\n", cwd.to_str().unwrap(), cmd)))
+            .map_err(|e| Error::ExecutionFailed(format!("Failed to exec command {}: {}", cmd, e)))?;
+        
+        // We close
+        await_wouldblock_ssh!(channel.send_eof())
+            .map_err(|e| Error::ExecutionFailed(format!("Failed to send EOF: {}", e)))?;
+
+        // We read the output 
         let mut output = Output {
             status: ExitStatusExt::from_raw(911),
             stdout: Vec::new(),
@@ -638,8 +697,8 @@ impl Remote {
         let mut buf = [0 as u8; 8*1024];
         loop {
             let eof = channel.eof();
-            {   
-                let mut stream = channel.stream(0);
+            {   // extra scope allows to drop borrowed stream
+                let mut stream = channel.stream(0); // stream 0 is stdout
                 match await_wouldblock_io!(stream.read(&mut buf)){
                     Err(e) => return Err(Error::ExecutionFailed(format!("Failed to read stdout: {:?}", e))),
                     Ok(b) => {
@@ -647,8 +706,8 @@ impl Remote {
                     }
                 }
             }
-            {
-                let mut stream = channel.stream(1);
+            {  
+                let mut stream = channel.stream(1); // stream 1 is stderr
                 match await_wouldblock_io!(stream.read(&mut buf)){
                     Err(e) => return Err(Error::ExecutionFailed(format!("Failed to read stderr: {:?}", e))),
                     Ok(b) => {
@@ -656,133 +715,155 @@ impl Remote {
                     }
                 }
             }
-            if eof{
+            if eof{  // enf of field reached, everything was read.
                 break
-            } else {
-                let(tx, rx) = oneshot::channel();
-                     thread::spawn(move || {
-                         thread::sleep(Duration::from_nanos(1));
-                         tx.send(()).unwrap();
-                     });
-                 rx.await.unwrap();
+            } else { // if not, we wait for a while
+                async_sleep!(Duration::from_millis(1));
             }
         }
-        if let Err(e) = await_wouldblock_ssh!(channel.wait_eof()){
-            return Err(Error::ExecutionFailed(format!("Failed to wait eof: {}", e)))
-        }
-        if let Err(e) = await_wouldblock_ssh!(channel.close()) {
-            return Err(Error::ExecutionFailed(format!("Failed to close channel: {}", e)))
-        }
-        if let Err(e) = await_wouldblock_ssh!(channel.wait_close()) {
-            return Err(Error::ExecutionFailed(format!("Failed to wait to close channel: {}", e)));
-        }
-        let ecode = match await_wouldblock_ssh!(channel.exit_status()) {
-            Ok(c) => {
-                trace!("Remote: Found exit code {}", c); c
-            }
-            Err(e) => return Err(Error::ExecutionFailed(format!("Failed to get exit code: {}", e)))
-        };
-        output.status = ExitStatusExt::from_raw(ecode);
-        trace!("Remote: Returning output {:?}", output);
 
-        return Ok(output);
+        // We close the channel and retrieve the execution code
+        let ecode: Result<i32, ssh2::Error> = try {
+            await_wouldblock_ssh!(channel.wait_eof())?;
+            await_wouldblock_ssh!(channel.close())?;
+            await_wouldblock_ssh!(channel.wait_close())?;
+            await_wouldblock_ssh!(channel.exit_status())?
+        };
+        let ecode = ecode.map_err(|e| Error::ExecutionFailed(format!("Failed to close channel: {}", e)))?;
+        output.status = ExitStatusExt::from_raw(ecode);
+
+        return Ok(Runned{
+            context: (),
+            output
+        });
     }
 
     /// Asynchronous function used to execute an interactive command on the remote.
     async fn pty(
         remote: Arc<Mutex<Remote>>,
-        commands: Vec<String>,
+        commands: PtyRunnable,
         stdout_cb: Box<dyn Fn(Vec<u8>) + Send + 'static>,
         stderr_cb: Box<dyn Fn(Vec<u8>) + Send + 'static>,
-    ) -> Result<Output, Error> {
+    ) -> Result<PtyRunned, Error> {
+
+        // We unpack the pty runnable
+        let InContext{
+            context: TerminalContext{
+                cwd: Cwd(Folder{path: AbsolutePath{path: cwd}}),
+                envs: envs
+                }, 
+            inner:  cmds
+            } = commands; 
+        let cmds = cmds.into_iter()
+            .map(|RawCommand(c)| c)
+            .collect::<Vec<_>>();
+        if cmds.is_empty(){
+            return Err(Error::ExecutionFailed(format!("No command was provided.")))
+        }
+
         // Start shell remote
-        debug!("Remote: Starting pty: {:?}", commands);
-        let mut channel = start_pty_channel(&remote)
+        let mut channel = start_pty_channel(&remote, &envs)
             .await
             .map_err(|e| Error::ExecutionFailed(format!("Failed to start pty channel: {}", e)))?;
 
         // We setup the linux pty agent on the remote end.
-        if let Err(e) = await_wouldblock_io!(channel.write_all(LINUX_PTY_AGENT_PRELUDE.as_bytes())){
-            return Err(Error::ExecutionFailed(format!("Failed to request shell: {}", e)));
-        }        
+        await_wouldblock_io!(channel.write_all(LINUX_PTY_AGENT_PRELUDE.as_bytes()))
+            .map_err(|e| Error::ExecutionFailed(format!("Failed to request shell: {}", e)))?;
 
-        // We execute the first command
+        // We setup the context
+        let context = envs.iter()
+            .fold(format!("cd {}\n", cwd.to_str().unwrap()), |acc, EnvironmentVariable{name:n, value:v}|{
+                format!("{}{}={}\n", acc, n, v)
+            });
+        await_wouldblock_io!(channel.write_all(context.as_bytes()))
+            .map_err(|e| Error::ExecutionFailed(format!("Failed to set context up: {}", e)))?;
+
+        // We prepare execution
         let mut commands = commands;
-        let mut output = Output {
-            status: ExitStatusExt::from_raw(911),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        };
+        let mut outputs = vec!();
         let mut stream = BufReader::new(channel);
-        let mut buffer = String::new(); 
+        let mut buffer = String::new();
+        let out_cwd;
+        let mut out_envs = vec!();
 
-        let v = commands.remove(0);
-        if let Err(e) = await_wouldblock_io!(stream.get_mut().write_all(format!("run \"{}\"\n", v).as_bytes())){
-                return Err(Error::ExecutionFailed(format!("Failed to exec command '{}': {}", v, e)))
-        }
-
-        // We handle message and dispatch
-        loop {
-            buffer.clear();
-            match await_wouldblock_io!(stream.read_line(&mut buffer)){
-                Ok(_) => {
-                    trace!("Buffer: {:?}", buffer);
-                    // Case one: We receive an exit code
-                    if buffer.starts_with("RUNAWAY_ECODE: "){
-                        let ecode = buffer.replace("RUNAWAY_ECODE: ", "")
-                            .replace("\r\n", "")
-                            .parse::<i32>()
-                            .unwrap();
-                        output.status = ExitStatusExt::from_raw(ecode);
-                        // If non zero, we stop the execution now. 
-                        if ecode != 0{
-                            trace!("Remote: non zero exit code. Leaving...");
-                            break
-                        }
-
-                        // We write a new command if any
-                        if commands.len() == 0{
-                            trace!("Remote: no commands left. Leaving...");
-                            if let Err(e) = await_wouldblock_io!(stream.get_mut().write_all(format!("echo RUNAWAY_EOF: \n").as_bytes())){
-                                    return Err(Error::ExecutionFailed(format!("Failed to exec command '{}': {}", v, e)))
-                            }
-
-                        } else {
-                            trace!("Spawn new!");
-                            let v = commands.remove(0);
-                            if let Err(e) = await_wouldblock_io!(stream.get_mut().write_all(format!("run \"{}\"\n", v).as_bytes())){
-                                    return Err(Error::ExecutionFailed(format!("Failed to exec command '{}': {}", v, e)))
-                            }
-                        }
-                        await_wouldblock_io!(stream.get_mut().flush()).unwrap();
-                    // Case Two: We receive stdout message
-                    } else if buffer.starts_with("RUNAWAY_STDOUT: "){
-                        // We write the stdout message in the output command.
-                        let out = buffer.replace("RUNAWAY_STDOUT: ", "");
-                        output.stdout.write(out.as_bytes()).unwrap();
-                        stdout_cb(out.as_bytes().to_vec());
-                    // Case Three: We receive an stderr message
-                    } else if buffer.starts_with("RUNAWAY_STDERR: "){
-                        // We write the stderr message in the output command.
-                        let err = buffer.replace("RUNAWAY_STDERR: ", "");
-                        output.stderr.write(err.as_bytes()).unwrap();
-                        stderr_cb(err.as_bytes().to_vec());
-                    // Its over ! 
-                    } else if buffer.starts_with("RUNAWAY_EOF:"){
-                        break
+        // We execute commands
+        'commands: loop{ // We need named loops here
+            // We write next command
+            let cmd = cmds.remove(0);
+            await_wouldblock_io!(stream.get_mut().write_all(format!("run \"{}\"\n", cmd).as_bytes()))
+                .map_err(|e| Error::ExecutionFailed(format!("Failed to exec command '{}': {}", cmd, e)))?;
+            let mut output = Output {
+                status: ExitStatusExt::from_raw(0),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            };
+            // We read the output
+            'messages: loop{
+                buffer.clear();
+                await_wouldblock_io!(stream.read_line(&mut buffer))
+                    .map_err(|e| Error::ExecutionFailed(format!("Failed to read outputs: {}", e)))?;
+                // We receive an exit code
+                if buffer.starts_with("RUNAWAY_ECODE: "){
+                    let ecode = buffer.replace("RUNAWAY_ECODE: ", "")
+                        .replace("\r\n", "")
+                        .parse::<i32>()
+                        .unwrap();
+                    output.status = ExitStatusExt::from_raw(ecode);
+                    outputs.push(output);
+                    // If non zero, we stop the execution now. 
+                    if ecode != 0{
+                        trace!("Remote: non zero exit code. Leaving...");
+                        break 'commands
                     }
-                },
-                Err(e) => {
-                    return Err(Error::ExecutionFailed(format!("Failed to read outputs: {}", e)));
+                    // We write a new command if any
+                    if cmds.is_empty(){
+                        trace!("Remote: no commands left. Leaving...");
+                        await_wouldblock_io!(stream.get_mut().write_all("echo RUNAWAY_CWD: $(pwd)\n".as_bytes()))
+                            .map_err(|e| Error::ExecutionFailed(format!("Failed to finish exec : {}", e)))?;
+                        await_wouldblock_io!(stream.get_mut().write_all("env | sed 's/^/RUNAWAY_ENV: /g'\n".as_bytes()))
+                            .map_err(|e| Error::ExecutionFailed(format!("Failed to finish exec : {}", e)))?;
+                        await_wouldblock_io!(stream.get_mut().write_all("echo RUNAWAY_EOF: \n".as_bytes()))
+                            .map_err(|e| Error::ExecutionFailed(format!("Failed to finish exec : {}", e)))?;
+                        await_wouldblock_io!(stream.get_mut().flush()).unwrap();
+                    } else {
+                        break 'messages
+                    }
+                // We receive stdout message
+                } else if buffer.starts_with("RUNAWAY_STDOUT: "){
+                    // We write the stdout message in the output command.
+                    let out = buffer.replace("RUNAWAY_STDOUT: ", "");
+                    output.stdout.write(out.as_bytes()).unwrap();
+                    stdout_cb(out.as_bytes().to_vec());
+                // We receive an stderr message
+                } else if buffer.starts_with("RUNAWAY_STDERR: "){
+                    // We write the stderr message in the output command.
+                    let err = buffer.replace("RUNAWAY_STDERR: ", "");
+                    output.stderr.write(err.as_bytes()).unwrap();
+                    stderr_cb(err.as_bytes().to_vec());
+                // We receive a CWD message.
+                } else if buffer.starts_with("RUNAWAY_CWD:"){
+                    out_cwd = Cwd(Folder{path: 
+                    AbsolutePath{path: PathBuf::from(buffer.replace("RUNAWAY_CWD: ", ""))}});
+                // We receive a CWD message.
+                } else if buffer.starts_with("RUNAWAY_ENV:"){
+                    let env = buffer.replace("RUNAWAY_ENV: ", "")
+                        .split("=");
+                    let out_env = EnvironmentVariable{
+                        name:env.nth(0).unwrap().to_owned(),
+                        value:env.nth(1).unwrap().to_owned()};
+                    out_envs.push(out_env);
+                // We receive an EOF message.
+                } else if buffer.starts_with("RUNAWAY_EOF:"){
+                    break 'commands
                 }
-            }
+            }          
         }
 
         // We teardown the linux pty agent on the remote end.
-        if let Err(e) = await_wouldblock_io!(stream.get_mut().write_all(LINUX_PTY_AGENT_POSTLUDE.as_bytes())){
-            return Err(Error::ExecutionFailed(format!("Failed to exit shell: {}", e)));
-        }
+        await_wouldblock_io!(stream.get_mut().write_all(LINUX_PTY_AGENT_POSTLUDE.as_bytes()))
+            .map_err(|e| Error::ExecutionFailed(format!("Failed to exit shell: {}", e)))?;
 
+        // We close the 
         trace!("Remote: Waiting to stop.");
         let out: Result<(), ssh2::Error> = try {
             await_wouldblock_ssh!(stream.get_mut().wait_eof())?;
@@ -794,17 +875,23 @@ impl Remote {
         }
 
         // We cleanup the stdout
-        output.stdout = String::from_utf8(output.stdout)
-            .unwrap()
-            .replace("\r\n", "\n")
-            .as_bytes()
-            .to_vec();
-        output.stderr = String::from_utf8(output.stderr)
-            .unwrap()
-            .replace("\r\n", "\n")
-            .as_bytes()
-            .to_vec();
-        return Ok(output);
+        //output.stdout = String::from_utf8(output.stdout)
+        //    .unwrap()
+        //    .replace("\r\n", "\n")
+        //    .as_bytes()
+        //    .to_vec();
+        //output.stderr = String::from_utf8(output.stderr)
+        //    .unwrap()
+        //    .replace("\r\n", "\n")
+        //    .as_bytes()
+        //    .to_vec();
+        return Ok(Runned{
+            context: TerminalContext{
+                cwd: out_cwd, 
+                envs: out_envs
+            },
+            output: outputs
+        });
     }
 
     
@@ -952,8 +1039,8 @@ impl Remote {
 
 /// The operation inputs, sent by the outer futures and processed by inner thread.
 enum OperationInput {
-    Exec(String),
-    Pty(Vec<String>, Box<dyn Fn(Vec<u8>)+Send+'static>, Box<dyn Fn(Vec<u8>)+Send+'static>),
+    Exec(ExecRunnable),
+    Pty(PtyRunnable, Box<dyn Fn(Vec<u8>)+Send+'static>, Box<dyn Fn(Vec<u8>)+Send+'static>),
     ScpSend(PathBuf, PathBuf),
     ScpFetch(PathBuf, PathBuf)
 }
@@ -972,8 +1059,8 @@ impl std::fmt::Debug for OperationInput{
 /// The operation outputs, sent by the inner futures and processed by the outer thread.
 #[derive(Debug)]
 enum OperationOutput {
-    Exec(Result<Output, Error>),
-    Pty(Result<Output, Error>),
+    Exec(Result<ExecRunned, Error>),
+    Pty(Result<PtyRunned, Error>),
     ScpSend(Result<(), Error>),
     ScpFetch(Result<(), Error>)
 }
@@ -1097,8 +1184,8 @@ impl RemoteHandle {
 
     /// A function that returns a future that resolves in a result over an output, after the command
     /// was executed.
-    pub fn async_exec(&self, command: String) -> impl Future<Output=Result<Output, Error>> {
-        debug!("RemoteHandle: Building async_exec future to command: {}", command);
+    pub fn async_exec(&self, command: ExecRunnable) -> impl Future<Output=Result<ExecRunned, Error>> {
+        debug!("RemoteHandle: Building async_exec future to command: {:?}", command);
         let mut chan = self.sender.clone();
         async move {
             let (sender, receiver) = oneshot::channel();
@@ -1119,10 +1206,10 @@ impl RemoteHandle {
     /// was executed in interactive mode. Callbacks can be provided to be called on stdout and 
     /// stderr messages.  
     pub fn async_pty(&self, 
-        commands: Vec<String>, 
+        commands: PtyRunnable, 
         stdout_cb: Option<Box<dyn Fn(Vec<u8>)+Send+'static>>,
         stderr_cb: Option<Box<dyn Fn(Vec<u8>)+Send+'static>>) 
-        -> impl Future<Output=Result<Output, Error>> {
+        -> impl Future<Output=Result<PtyRunned, Error>> {
         debug!("RemoteHandle: Building async_pty future to commands: {:?}", commands);
         let mut chan = self.sender.clone();
         let mut stdout_cb = stdout_cb;
@@ -1195,8 +1282,11 @@ impl RemoteHandle {
 
 //---------------------------------------------------------------------------------------- FUNCTIONS
 
-async fn start_pty_channel(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Channel<'_>, ssh2::Error>{
+async fn start_pty_channel<'a>(remote: &'a Arc<Mutex<Remote>>, envs: &Vec<EnvironmentVariable<String, String>>) -> Result<ssh2::Channel<'a>, ssh2::Error>{
     let mut channel = await_wouldblock_ssh!(await_retry_ssh!({remote.lock().await.session().channel_session()},-21))?;
+    for EnvironmentVariable{name:n, value:v} in envs.iter(){
+        await_wouldblock_ssh!(channel.setenv(n,v))?
+    }
     await_wouldblock_ssh!(await_retry_n_ssh!(channel.request_pty("ansi", None, Some((0,0,0,0))), 10, -14))?;
     await_wouldblock_ssh!(channel.shell())?;
     Ok(channel)
@@ -1213,6 +1303,7 @@ mod test {
 
     use super::*;
     use crate::ssh::config::SshProfile;
+    use crate::misc;
 
     fn init_logger() {
         std::env::set_var("RUST_LOG", "liborchestra::ssh=trace");
@@ -1232,8 +1323,7 @@ mod test {
     #[test]
     fn test_async_exec() {
         use futures::executor::block_on;
-        //init_logger();
-        async fn connect_and_ls() {
+        async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
                 hostname: Some("127.0.0.1".to_owned()),
@@ -1242,20 +1332,41 @@ mod test {
                 proxycommand: Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
             };
             let remote = RemoteHandle::spawn(profile).unwrap();
-            let output = remote.async_exec("echo kikou && sleep 1 && { echo hello! 1>&2 }".into()).await.unwrap();
-            println!("executed and resulted in {:?}", output);
+            let mut exec_runnable = ExecRunnable::default(); 
+            exec_runnable.inner = RawCommand("echo kikou && sleep 1 && { echo hello! 1>&2 }".into());
+            let Runned{context:_, output: output} = remote.async_exec(exec_runnable).await.unwrap();
             assert_eq!(String::from_utf8(output.stdout).unwrap(), "kikou\n");
             assert_eq!(String::from_utf8(output.stderr).unwrap(), "hello!\n");
             assert_eq!(output.status.code().unwrap(), 0);
         }
-        block_on(connect_and_ls());
+        block_on(test());
     }
 
     #[test]
-    fn test_async_pty() {
+    fn test_async_exec_context() {
         use futures::executor::block_on;
-        init_logger();
-        async fn connect_and_ls() {
+        async fn test() {
+            let profile = config::SshProfile{
+                name: "test".to_owned(),
+                hostname: Some("127.0.0.1".to_owned()),
+                user: Some("apere".to_owned()),
+                port: None,
+                proxycommand: Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
+            };
+            let remote = RemoteHandle::spawn(profile).unwrap();
+            let mut exec_runnable = ExecRunnable::default(); 
+            exec_runnable.inner = RawCommand("echo $(pwd) && echo $RW_TEST".into());
+            let Runned{context:_, output: output} = remote.async_exec(exec_runnable).await.unwrap();
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), "kikou\n");
+            assert_eq!(output.status.code().unwrap(), 0);
+        }
+        block_on(test());
+    }
+
+    #[test]
+    fn test_async_pty_order() {
+        use futures::executor::block_on;
+        async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
                 hostname: Some("localhost".to_owned()),
@@ -1265,58 +1376,131 @@ mod test {
             };
             let remote = RemoteHandle::spawn(profile).unwrap();
             // Check order of outputs
-            let output = remote.async_pty(vec!["echo 1".into(), 
-                                               "echo 2".into(),
-                                               "echo 3".into(),
-                                               "echo 4".into(),
-                                               "echo 5".into(),
-                                               "echo 6".into(),
-                                               "echo 7".into(),
-                                               "echo 8".into(),
-                                               "echo 9".into(),
-                                               "echo 10".into(),
-                                               "echo 11".into(),
-                                               "echo 12 && echo 13".into()], 
-                None, None).await.unwrap();
-            println!("executed and resulted in {:?}", output);
+            let mut pty_runnable = PtyRunnable::default();
+            pty_runnable.inner = vec![RawCommand("echo 1".into()), 
+                          RawCommand("echo 2".into()),
+                          RawCommand("echo 3".into()),
+                          RawCommand("echo 4".into()),
+                          RawCommand("echo 5".into()),
+                          RawCommand("echo 6".into()),
+                          RawCommand("echo 7".into()),
+                          RawCommand("echo 8".into()),
+                          RawCommand("echo 9".into()),
+                          RawCommand("echo 10".into()),
+                          RawCommand("echo 11".into()),
+                          RawCommand("echo 12 && echo 13".into())];
+            let Runned{context:_, output:outputs} = remote.async_pty(pty_runnable, None, None).await.unwrap();
+            let output = misc::compact_outputs(outputs);
             assert_eq!(String::from_utf8(output.stdout).unwrap(), "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n");
             assert_eq!(output.status.code().unwrap(), 0);
+       }
+        block_on(test());
+    }
 
-            // Check continuation of cds
-            let output = remote.async_pty(vec!["cd /tmp".into(), 
-                                               "pwd".into()], 
-                None, None).await.unwrap();
-            println!("executed and resulted in {:?}", output);
+    #[test]
+    fn test_async_pty_cds() {
+        use futures::executor::block_on;
+        async fn test() {
+            let profile = config::SshProfile{
+                name: "test".to_owned(),
+                hostname: Some("localhost".to_owned()),
+                user: Some("apere".to_owned()),
+                port: Some(22),
+                proxycommand: None,
+            };
+            let remote = RemoteHandle::spawn(profile).unwrap();
+            // Check order of outputs
+            let mut pty_runnable = PtyRunnable::default();
+            pty_runnable.inner = vec![RawCommand("cd /tmp".into()), 
+                          RawCommand("pwd".into())];
+            let Runned{context:_, output:outputs} = remote.async_pty(pty_runnable, None, None).await.unwrap();
+            let output = misc::compact_outputs(outputs);
             assert_eq!(String::from_utf8(output.stdout).unwrap(), "/tmp\n");
             assert_eq!(output.status.code().unwrap(), 0);
+       }
+        block_on(test());
+    }
 
-            // Check continuation of cds
-            let output = remote.async_pty(vec!["a=KIKOU".into(), 
-                                               "echo $a".into()], 
-                None, None).await.unwrap();
-            println!("executed and resulted in {:?}", output);
+    #[test]
+    fn test_async_pty_envs() {
+        use futures::executor::block_on;
+        async fn test() {
+            let profile = config::SshProfile{
+                name: "test".to_owned(),
+                hostname: Some("localhost".to_owned()),
+                user: Some("apere".to_owned()),
+                port: Some(22),
+                proxycommand: None,
+            };
+            let remote = RemoteHandle::spawn(profile).unwrap();
+            // Check order of outputs
+            let mut pty_runnable = PtyRunnable::default();
+            pty_runnable.inner = vec![RawCommand("a=KIKOU".into()), 
+                          RawCommand("echo $a".into())];
+            let Runned{context:_, output:outputs} = remote.async_pty(pty_runnable, None, None).await.unwrap();
+            let output = misc::compact_outputs(outputs);
             assert_eq!(String::from_utf8(output.stdout).unwrap(), "KIKOU\n");
             assert_eq!(output.status.code().unwrap(), 0);
-
-
-            // Check separation of stdout stderr
-            let output = remote.async_pty(vec!["echo kikou".into(), 
-                                               "echo 'hello\\!' 1>&2".into()], 
-                None, None).await.unwrap();
-            println!("executed and resulted in {:?}", output);
-            assert_eq!(String::from_utf8(output.stdout).unwrap(), "kikou\n");
-            assert_eq!(String::from_utf8(output.stderr).unwrap(), "hello!\n");
-            assert_eq!(output.status.code().unwrap(), 0);
-
-        }
-        block_on(connect_and_ls());
+       }
+        block_on(test());
     }
+
+    #[test]
+    fn test_async_pty_stderr() {
+        use futures::executor::block_on;
+        async fn test() {
+            let profile = config::SshProfile{
+                name: "test".to_owned(),
+                hostname: Some("localhost".to_owned()),
+                user: Some("apere".to_owned()),
+                port: Some(22),
+                proxycommand: None,
+            };
+            let remote = RemoteHandle::spawn(profile).unwrap();
+            // Check order of outputs
+            let mut pty_runnable = PtyRunnable::default();
+            pty_runnable.inner = vec![RawCommand("echo kikou_stdout".into()), 
+                          RawCommand("echo kikou_stderr 1>&2".into())];
+            let Runned{context:_, output:outputs} = remote.async_pty(pty_runnable, None, None).await.unwrap();
+            let output = misc::compact_outputs(outputs);
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), "kikou_stdout\n");
+            assert_eq!(String::from_utf8(output.stderr).unwrap(), "kikou_stderr\n");
+            assert_eq!(output.status.code().unwrap(), 0);
+       }
+        block_on(test());
+    }
+
+    #[test]
+    fn test_async_pty_context() {
+        use futures::executor::block_on;
+        async fn test() {
+            let profile = config::SshProfile{
+                name: "test".to_owned(),
+                hostname: Some("localhost".to_owned()),
+                user: Some("apere".to_owned()),
+                port: Some(22),
+                proxycommand: None,
+            };
+            let remote = RemoteHandle::spawn(profile).unwrap();
+            // Check order of outputs
+            let mut pty_runnable = PtyRunnable::default();
+            pty_runnable.context.cwd = Cwd(Folder{path: AbsolutePath{path: "/tmp".into()}});
+            pty_runnable.context.envs.push(EnvironmentVariable{name:"RW_TEST".into(), value:"VAL1".into()});
+            let Runned{context:context, output:outputs} = remote.async_pty(pty_runnable, None, None).await.unwrap();
+            let output = misc::compact_outputs(outputs);
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), "/tmp\nVAL1\n");
+            assert!(context.envs.contains(&EnvironmentVariable{name:"RW_TEST".into(), value:"VAL2".into()}));
+            assert_eq!(output.status.code().unwrap(), 0);
+       }
+        block_on(test());
+    }
+ 
 
     #[test]
     fn test_async_scp_send() {
         use futures::executor::block_on;
         init_logger();
-        async fn connect_and_scp_send() {
+        async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
                 hostname: Some("127.0.0.1".to_owned()),
@@ -1347,14 +1531,14 @@ mod test {
             std::fs::remove_file("/tmp/local.txt").unwrap();
             std::fs::remove_file("/tmp/remote.txt").unwrap();
         }
-        block_on(connect_and_scp_send());
+        block_on(test());
     }
 
     #[test]
     fn test_async_scp_fetch(){
         use futures::executor::block_on;
         init_logger();
-        async fn connect_and_scp_fetch() {
+        async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
                 hostname: Some("127.0.0.1".to_owned()),
@@ -1385,7 +1569,7 @@ mod test {
             std::fs::remove_file("/tmp/local.txt").unwrap();
             std::fs::remove_file("/tmp/remote.txt").unwrap();
         }
-        block_on(connect_and_scp_fetch());        
+        block_on(test());        
     }
 
     #[test]
@@ -1401,19 +1585,22 @@ mod test {
             proxycommand: None // Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
         };
         let remote = RemoteHandle::spawn(profile).unwrap();
-        async fn connect_and_ls(remote: RemoteHandle) -> std::process::Output{
-            return remote.async_exec("echo 1 && sleep 1 && echo 2".into()).await.unwrap()
+        async fn test(remote: RemoteHandle) -> ExecRunned{
+            let mut exec_runnable = ExecRunnable::default();
+            exec_runnable.inner = RawCommand("echo 1 && sleep 1 && echo 2".into());
+            return remote.async_exec(exec_runnable).await.unwrap()
         }
         use futures::executor;
         use futures::task::SpawnExt;
         let mut executor = executor::ThreadPool::new().unwrap();
         let mut handles = Vec::new();
         for _ in 1..50{
-            handles.push(executor.spawn_with_handle(connect_and_ls(remote.clone())).unwrap())
+            handles.push(executor.spawn_with_handle(test(remote.clone())).unwrap())
         }
         let bef = std::time::Instant::now();
         for handle in handles{
-            assert_eq!(String::from_utf8(executor.run(handle).stdout).unwrap(), "1\n2\n".to_owned());
+            let Runned{context:_, output} = executor.run(handle);
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), "1\n2\n".to_owned());
         }
         let dur = std::time::Instant::now().duration_since(bef);
         println!("Duration: {:?}", dur);
@@ -1433,8 +1620,12 @@ mod test {
             proxycommand: None // Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
         };
         let remote = RemoteHandle::spawn(profile).unwrap();
-        async fn connect_and_ls(remote: RemoteHandle) -> std::process::Output{
-            return remote.async_pty(vec!["echo 1 && sleep 1 && echo 2".into()], None, None)
+        async fn test(remote: RemoteHandle) -> PtyRunned{
+            let mut pty_runnable = PtyRunnable::default();
+            pty_runnable.inner.append(&mut vec![RawCommand("echo 1".into()), 
+                          RawCommand("sleep 1".into()),
+                          RawCommand("echo 2".into())]);
+            return remote.async_pty(pty_runnable, None, None)
                 .await.unwrap()
         }
         use futures::executor;
@@ -1442,11 +1633,13 @@ mod test {
         let mut executor = executor::ThreadPool::new().unwrap();
         let mut handles = Vec::new();
         for _ in 1..10{
-            handles.push(executor.spawn_with_handle(connect_and_ls(remote.clone())).unwrap())
+            handles.push(executor.spawn_with_handle(test(remote.clone())).unwrap())
         }
         let bef = std::time::Instant::now();
         for handle in handles{
-            assert_eq!(String::from_utf8(executor.run(handle).stdout).unwrap(), "1\n2\n".to_owned());
+            let Runned{context: _, output: outputs} = executor.run(handle);
+            let output = misc::compact_outputs(outputs);
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), "1\n2\n".to_owned());
         }
         let dur = std::time::Instant::now().duration_since(bef);
         println!("Duration: {:?}", dur);
