@@ -93,7 +93,7 @@ macro_rules! await_wouldblock_io {
             loop{
                 match $expr {
                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        async_sleep!(Duration::from_nanos(1))
+                        async_sleep!(Duration::from_millis(1))
                     }
                     res => break res,
                 }
@@ -111,10 +111,10 @@ macro_rules! await_wouldblock_ssh {
             loop{
                 match $expr {
                     Err(ref e) if e.code() == -37 => {
-                        async_sleep!(Duration::from_nanos(1))
+                        async_sleep!(Duration::from_millis(1))
                     }
                     Err(ref e) if e.code() == -21 => {
-                        async_sleep!(Duration::from_nanos(1))
+                        async_sleep!(Duration::from_millis(1))
                     }
                     res => break res,
                 }
@@ -198,15 +198,14 @@ macro_rules! await_retry_ssh {
 
 /// Bash pty agent, injected in the pty before executing the commands.
 static BASH_PTY_AGENT: &str = "
-# Function that initializes the agent.
 rw_init() {
     # We remove the prompt banner
     export PS1=
     # We disable stdin echo
-    stty -echo 
+    stty -echo
     # We generate two fifo that will be used to format stdout messages and stderr messages
-    export stdout_fifo=/tmp/$RANDOM
-    export stderr_fifo=/tmp/$RANDOM
+    export stdout_fifo=/tmp/$(uuidgen)
+    export stderr_fifo=/tmp/$(uuidgen)
     mkfifo $stdout_fifo
     mkfifo $stderr_fifo
 }
@@ -220,20 +219,23 @@ rw_run() {
     # which are unix locks using file descriptors.
 
     # We create the files
-    way_in_lock=/tmp/$RANDOM
-    way_out_lock=/tmp/$RANDOM
+    way_in_lock=/tmp/$(uuidgen)
+    way_out_lock=/tmp/$(uuidgen)
+
     # We create the file descriptors
     exec 201>$way_in_lock
     exec 202>$way_out_lock
+
     # We lock the way_in_lock in exclusive mode. This will prevent the stdout and stderr handlers to 
     # break before the command completed.
     flock -x 201
 
     # We start a subcommand that handles the stdout messages on the stdout_fifo.
-
+    echo Starting stdout handler
     # First we lock the way_out_lock in shared mode to prevent the command from returning before all 
     # messages were handled.
-    (flock -s 202;
+    (
+    flock -s 202;
     while true; do
         # We format the line
         if read line ; then
@@ -250,8 +252,9 @@ rw_run() {
     stdout_pid=$!
 
     # We start the same subcommand for the stderr.
-
-    (flock -s 202;
+    echo Starting stderr handler
+    (
+    flock -s 202;
     while true; do
         if read line ; then
             echo RUNAWAY_STDERR: $line;
@@ -273,20 +276,17 @@ rw_run() {
     # We release the exclusive lock on the way_in_lock. This has the effect to break the loops in 
     # the stdout and stderr handlers.
     flock -u 201
+
     # We wait to acquire an exclusive lock on the way_out_lock. This can only occur after the two 
     # handlers broke and released their shared lock.
     flock -x 202
-
-    # We echo the exit code.
-    echo RUNAWAY_ECODE: $RUNAWAY_ECODE
 
     # We remove the locks 
     rm $way_in_lock
     rm $way_out_lock
 
-    # We make sure the handlers are killed.
-    kill -9 $stdout_pid ;
-    kill -9 $stderr_pid ;
+    # We echo the exit code.
+    echo RUNAWAY_ECODE: $RUNAWAY_ECODE
 
 }
 
@@ -1101,7 +1101,7 @@ async fn setup_pty(channel: &mut ssh2::Channel<'_>, cwd: &PathBuf, envs: &Enviro
     trace!("Remote: Setting up a pty channel");
 
     // We make sure we run on bash
-    await_wouldblock_io!(channel.write_all("bash\n".as_bytes()))
+    await_wouldblock_io!(channel.write_all("sh\n".as_bytes()))
         .map_err(|e| Error::ExecutionFailed(format!("Failed to start bash: {}", e)))?;
 
     // We inject the linux pty agent on the remote end.
@@ -1113,7 +1113,7 @@ async fn setup_pty(channel: &mut ssh2::Channel<'_>, cwd: &PathBuf, envs: &Enviro
     // We setup the context
     let context = envs.iter()
         .fold(format!("cd {}\n", cwd.to_str().unwrap()), |acc, (EnvironmentKey(n), EnvironmentValue(v))|{
-            format!("{}{}={}\n", acc, n, v)
+            format!("{}export {}={}\n", acc, n, v)
         });
     await_wouldblock_io!(channel.write_all(context.as_bytes()))
         .map_err(|e| Error::ExecutionFailed(format!("Failed to set context up: {}", e)))?;
@@ -1160,15 +1160,15 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
             buffer.clear();
             await_wouldblock_io!(stream.read_line(&mut buffer))
                 .map_err(|e| Error::ExecutionFailed(format!("Failed to read outputs: {}", e)))?;
+            buffer = buffer.replace("\r\n", "\n");
             // We receive an exit code
             if buffer.starts_with("RUNAWAY_ECODE: "){
                 let ecode = buffer.replace("RUNAWAY_ECODE: ", "")
-                    .replace("\r\n", "")
+                    .replace("\n", "")
                     .parse::<i32>()
                     .unwrap();
                 let mut output = outputs.last_mut().unwrap();
                 output.status = ExitStatusExt::from_raw(ecode);
-                clean_output(output);
                 // If non zero, we stop the execution now. 
                 if ecode != 0{
                     break 'commands
@@ -1199,7 +1199,7 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
             // We receive a env message.
             } else if buffer.starts_with("RUNAWAY_ENV:"){
                 let env = buffer.replace("RUNAWAY_ENV: ", "")
-                    .replace("\r\n", "")
+                    .replace("\n", "")
                     .split('=')
                     .map(str::to_owned)
                     .collect::<Vec<String>>();
@@ -1209,6 +1209,7 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
             } else if buffer.starts_with("RUNAWAY_EOF:"){
                 break 'commands
             }
+
         }
     }
 
@@ -1396,23 +1397,6 @@ async fn process_scp_fetch(channel: &mut ssh2::Channel<'_>,
 }
 
 
-// Cleans output of occurences of \r\n
-fn clean_output(output:&mut Output){
-    output.stdout = String::from_utf8(output.stdout.clone())
-        .unwrap()
-        .replace("\r\n", "\n")
-        .as_bytes()
-        .to_vec();
-    output.stderr = String::from_utf8(output.stderr.clone())
-        .unwrap()
-        .replace("\r\n", "\n")
-        .as_bytes()
-        .to_vec();
-}
-
-
-
-
 //--------------------------------------------------------------------------------------------- TEST
 
 
@@ -1424,7 +1408,7 @@ mod test {
     use crate::misc;
 
     fn init_logger() {
-        std::env::set_var("RUST_LOG", "liborchestra::ssh=trace");
+        std::env::set_var("RUST_LOG", "liborchestra=trace");
         let _ = env_logger::builder().is_test(true).try_init();
     }
 
@@ -1470,8 +1454,8 @@ mod test {
                 name: "test".to_owned(),
                 hostname: Some("localhost".to_owned()),
                 user: Some("apere".to_owned()),
-                port: Some(22),
-                proxycommand: None,
+                port: None,
+                proxycommand: Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
             };
             let remote = RemoteHandle::spawn(profile).unwrap();
             // Check order of outputs
@@ -1504,8 +1488,8 @@ mod test {
                 name: "test".to_owned(),
                 hostname: Some("localhost".to_owned()),
                 user: Some("apere".to_owned()),
-                port: Some(22),
-                proxycommand: None,
+                port: None,
+                proxycommand: Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
             };
             let remote = RemoteHandle::spawn(profile).unwrap();
             // Check order of outputs
@@ -1528,8 +1512,8 @@ mod test {
                 name: "test".to_owned(),
                 hostname: Some("localhost".to_owned()),
                 user: Some("apere".to_owned()),
-                port: Some(22),
-                proxycommand: None,
+                port: None,
+                proxycommand: Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
             };
             let remote = RemoteHandle::spawn(profile).unwrap();
             // Check order of outputs
@@ -1552,8 +1536,8 @@ mod test {
                 name: "test".to_owned(),
                 hostname: Some("localhost".to_owned()),
                 user: Some("apere".to_owned()),
-                port: Some(22),
-                proxycommand: None,
+                port: None,
+                proxycommand: Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
             };
             let remote = RemoteHandle::spawn(profile).unwrap();
             // Check order of outputs
@@ -1578,8 +1562,8 @@ mod test {
                 name: "test".to_owned(),
                 hostname: Some("localhost".to_owned()),
                 user: Some("apere".to_owned()),
-                port: Some(22),
-                proxycommand: None,
+                port: None,
+                proxycommand: Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
             };
             let remote = RemoteHandle::spawn(profile).unwrap();
             // Check order of outputs
