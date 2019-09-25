@@ -43,7 +43,7 @@ pub mod hosts;
 pub mod repository;
 pub mod misc;
 pub mod primitives;
-pub mod application;
+//pub mod application;
 #[macro_use]
 pub mod error;
 
@@ -110,6 +110,8 @@ use error::Error;
 // logic is made explicit in the function signature.
 
 use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::hash::Hash;
 
 /// A trait alias for AsRef<Path>
 pub trait AsPa = AsRef<Path>;
@@ -138,28 +140,26 @@ pub trait AsPa = AsRef<Path>;
 pub struct RelativePath<R: AsPa, P: AsPa> {root: R, path: P}
 impl<R: AsPa, P: AsPa> RelativePath<R, P>{
     pub fn to_absolute(&self) -> AbsolutePath<PathBuf>{
-        AbsolutePath{
-            path: self.root.as_ref().join(self.path.as_ref()),
-        }
+        AbsolutePath(self.root.as_ref().join(self.path.as_ref()))
     }
 }
 
 /// Represents a path expressed in a absolute fashion.
-#[derive(Debug)]
-pub struct AbsolutePath<P: AsPa> {path: P}
+#[derive(Debug, Clone)]
+pub struct AbsolutePath<P: AsPa>(P);
 
 /// Represents a file.
-pub struct File<P>{path: P}
+pub struct File<P>(P);
 
 /// Represents a folder.
-#[derive(Debug)]
-pub struct Folder<P>{path: P}
+#[derive(Debug, Clone)]
+pub struct Folder<P>(P);
 
 /// Represents an archive, which unites a file and a hash value.
 pub struct Archive<P>{file: File<P>, hash: u64}
 
 /// Represents an ignore file.
-pub struct Ignore<P>{file: File<P>}
+pub struct Ignore<P>(File<P>);
 
 /// Represents a located resource. This allows to attach the location of any resource with it.
 pub struct Located<L, C> {
@@ -180,7 +180,7 @@ pub struct RemoteLocation<M>{marker: M, node: ssh::RemoteHandle}
 pub type Remote<M, C> = Located<RemoteLocation<M>, C>;
 
 /// Represents a command
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RawCommand<S: AsRef<str>>(S);
 impl<S: AsRef<str>> From<S> for RawCommand<S>{
     fn from(s: S) -> Self{
@@ -188,46 +188,36 @@ impl<S: AsRef<str>> From<S> for RawCommand<S>{
     }
 }
 
-/// Represents any O that exist within a context C.
-#[derive(Debug, Clone)]
-pub struct InContext<C, I>{
-    context: C,
-    inner: I,
-}
-impl<C, I> InContext<C, I>{
-    pub fn map<O, F: FnOnce(I) -> O>(self, f: F) -> InContext<C,O>{
-        let InContext{context, inner} = self;
-        InContext{
-            context,
-            inner: f(inner),
-        }
-    }
 
-    pub fn map_context<K, F: FnOnce(C) -> K>(self, f: F) -> InContext<K,O>{
-        let InContext{context, inner} = self;
-        InContext{
-            context: f(context),
-            inner,
-        }
-    }
-}
 
-/// Represents an environment variable
-#[derive(Debug, PartialEq, Clone)]
-pub struct EnvironmentVariable<N: AsRef<str>, V: AsRef<str>>{
-    name: N,
-    value:V, 
-}
+/// Represents an environment variable key
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+pub struct EnvironmentKey<S: AsRef<str>>(S);
+
+/// Represents an environment variable value
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnvironmentValue<S: AsRef<str>>(S);
+
+/// Represents a set of environment variables
+pub type EnvironmentStore = HashMap<EnvironmentKey<String>, EnvironmentValue<String>>;
 
 /// Represents a Current Working Directory
-#[derive(Debug)]
-pub struct Cwd<P>(Folder<P>);
+#[derive(Debug, Clone)]
+pub struct Cwd<P: AsPa>(AbsolutePath<P>);
 
 /// Represents a classic terminal context made out of a cwd and some  enrironment variables
-#[derive(Debug)]
-pub struct TerminalContext<P:AsPa, S:AsRef<str>, T:AsRef<str>>{
-    cwd: Cwd<AbsolutePath<P>>,
-    envs: Vec<EnvironmentVariable<S,T>>
+#[derive(Debug, Clone)]
+pub struct TerminalContext<P:AsPa>{
+    cwd: Cwd<P>,
+    envs: EnvironmentStore
+}
+impl Default for TerminalContext<PathBuf>{
+     fn default() -> Self{
+        TerminalContext{
+            cwd: Cwd(AbsolutePath(PathBuf::from("/"))),
+            envs: EnvironmentStore::new(),
+        }
+     }
 }
 
 
