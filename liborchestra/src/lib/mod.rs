@@ -1,7 +1,6 @@
 //! liborchestra/mod.rs
 //! Author: Alexandre Péré
-#![feature(trace_macros, async_await, result_map_or_else, trait_alias,
-try_blocks)]
+#![feature(trace_macros, async_await, result_map_or_else, trait_alias, try_blocks)]
 //! Liborchestra gives tools to manipulate expegit repositories, run scripts on user-defined hosts,
 //! and orchestrate the executions of batches of experiments under variations of parameters.
 //! 
@@ -44,7 +43,7 @@ pub mod hosts;
 pub mod repository;
 pub mod misc;
 pub mod primitives;
-pub mod application;
+//pub mod application;
 #[macro_use]
 pub mod error;
 
@@ -101,3 +100,133 @@ pub static FEATURES_RPATH: &str = ".features";
 
 
 use error::Error;
+
+
+//-------------------------------------------------------------------------------------------- TYPES
+
+// Using types to represent a part of your program logic allows it to be checked by the compiler 
+// before being executed. This is pretty interesting in terms of safety and is one of the 'good 
+// points' of strongly typed functional languages, plus it makes the api more readable, as part of 
+// logic is made explicit in the function signature.
+
+use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::hash::Hash;
+
+/// A trait alias for AsRef<Path>
+pub trait AsPa = AsRef<Path>;
+
+
+// For instance, for paths, we prefer to express the logic of a path being absolute or relative in 
+// the type system, to avoid this kind of errors at runtime.
+
+
+/// Represents a path expressed in a relative fashion. Note that you can use the 'R' generic to 
+/// enforce a set of paths to be expressed at the same root.
+/// ```
+/// pub struct HomePath(PathBuf);
+/// impl Asref<Path> for HomePath{ // implement traits } 
+/// let home = HomePath(PathBuf::from(r"/home/user"));
+/// 
+/// let bashrc = RelativePath{root: home, path: PathBuf::from(r".bashrc")};
+/// let zshhrc = RelativePath{root: home, path: PathBuf::from(r".zshrc")};
+/// let fishrc = RelativePath{root: PathBuf::from(r"/home/user"), path: PathBuf::from(r".fishrc")};
+/// 
+/// let mut rc_list = Vec::new();
+/// rc_list.push(bashrc);
+/// rc_list.push(zshrc); // this works, as bashrc and zshrc have compatible signatures.
+/// rc_list.push(fishrc); // this is caught by the compiler, as signatures are incompatible.
+/// ``` 
+pub struct RelativePath<R: AsPa, P: AsPa> {root: R, path: P}
+impl<R: AsPa, P: AsPa> RelativePath<R, P>{
+    pub fn to_absolute(&self) -> AbsolutePath<PathBuf>{
+        AbsolutePath(self.root.as_ref().join(self.path.as_ref()))
+    }
+}
+
+/// Represents a path expressed in a absolute fashion.
+#[derive(Debug, Clone)]
+pub struct AbsolutePath<P: AsPa>(P);
+
+/// Represents a file.
+pub struct File<P>(P);
+
+/// Represents a folder.
+#[derive(Debug, Clone)]
+pub struct Folder<P>(P);
+
+/// Represents an archive, which unites a file and a hash value.
+pub struct Archive<P>{file: File<P>, hash: u64}
+
+/// Represents an ignore file.
+pub struct Ignore<P>(File<P>);
+
+/// Represents a located resource. This allows to attach the location of any resource with it.
+pub struct Located<L, C> {
+    location: L, 
+    content: C
+}
+
+/// Represents the local host
+pub struct LocalLocation;
+
+/// Represents any C located on the local host.
+pub type Local<C> = Located<LocalLocation, C>;
+
+/// Represents a remote host marked with the marker M.
+pub struct RemoteLocation<M>{marker: M, node: ssh::RemoteHandle}
+
+/// Represents any C located on a remote M.
+pub type Remote<M, C> = Located<RemoteLocation<M>, C>;
+
+/// Represents a command
+#[derive(Debug, Clone)]
+pub struct RawCommand<S: AsRef<str>>(S);
+impl<S: AsRef<str>> From<S> for RawCommand<S>{
+    fn from(s: S) -> Self{
+        RawCommand(s)
+    }
+}
+
+
+
+/// Represents an environment variable key
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+pub struct EnvironmentKey<S: AsRef<str>>(S);
+
+/// Represents an environment variable value
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnvironmentValue<S: AsRef<str>>(S);
+
+/// Represents a set of environment variables
+pub type EnvironmentStore = HashMap<EnvironmentKey<String>, EnvironmentValue<String>>;
+
+/// Represents a Current Working Directory
+#[derive(Debug, Clone)]
+pub struct Cwd<P: AsPa>(AbsolutePath<P>);
+
+/// Represents a classic terminal context made out of a cwd and some  enrironment variables
+#[derive(Debug, Clone)]
+pub struct TerminalContext<P:AsPa>{
+    cwd: Cwd<P>,
+    envs: EnvironmentStore
+}
+impl Default for TerminalContext<PathBuf>{
+     fn default() -> Self{
+        TerminalContext{
+            cwd: Cwd(AbsolutePath(PathBuf::from("/"))),
+            envs: EnvironmentStore::new(),
+        }
+     }
+}
+
+
+pub struct LocalCodeRoot<P:AsRef<Path>>(P);
+impl<P:AsRef<Path>> AsRef<Path> for LocalCodeRoot<P>{ 
+    fn as_ref(&self) -> &Path{
+        return self.0.as_ref()
+    }
+}
+
+pub struct Glob<S: AsRef<str>>(S);
+
