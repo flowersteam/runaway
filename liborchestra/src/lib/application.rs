@@ -879,8 +879,9 @@ os.utime(\".features\", None)").unwrap();
             get_alloc_nodes: vec!["echo localhost".to_owned()],
             cancel_alloc: vec!["".to_owned()],
             alloc_duration: 5,
-            executions_per_nodes: 2,
+            executions_per_nodes: 16,
             before_execution: vec!["".to_owned()],
+            execution: "$RUNAWAY_COMMAND".to_owned(),
             after_execution: vec!["".to_owned()],
             directory: path::PathBuf::from("/home/apere/Executions"),
         };
@@ -935,8 +936,9 @@ os.utime(\".features\", None)").unwrap();
             get_alloc_nodes: vec!["echo localhost".to_owned()],
             cancel_alloc: vec!["".to_owned()],
             alloc_duration: 10,
-            executions_per_nodes: 2,
+            executions_per_nodes: 16,
             before_execution: vec!["".to_owned()],
+            execution: "$RUNAWAY_COMMAND".to_owned(),
             after_execution: vec!["".to_owned()],
             directory: path::PathBuf::from("/home/apere/Executions"),
         };
@@ -1006,8 +1008,9 @@ os.utime(\".features\", None)").unwrap();
             get_alloc_nodes: vec!["echo localhost".to_owned()],
             cancel_alloc: vec!["".to_owned()],
             alloc_duration: 10,
-            executions_per_nodes: 2,
+            executions_per_nodes: 16,
             before_execution: vec!["".to_owned()],
+            execution: "$RUNAWAY_COMMAND".to_owned(),
             after_execution: vec!["".to_owned()],
             directory: path::PathBuf::from("/home/apere/Executions"),
         };

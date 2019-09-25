@@ -11,7 +11,7 @@
 use std::path;
 use liborchestra::{hosts, SEND_ARCH_RPATH, FETCH_IGNORE_RPATH, FETCH_ARCH_RPATH,
                    PROFILES_FOLDER_RPATH};
-use liborchestra::hosts::{HostConf, HostHandle, LeaveConfig};
+use liborchestra::hosts::{HostConf, HostHandle, LeaveConfig, NodeHandle};
 use liborchestra::ssh::RemoteHandle;
 use liborchestra::primitives::AsResult;
 use liborchestra::primitives::{DropBack, Expire};
@@ -85,7 +85,7 @@ async fn pack_folder(folder: path::PathBuf) -> Result<u64, String>{
 }
 
 /// Acquire a node from a host.
-async fn acquire_node(host: HostHandle) -> Result<DropBack<Expire<RemoteHandle>>, String>{
+async fn acquire_node(host: HostHandle) -> Result<DropBack<Expire<NodeHandle>>, String>{
     info!("Job: Acquiring node");
     host.async_acquire()
         .await
@@ -93,7 +93,7 @@ async fn acquire_node(host: HostHandle) -> Result<DropBack<Expire<RemoteHandle>>
 }
 
 /// Sends the archive to the remote host given a handle.  
-async fn send_data(node: DropBack<Expire<RemoteHandle>>, archive: path::PathBuf, remote_dir: path::PathBuf) 
+async fn send_data(node: DropBack<Expire<NodeHandle>>, archive: path::PathBuf, remote_dir: path::PathBuf) 
     -> Result<(), String>{
     info!("Job: Sending input data");
     let already_there = node.async_exec(format!("cd {}", remote_dir.to_str().unwrap()))
@@ -139,9 +139,7 @@ async fn send_data_to_front(node: RemoteHandle, archive: path::PathBuf, remote_d
 }
 
 /// Perform the job on a node. E.g. deflate the data and run the script. 
-async fn perform_job(node: DropBack<Expire<RemoteHandle>>,
-                     before_exec: String,
-                     after_exec: String,
+async fn perform_job(node: DropBack<Expire<NodeHandle>>,
                      script_name: String,
                      parameters: String,
                      remote_defl: String,
@@ -160,9 +158,12 @@ async fn perform_job(node: DropBack<Expire<RemoteHandle>>,
             .map_err(|e| format!("Failed to deflate input data: {}", e))
             .and_then(|e| e.result().map_err(|e| format!("Failed to deflate input data: {}", e)))?;
         info!("Job: Starting execution");
-        node.async_pty(vec!(before_exec,
-                            format!("cd {} && ./{} {}", remote_defl, script_name, parameters),
-                            after_exec),
+        let execution = format!("cd {} && {}", 
+            remote_defl,
+            node.execution.replace("$RUNAWAY_COMMAND", &format!("./{} {}", script_name, parameters)));
+        node.async_pty(vec!(node.before_execution.clone(),
+                            execution,
+                            node.after_execution.clone()),
                         Some(stdout_cb),
                         Some(stderr_cb))
             .await
@@ -170,7 +171,7 @@ async fn perform_job(node: DropBack<Expire<RemoteHandle>>,
 }
 
 /// Packs the data back into an archive, fetches it and unpacks it. 
-async fn fetch_data(node: DropBack<Expire<RemoteHandle>>,
+async fn fetch_data(node: DropBack<Expire<NodeHandle>>,
                     remote_defl: String,
                     remote_fetch: String,
                     remote_ignore: String,
@@ -198,7 +199,7 @@ async fn fetch_data(node: DropBack<Expire<RemoteHandle>>,
 }
 
 /// Cleans data on remote hand. 
-async fn clean_data(node: DropBack<Expire<RemoteHandle>>,
+async fn clean_data(node: DropBack<Expire<NodeHandle>>,
                     remote_dir: String,
                     remote_defl: String,
                     leave_config: LeaveConfig) -> Result<(), String>{
@@ -287,8 +288,6 @@ fn exec(matches: &clap::ArgMatches) -> i32 {
             eprintln!("{}", string);
         });
         let out = try_return_err!(perform_job(node.clone(),
-                                              host.get_before_execution_command(),
-                                              host.get_after_execution_command(),
                                               script_name.to_str().unwrap().to_owned(),
                                               parameters.to_owned(),
                                               remote_defl.to_str().unwrap().to_owned(),
@@ -464,8 +463,6 @@ fn batch(matches: &clap::ArgMatches) -> i32 {
                 });
             }
             let out = try_return_err!(perform_job(node.clone(),
-                                                  host.get_before_execution_command(),
-                                                  host.get_after_execution_command(),
                                                   script_name.to_str().unwrap().to_owned(),
                                                   p,
                                                   remote_defl.to_str().unwrap().to_owned(),

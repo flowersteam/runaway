@@ -241,6 +241,23 @@ pub fn get_hostname() -> Result<String, crate::Error> {
     Ok(format!("{}@{}", user, host))
 }
 
+use std::process::{Output};
+use std::os::unix::process::ExitStatusExt;
+/// Compacts a list of outputs in a single output: 
+/// + The stdouts are concatenated
+/// + The stderrs are concatenated
+/// + The last error code is kept
+pub fn compact_outputs(outputs: Vec<Output>) -> Output{
+    let mut outputs = outputs;
+    outputs.iter_mut()
+        .fold(Output{status: ExitStatusExt::from_raw(0), stdout: Vec::new(), stderr: Vec::new()},
+              |mut acc, mut o| {
+                  acc.stdout.append(&mut o.stdout);
+                  acc.stderr.append(&mut o.stderr);
+                  acc.status = o.status;
+                  acc
+              })
+} 
 
 //-------------------------------------------------------------------------------------------- TESTS
 
