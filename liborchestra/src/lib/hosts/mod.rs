@@ -217,9 +217,7 @@ pub struct HostConf {
     pub allocation_duration: usize, 
     pub get_node_handles: Vec<String>,
     pub directory: path::PathBuf, 
-    pub before_execution: Vec<String>, 
-    pub execution: String,
-    pub after_execution: Vec<String>, 
+    pub execution: Vec<String>,
 }
 
 impl HostConf {
@@ -665,16 +663,6 @@ impl HostHandle {
         self._conf.name.clone()
     }
 
-    /// Returns the command to execute before the executions.
-    pub fn get_before_execution_command(&self) -> Vec<String>{
-        self._conf.before_execution.clone()
-    }
-
-    /// Returns the command to execute after the executions.
-    pub fn get_after_execution_command(&self) -> Vec<String>{
-        self._conf.after_execution.clone()
-    }
-
     /// Returns a handle to the frontend connection. 
     pub fn get_frontend(&self) -> RemoteHandle{
         self._conn.clone()
@@ -865,9 +853,7 @@ mod test {
             cancel_allocation: vec!["".to_owned()],
             allocation_duration: 1,
             get_node_handles: vec!["echo 16".to_owned()],
-            before_execution: vec!["".to_owned()],
-            execution: "$RUNAWAY_COMMAND".to_owned(),
-            after_execution: vec!["".to_owned()],
+            execution: vec!["$RUNAWAY_COMMAND".to_owned()],
             directory: path::PathBuf::from("/projets/flowers/alex/executions"),
         };
         conf.to_file(&path::PathBuf::from("/tmp/test_host.yml"));
@@ -908,12 +894,10 @@ mod test {
             ssh_configuration: "localhost".to_owned(),
             node_proxycommand: "ssh -A -l apere localhost -W $RUNAWAY_NODE_ID:22".to_owned(),
             start_allocation: vec!["export RUNAWAY_NODES='localhost localhost2'".to_owned()],
-            cancel_allocation: vec!["".to_owned()],
+            cancel_allocation: vec!["echo $RUNAWAY_JOB_ID > /tmp/jobid".to_owned()],
             allocation_duration: 1,
             get_node_handles: vec!["export RUNAWAY_HANDLES='first second'".to_owned()],
-            before_execution: vec!["".to_owned()],
-            execution: "$RUNAWAY_COMMAND".to_owned(),
-            after_execution: vec!["".to_owned()],
+            execution: vec!["$RUNAWAY_COMMAND".to_owned()],
             directory: path::PathBuf::from("/projets/flowers/alex/executions"),
         };
 
@@ -1004,9 +988,7 @@ mod test {
                                     "echo 1 >> /tmp/cancel_test".to_owned()],
             allocation_duration: 1,
             get_node_handles: vec!["export RUNAWAY_HANDLES='first second'".to_owned()],
-            before_execution: vec!["".to_owned()],
-            execution: "$RUNAWAY_COMMAND".to_owned(),
-            after_execution: vec!["".to_owned()],
+            execution: vec!["$RUNAWAY_COMMAND".to_owned()],
             directory: path::PathBuf::from("/projets/flowers/alex/executions"),
         };
         let res_handle = HostHandle::spawn(conf).unwrap();
