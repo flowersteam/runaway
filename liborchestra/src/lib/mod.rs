@@ -1,6 +1,7 @@
+
+#![feature(trace_macros, async_await, result_map_or_else, trait_alias, try_blocks)]
 //! liborchestra/mod.rs
 //! Author: Alexandre Péré
-#![feature(trace_macros, async_await, result_map_or_else, trait_alias, try_blocks)]
 //! Liborchestra gives tools to manipulate expegit repositories, run scripts on user-defined hosts,
 //! and orchestrate the executions of batches of experiments under variations of parameters.
 //! 
@@ -256,21 +257,9 @@
 //! 
 
 
-//----------------------------------------------------------------------------------------- FEATURES
-
-
-#![feature(trace_macros, result_map_or_else, trait_alias, try_blocks)]
-
-
 //------------------------------------------------------------------------------------------ IMPORTS
 
 
-#[macro_use]
-extern crate serde_derive;
-#[macro_use]
-extern crate log;
-#[macro_use]
-extern crate chrono;
 extern crate regex;
 extern crate yaml_rust;
 extern crate env_logger;
@@ -282,8 +271,8 @@ extern crate crypto;
 extern crate rpassword;
 extern crate ssh2;
 extern crate dirs;
-extern crate chrono;
 extern crate libc;
+extern crate chrono;
 
 #[macro_use]
 extern crate serde_derive;
@@ -297,9 +286,8 @@ extern crate log;
 pub mod ssh;
 pub mod hosts;
 pub mod repository;
-pub mod misc;
 pub mod primitives;
-pub mod application;
+//pub mod application;
 pub mod scheduler;
 
 #[macro_use]

@@ -169,11 +169,11 @@ impl Scheduler {
             .map_err(|e| Error::Spawn(format!("Failed to unblock stdin: \n{}", e)))?;
         let stdout = unblock(child.stdout.take().unwrap())
             .map_err(|e| Error::Spawn(format!("Failed to unblock stdout: \n{}", e)))?;
-        return Ok(Scheduler {
+        Ok(Scheduler {
             child,
             stdin,
             stdout,
-        });
+        })
     }
 
     /// Inner future containing the logic to request parameters. 
@@ -189,8 +189,8 @@ impl Scheduler {
             // We query the command
             let request = RequestMessages::GetParametersRequest{};
             match query_command!(sched, &request)?{
-                ResponseMessages::GetParametersResponse{parameters: p} => return Ok(p),
-                m => return Err(Error::Message(format!("Unexpected message received {:?}", m)))
+                ResponseMessages::GetParametersResponse{parameters: p} => Ok(p),
+                m => Err(Error::Message(format!("Unexpected message received {:?}", m)))
             }
         }
     }
@@ -208,8 +208,8 @@ impl Scheduler {
             // We query the command
             let request = RequestMessages::RecordOutputRequest{parameters, features};
             match query_command!(sched, &request)?{
-                ResponseMessages::RecordOutputResponse{} => return Ok(()),
-                m => return Err(Error::Message(format!("Unexpected message received {:?}", m)))
+                ResponseMessages::RecordOutputResponse{} => Ok(()),
+                m => Err(Error::Message(format!("Unexpected message received {:?}", m)))
             }
         }
     }

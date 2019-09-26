@@ -16,13 +16,12 @@ use ssh2::{
     MethodType,
     KnownHostKeyFormat};
 use std::{
-    net::{TcpStream, SocketAddr, ToSocketAddrs, Shutdown},
+    net::{TcpStream, SocketAddr, ToSocketAddrs},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    io,
     io::{prelude::*, BufReader},
     process::{Stdio, Command, Output, ExitStatus},
     os::unix::process::ExitStatusExt,
@@ -31,7 +30,6 @@ use std::{
     path::PathBuf,
     collections::HashSet,
     fs::{File, OpenOptions},
-    time::Duration,
 };
 use dirs;
 use crate::KNOWN_HOSTS_RPATH;
@@ -47,7 +45,7 @@ use futures::task::LocalSpawnExt;
 use futures::FutureExt;
 use futures::SinkExt;
 use futures::channel::{mpsc, oneshot};
-use crate::{
+use crate::primitives::{
     Cwd, 
     EnvironmentStore, 
     EnvironmentKey, 
@@ -56,127 +54,13 @@ use crate::{
     AbsolutePath, 
     TerminalContext
 };
+use crate::*;
 
 
 //------------------------------------------------------------------------------------------  MODULE
 
 
 pub mod config;
-
-
-//------------------------------------------------------------------------------------------- MACROS
-
-/// This macro allows to asynchronously wait for (at least) a given time. This means that the thread
-/// is yielded when it is done. For now, it creates a separate thread each time a sleep is needed, 
-/// which is far from ideal.
-#[macro_export] 
-macro_rules! async_sleep {
-    ($dur: expr) => {
-        {
-            let (tx, rx) = oneshot::channel();
-            thread::spawn(move || {
-                thread::sleep($dur);
-                tx.send(()).unwrap();
-            });
-            rx.await.unwrap();
-
-        }
-    };
-}
-
-/// This macro allows to intercept a wouldblock error returned by the expression evaluation, and 
-/// awaits for 1 ns (at least) before retrying. 
-#[macro_export]
-macro_rules! await_wouldblock_io {
-    ($expr:expr) => {
-        {
-            loop{
-                match $expr {
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        async_sleep!(Duration::from_millis(1))
-                    }
-                    res => break res,
-                }
-            }
-        }
-    }
-}
-
-/// This macro allows to intercept a wouldblock error returned by the expression evaluation, and 
-/// awaits for 1 ns (at least) before retrying. 
-#[macro_export]
-macro_rules! await_wouldblock_ssh {
-    ($expr:expr) => {
-        {
-            loop{
-                match $expr {
-                    Err(ref e) if e.code() == -37 => {
-                        async_sleep!(Duration::from_millis(1))
-                    }
-                    Err(ref e) if e.code() == -21 => {
-                        async_sleep!(Duration::from_millis(1))
-                    }
-                    res => break res,
-                }
-            }
-        }
-    }
-}
-
-/// This macro allows to retry an ssh expression if the error code received was $code. It allows to 
-/// retry commands that fails every now and then for a limited amount of time.
-#[macro_export]
-macro_rules! await_retry_n_ssh {
-    ($expr:expr, $nb:expr, $($code:expr),*) => {
-       {    
-            let nb = $nb as usize;
-            let mut i = 1 as usize;
-            loop{
-                match $expr {
-                    Err(e)  => {
-                        if i == nb {
-                            break Err(e)
-                        }
-                        $(
-                            else if e.code() == $code as i32 {
-                                async_sleep!(Duration::from_nanos(1));
-                                i += 1;
-                            }
-                        )*
-                    }
-                    res => {
-                        break res
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// This macro allows to retry an ssh expression if the error code received was $code. It allows to 
-/// retry commands that fail but must be retried until it's ok. For example 
-#[macro_export]
-macro_rules! await_retry_ssh {
-    ($expr:expr, $($code:expr),*) => {
-       {    
-            loop{
-                match $expr {
-                    Err(e)  => {
-                        $(  if e.code() == $code as i32 {
-                                async_sleep!(Duration::from_nanos(1));
-                            } else  )*
-                        {
-                            break Err(e)
-                        }
-                    }
-                    res => {
-                        break res
-                    }
-                }
-            }
-        }
-    }
-}
 
 
 //---------------------------------------------------------------------------------------- PTY AGENT
@@ -1062,7 +946,7 @@ async fn read_exec_out_err(channel: &mut ssh2::Channel<'_>) -> Result<Output, Er
         if eof{  // enf of field reached, everything was read.
             break
         } else { // if not, we wait for a while
-            async_sleep!(Duration::from_millis(1));
+            async_sleep!(std::time::Duration::from_millis(1));
         }
     }
     Ok(output)
@@ -1417,7 +1301,7 @@ mod test {
         let (proxy_command, address) = ProxyCommandForwarder::from_command("echo kikou").unwrap();
         let mut stream = TcpStream::connect(address).unwrap();
         let mut buf = [0 as u8; 5];
-        stream.read(&mut buf).unwrap();
+        stream.read_exact(&mut buf).unwrap();
         assert_eq!(buf, "kikou".as_bytes());
         assert!(TcpStream::connect(address).is_err());
     }

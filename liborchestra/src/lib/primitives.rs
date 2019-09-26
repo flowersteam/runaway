@@ -1,7 +1,9 @@
 //! liborchestra/primitives.rs
 //! Author: Alexandre Péré
 //! 
-//! This module contains some primitives structures that are used througout the project. 
+//! This module contains some primitives types and structures used throughout the project. In 
+//! particular several types here are meant to implement a part of the program logic in the type 
+//! system. This allows a part of the program to be checked at compile time. 
 
 
 //------------------------------------------------------------------------------------------ IMPORTS
@@ -15,6 +17,9 @@ use futures::channel::mpsc::UnboundedSender;
 use chrono::prelude::*;
 use std::ops::Deref;
 use std::process::{Output};
+use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::hash::Hash;
 
 
 //------------------------------------------------------------------------------------------- ERRORS
@@ -48,22 +53,22 @@ impl fmt::Display for Error {
 /// Most of this library code relies on a structure that handles messages from the receiving end of 
 /// a channel in a separate thread. Handles to the transmitting end of the channel are freely cloned
 /// in the rest of the program with the insurance of the operations being synchronized by the 
-/// channel. When the last handle is dropped, it is important to clsoe the channel and wait for the 
-/// thread to cleanup and join. 
+/// channel. When the last handle is dropped, it is important to close the channel and wait for the 
+/// thread to cleanup and join.
 /// 
 /// This structure allows to do just that. It holds a reference to a closure, and at drop time, 
 /// checks whether it is the last handle or not. If it is, it waits for the handle to join before 
-/// dropping. This dropper should be included as the __last__ field of the handles structure, to 
+/// dropping. This dropper should be included as the __last__ field of the handle structure, to 
 /// ensure that it is dropped last (see https://github.com/rust-lang/rfcs/blob/246ff86b320a72f98ed2df92805e8e3d48b402d6/text/1857-stabilize-drop-order.md)
 /// 
-/// A Dropper could be either `Strong` or `Weak`. If Strong, the dropper is accounted for in the 
-/// dropping. In practice, a handle with a Strong dropper is guaranteed to access the resource (if 
-/// not crashed). On the other side, if Weak, the dropper is not accounted for in the dropping. This 
-/// means that a handle with a weak dropper is not guaranteed to access the resource. 
+/// A `Dropper` could be either `Strong` or `Weak`. If Strong, the dropper is accounted for in the 
+/// dropping. In practice, a handle with a `Strong` dropper is guaranteed to access the resource (if 
+/// not crashed). On the other side, if `Weak`, the dropper is not accounted for in the dropping. 
+/// This means that a handle with a weak dropper is not guaranteed to access the resource. 
 /// 
-/// In practice, Weak droppers are used for reference that do not need to be waited for, and could 
-/// ruin the dropping strategy. Two cases can arise:
-///     + A self referential handle as seen in the application module
+/// In practice, `Weak` droppers are used for references that do not need to be waited for, and 
+/// could ruin the dropping strategy. Two cases can arise:
+///     + A self referential handle as seen in the `application` module
 ///     + A handle that is never dropped during program execution, as seen in ctrl-c handling. 
 #[derive(Clone)]
 pub enum Dropper{
@@ -71,10 +76,12 @@ pub enum Dropper{
     Weak,
 }
 impl Dropper {
+    /// Creates a `Dropper` instance from the closure to execute at drop-time.
     pub fn from_closure(other: Box<dyn FnOnce()+Send+'static>, name: String) -> Dropper {
-        return Dropper::Strong(Arc::new(Mutex::new(Some(other))), name);
+        Dropper::Strong(Arc::new(Mutex::new(Some(other))), name)
     }
 
+    /// Downgrade a `Strong` dropper to a `Weak` dropper.
     pub fn downgrade(&mut self){
         if let Dropper::Strong(r, s) = self{
             *self = Dropper::Weak;
@@ -101,8 +108,8 @@ impl Drop for Dropper{
 //---------------------------------------------------------------------------------------- EXPIRABLE
 
 
-/// A smart pointer representing an expirable value, a value that should not be used after a given 
-/// time.
+/// A smart pointer containing an expirable value, a value that should not be used after a given 
+/// time. Used to implement the handle acquisition in `hosts`.
 #[derive(Clone)]
 pub struct Expire<T:Clone+Send+Sync>{
     inner: T,
@@ -110,7 +117,6 @@ pub struct Expire<T:Clone+Send+Sync>{
 }
 
 impl<T> Expire<T> where T:Clone+Send+Sync{
-    
     /// Creates a new Expire pointer. 
     pub fn new(inner: T, expiration: DateTime<Utc>) -> Expire<T>{
         Expire{inner, expiration}
@@ -124,7 +130,6 @@ impl<T> Expire<T> where T:Clone+Send+Sync{
 
 impl<T> Deref for Expire<T> where T:Clone+Send+Sync{
     type Target = T;
-
     fn deref(&self) -> &T {
         &self.inner
     }
@@ -140,7 +145,7 @@ impl<T> Debug for Expire<T> where T:Clone+Send+Sync+Debug{
 //--------------------------------------------------------------------------------- DROPBACK POINTER
 
 
-/// A smart pointer representing a value that should be sent back at drop-time, through a channel. 
+/// A smart pointer representing a value that should be sent back through a channel at drop-time.
 /// Take good care about consuming every unnecessary DropBack. Indeed, if the value is not consumed,
 /// then, a self-referential sending loop can occur, that would prevent the whole channel to be 
 /// closed.
@@ -151,7 +156,6 @@ pub struct DropBack<T:Clone+Send+Sync>{
 }
 
 impl<T> DropBack<T> where T:Clone+Send+Sync{
-
     /// Creates a new DropBack pointer. 
     pub fn new(inner: T, channel: UnboundedSender<DropBack<T>>) -> DropBack<T>{
         DropBack{
@@ -183,7 +187,6 @@ impl<T> Drop for DropBack<T> where T:Clone+Send+Sync{
 
 impl<T> Deref for DropBack<T> where T:Clone+Send+Sync{
     type Target = T;
-
     fn deref(&self) -> &T {
         self.inner.as_ref().unwrap()
     }
@@ -199,7 +202,7 @@ impl<T> Debug for DropBack<T> where T:Clone+Send+Sync+Debug{
 //-------------------------------------------------------------------------------------------- TRAIT
 
 
-/// A trait allowing to turn a structure into a result.
+/// A trait allowing to turn a structure into a resultdepending on the exit code.
 pub trait AsResult {
     /// Consumes the object to make a result out of it.
     fn result(self) -> Result<String, String>;
@@ -223,4 +226,113 @@ impl AsResult for Output {
             ))
         }
     }
+}
+
+
+//-------------------------------------------------------------------------------------------- TYPES
+//
+// Using types to represent a part of your program logic allows it to be checked by the compiler 
+// before being executed. This is pretty interesting in terms of safety and is one of the 'good 
+// points' of strongly typed functional languages, plus it makes the api more readable, as part of 
+// logic is made explicit in the function signatures.
+//
+// For instance, for paths, we prefer to express the logic of a path being absolute or relative in 
+// the type system, to avoid this kind of errors at runtime.
+
+
+/// Represents a path expressed in a relative fashion. Note that you can use the 'R' generic to 
+/// enforce a set of paths to be expressed at the same root.
+/// ```
+/// pub struct HomePath(PathBuf);
+/// impl Asref<Path> for HomePath{ // implement traits } 
+/// let home = HomePath(PathBuf::from(r"/home/user"));
+/// 
+/// let bashrc = RelativePath{root: home, path: PathBuf::from(r".bashrc")};
+/// let zshhrc = RelativePath{root: home, path: PathBuf::from(r".zshrc")};
+/// let fishrc = RelativePath{root: PathBuf::from(r"/home/user"), path: PathBuf::from(r".fishrc")};
+/// 
+/// let mut rc_list = Vec::new();
+/// rc_list.push(bashrc);
+/// rc_list.push(zshrc); // this works, as bashrc and zshrc have compatible signatures.
+/// rc_list.push(fishrc); // this is caught by the compiler, as signatures are incompatible.
+/// ``` 
+pub struct RelativePath<R: AsRef<Path>, P: AsRef<Path>> {pub root: R, pub path: P}
+impl<R: AsRef<Path>, P: AsRef<Path>> RelativePath<R, P>{
+    pub fn to_absolute(&self) -> AbsolutePath<PathBuf>{
+        AbsolutePath(self.root.as_ref().join(self.path.as_ref()))
+    }
+}
+
+/// Represents a path expressed in a absolute fashion.
+#[derive(Debug, Clone)]
+pub struct AbsolutePath<P: AsRef<Path>>(pub P);
+
+/// Represents a file.
+pub struct File<P>(pub P);
+
+/// Represents a folder.
+#[derive(Debug, Clone)]
+pub struct Folder<P>(pub P);
+
+/// Represents an archive, which unites a file and a hash value.
+pub struct Archive<P>{pub file: File<P>, pub hash: u64}
+
+/// Represents an ignore file.
+pub struct Ignore<P>(pub File<P>);
+
+/// Represents a located resource. This allows to attach the location of any resource with it.
+pub struct Located<L, C> {
+    pub location: L, 
+    pub content: C
+}
+
+/// Represents the local host
+pub struct LocalLocation;
+
+/// Represents any C located on the local host.
+pub type Local<C> = Located<LocalLocation, C>;
+
+/// Represents a remote host marked with the marker M.
+pub struct RemoteLocation<M>{pub marker: M, pub node: crate::ssh::RemoteHandle}
+
+/// Represents any C located on a remote M.
+pub type Remote<M, C> = Located<RemoteLocation<M>, C>;
+
+/// Represents a command
+#[derive(Debug, Clone)]
+pub struct RawCommand<S: AsRef<str>>(pub S);
+impl<S: AsRef<str>> From<S> for RawCommand<S>{
+    fn from(s: S) -> Self{
+        RawCommand(s)
+    }
+}
+
+/// Represents an environment variable key
+#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+pub struct EnvironmentKey<S: AsRef<str>>(pub S);
+
+/// Represents an environment variable value
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnvironmentValue<S: AsRef<str>>(pub S);
+
+/// Represents a set of environment variables
+pub type EnvironmentStore = HashMap<EnvironmentKey<String>, EnvironmentValue<String>>;
+
+/// Represents a Current Working Directory
+#[derive(Debug, Clone)]
+pub struct Cwd<P: AsRef<Path>>(pub AbsolutePath<P>);
+
+/// Represents a classic terminal context made out of a cwd and some enrironment variables
+#[derive(Debug, Clone)]
+pub struct TerminalContext<P:AsRef<Path>>{
+    pub cwd: Cwd<P>,
+    pub envs: EnvironmentStore
+}
+impl Default for TerminalContext<PathBuf>{
+     fn default() -> Self{
+        TerminalContext{
+            cwd: Cwd(AbsolutePath(PathBuf::from("/"))),
+            envs: EnvironmentStore::new(),
+        }
+     }
 }

@@ -17,7 +17,6 @@ use crate::ssh::RemoteHandle;
 use dirs;
 use futures::Future;
 use std::{error, fmt, fs, path, str};
-use std::collections::HashMap;
 use chrono::prelude::*;
 use futures::channel::{mpsc, oneshot};
 use futures::executor;
@@ -32,6 +31,13 @@ use std::path::{PathBuf};
 use crate::misc;
 use crate::*;
 use std::ops::Deref;
+use crate::primitives::{EnvironmentKey, EnvironmentValue, RawCommand, TerminalContext};
+use crate::SSH_CONFIG_RPATH;
+use std::sync::Arc;
+use futures::lock::Mutex;
+use futures::SinkExt;
+
+
 
 //------------------------------------------------------------------------------------------ MODULES
 
@@ -104,50 +110,10 @@ impl From<Error> for crate::primitives::Error {
 derive_from_error!(Error, ssh::Error, Ssh);
 derive_from_error!(Error, ssh::config::Error, SshConfigParse);
 
-//---------------------------------------------------------------------------- ENVIRONMENT VARIABLES
-
-//------------------------------------------------------------------------------------------- MACROS
-
-// A structure that holds environment variables, and substitute them in strings.
-struct EnvironmentVariables(HashMap<String, String>);
-
-/// This macro allows to retry an expression it returns an error. It allows to 
-/// retry commands that fails every now and then for a limited amount of time.
-#[macro_export]
-macro_rules! await_retry_n {
-    ($expr:expr, $nb:expr) => {
-       {    
-            let nb = $nb as usize;
-            let mut i = 1 as usize;
-            loop{
-                match $expr {
-                    Err(e)  => {
-                        if i == nb {
-                            break Err(e)
-                        }
-                        else{
-                            async_sleep!(std::time::Duration::from_nanos(1));
-                            i += 1;
-                        }
-                    }
-                    res => {
-                        break res
-                    }
-                }
-            }
-        }
-    }
-}
-
-    // Insert a variable
-    fn insert(&mut self, k: String, v: String) -> Option<String> {
-        self.0.insert(k, v)
-    }
 
 //-------------------------------------------------------------------------------------------- TYPES
 
 
-use crate::{EnvironmentKey, EnvironmentValue, RawCommand, TerminalContext};
 
 /// Represents a frontend
 #[derive(Clone)]
@@ -265,31 +231,6 @@ impl HostConf {
         })?;
         Ok(())
     }
-
-    /// Returns the start_alloc string
-    pub fn start_alloc(&self) -> String{
-        return self.start_alloc.join(" && ");
-    }
-
-    /// Returns the get_alloc_nodes string
-    pub fn get_alloc_nodes(&self) -> String{
-        return self.get_alloc_nodes.join(" && ");
-    }
-
-    /// Returns the cancel_alloc string
-    pub fn cancel_alloc(&self) -> String{
-        return self.cancel_alloc.join(" && ");
-    }
-
-    /// Returns the before_execution string
-    pub fn before_execution(&self) -> String{
-        return self.before_execution.join(" && ");
-    }
-
-    /// Returns the after_execution string
-    pub fn after_execution(&self) -> String{
-        return self.after_execution.join(" && ");
-    }
 }
 
 // Represents what should be kept on the host once the execution is done.
@@ -314,13 +255,6 @@ impl<'a> From<&'a str> for LeaveConfig {
 
 //--------------------------------------------------------------------------------------------- HOST
 
-
-use futures::stream;
-use crate::SSH_CONFIG_RPATH;
-use std::sync::Arc;
-use futures::lock::Mutex;
-use futures::SinkExt;
-use futures::StreamExt;
 
 // Enumeration for the messages in the channel.
 #[derive(Clone)] 
@@ -954,39 +888,6 @@ mod test {
         };
 
         let res_handle = HostHandle::spawn(conf).unwrap();
-        let op1 = res_handle.async_acquire();
-        let conn1 = block_on(op1);
-        println!("conn1: {:?}", conn1);
-        assert!(conn1.is_ok());
-        let fut = conn1.as_ref().unwrap().async_exec("echo 'from conn1'".to_owned());
-        dbg!(block_on(fut)).unwrap();
-        thread::sleep(Duration::new(1, 0));
-        drop(conn1);
-        let op2 = res_handle.async_acquire();
-        let conn2 = block_on(op2);
-        let op3 = res_handle.async_acquire();
-        let conn3 = block_on(op3);
-        println!("conn2: {:?}", conn2);
-        assert!(conn2.is_ok());
-        let fut = conn2.as_ref().unwrap().async_exec("echo 'from conn2'".to_owned());
-        dbg!(block_on(fut)).unwrap();
-        println!("conn3: {:?}", conn3);
-        assert!(conn3.is_ok());
-        let fut = conn3.as_ref().unwrap().async_exec("echo 'from conn3'".to_owned());
-        dbg!(block_on(fut)).unwrap();
-        std::thread::spawn(|| {
-            thread::sleep(Duration::new(2, 0));
-            drop(conn2);
-            drop(conn3);
-            println!("conn2-3 dropped");
-            thread::sleep(Duration::new(2, 0));
-        });
-        let op4 = res_handle.async_acquire();
-        let conn4 = block_on(op4);
-        println!("conn4: {:?}", conn4);
-        assert!(conn4.is_ok());
-        let fut = conn4.as_ref().unwrap().async_exec("echo 'from conn4'".to_owned());
-        dbg!(block_on(fut)).unwrap();
 
         // We test environment of first connection
         let conn1 = {

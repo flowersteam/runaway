@@ -62,7 +62,7 @@ macro_rules! await_wouldblock_io {
         {
             loop{
                 match $expr {
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         async_sleep!(std::time::Duration::from_nanos(1))
                     }
                     res => break res,
@@ -81,10 +81,10 @@ macro_rules! await_wouldblock_ssh {
             loop{
                 match $expr {
                     Err(ref e) if e.code() == -37 => {
-                        async_sleep!(Duration::from_nanos(1))
+                        async_sleep!(std::time::Duration::from_nanos(1))
                     }
                     Err(ref e) if e.code() == -21 => {
-                        async_sleep!(Duration::from_nanos(1))
+                        async_sleep!(std::time::Duration::from_nanos(1))
                     }
                     res => break res,
                 }
@@ -109,7 +109,7 @@ macro_rules! await_retry_n_ssh {
                         }
                         $(
                             else if e.code() == $code as i32 {
-                                async_sleep!(Duration::from_nanos(1));
+                                async_sleep!(std::time::Duration::from_nanos(1));
                                 i += 1;
                             }
                         )*
@@ -133,10 +133,38 @@ macro_rules! await_retry_ssh {
                 match $expr {
                     Err(e)  => {
                         $(  if e.code() == $code as i32 {
-                                async_sleep!(Duration::from_nanos(1));
+                                async_sleep!(std::time::Duration::from_nanos(1));
                             } else  )*
                         {
                             break Err(e)
+                        }
+                    }
+                    res => {
+                        break res
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// This macro allows to retry an expression it returns an error. It allows to 
+/// retry commands that fails every now and then for a limited amount of time.
+#[macro_export]
+macro_rules! await_retry_n {
+    ($expr:expr, $nb:expr) => {
+       {    
+            let nb = $nb as usize;
+            let mut i = 1 as usize;
+            loop{
+                match $expr {
+                    Err(e)  => {
+                        if i == nb {
+                            break Err(e)
+                        }
+                        else{
+                            async_sleep!(std::time::Duration::from_nanos(1));
+                            i += 1;
                         }
                     }
                     res => {
@@ -251,7 +279,7 @@ pub fn compact_outputs(outputs: Vec<Output>) -> Output{
     let mut outputs = outputs;
     outputs.iter_mut()
         .fold(Output{status: ExitStatusExt::from_raw(0), stdout: Vec::new(), stderr: Vec::new()},
-              |mut acc, mut o| {
+              |mut acc, o| {
                   acc.stdout.append(&mut o.stdout);
                   acc.stderr.append(&mut o.stderr);
                   acc.status = o.status;
