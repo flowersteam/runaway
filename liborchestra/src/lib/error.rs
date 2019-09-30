@@ -1,5 +1,4 @@
 //! liborchestra/error.rs
-//! Author: Alexandre Péré
 //!
 //! This module contains module-level error type to interface with the error types implemented at
 //! the sub-module level. 

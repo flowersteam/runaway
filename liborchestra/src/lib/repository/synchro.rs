@@ -1,5 +1,4 @@
 //! liborchestra/repository/synchro.rs
-//! Author: Alexandre Péré
 //! 
 //! This module contains synchronization mechanisms for the campaign repositories. Those can be used
 //! to save the results of experiments, or collaborate on a campaign.

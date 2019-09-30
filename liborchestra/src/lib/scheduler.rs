@@ -1,5 +1,4 @@
 //! liborchestra/scheduler.rs
-//! Author: Alexandre Péré
 //!
 //! This module contains a structure that allows to use an external command as a scheduler. A 
 //! scheduler is a program that will provide experiments parameters on request, based on the results
@@ -58,6 +57,8 @@ pub enum RequestMessages{
 pub enum ResponseMessages{
     /// Example of json transcript: `{"GET_PARAMETERS_RESPONSE": {"parameters": "some params"}}`
     GetParametersResponse{ parameters: String },
+    /// Example of json transcript: `{"NOT_READY_RESPONSE": {}}`
+    NotReadyResponse{},
     /// Example of json transcript: `{"RECORD_OUTPUT_RESPONSE": {}}`
     RecordOutputResponse{},
     /// Example of json transcript: `{"SHUTDOWN_RESPONSE": {}}`
@@ -177,7 +178,9 @@ impl Scheduler {
     }
 
     /// Inner future containing the logic to request parameters. 
-    async fn request_parameters(sched: Arc<Mutex<Scheduler>>) -> Result<String, Error>{
+    async fn request_parameters(sched: Arc<Mutex<Scheduler>>, wait: bool) 
+        -> Result<Option<String>, Error>
+    {
         debug!("Scheduler: Requesting parameters");
         {   
             // We bind the command to this scope. Such that if one of the io blocks, we are sure that 
@@ -188,9 +191,18 @@ impl Scheduler {
  
             // We query the command
             let request = RequestMessages::GetParametersRequest{};
-            match query_command!(sched, &request)?{
-                ResponseMessages::GetParametersResponse{parameters: p} => Ok(p),
-                m => Err(Error::Message(format!("Unexpected message received {:?}", m)))
+            loop{
+                match query_command!(sched, &request)?{
+                    ResponseMessages::GetParametersResponse{parameters: p} => return Ok(Some(p)),
+                    ResponseMessages::NotReadyResponse{} => {
+                        if wait{
+                            async_sleep!(std::time::Duration::from_secs(5))
+                        } else {
+                            return Ok(None)
+                        }
+                    }
+                    m => return Err(Error::Message(format!("Unexpected message received {:?}", m)))
+                }
             }
         }
     }
@@ -247,6 +259,7 @@ impl Scheduler {
 /// This contains the input of the operation if any.
 enum OperationInput{
     RequestParameters,
+    TryRequestParameters,
     RecordOutput(String, Vec<f64>),
 }
 
@@ -255,6 +268,7 @@ enum OperationInput{
 /// operation.
 enum OperationOutput{
     RequestParameters(Result<String, Error>),
+    TryRequestParameters(Result<Option<String>, Error>),
     RecordOutput(Result<(), Error>),
 }
 
@@ -304,9 +318,21 @@ impl SchedulerHandle {
                     match operation {
                         OperationInput::RequestParameters => {
                             spawner.spawn_local(
-                                Scheduler::request_parameters(res.clone())
+                                Scheduler::request_parameters(res.clone(), true)
                                     .map(|a| {
-                                        sender.send(OperationOutput::RequestParameters(a))
+                                        sender.send(OperationOutput::RequestParameters(a
+                                                .and_then(|a| Ok(a.unwrap()))))
+                                            .map_err(|e| error!("Scheduler Thread: Failed to \\
+                                            send an operation output: \n{:?}", e))
+                                            .unwrap();
+                                    })
+                            )
+                        }
+                        OperationInput::TryRequestParameters => {
+                            spawner.spawn_local(
+                                Scheduler::request_parameters(res.clone(), false)
+                                    .map(|a| {
+                                        sender.send(OperationOutput::TryRequestParameters(a))
                                             .map_err(|e| error!("Scheduler Thread: Failed to \\
                                             send an operation output: \n{:?}", e))
                                             .unwrap();
@@ -363,8 +389,8 @@ impl SchedulerHandle {
         })
     }
 
-    /// Async method, returning a future that ultimately resolves in a parameter string coming from 
-    /// the scheduler.
+    /// Async method, which request a parameter string from the scheduler, and wait for it if the 
+    /// scheduler is not yet ready.
     pub fn async_request_parameters(&self) -> impl Future<Output=Result<String,Error>> {
         debug!("SchedulerHandle: Building async_request_parameters future");
         let mut chan = self._sender.clone();
@@ -379,6 +405,26 @@ impl SchedulerHandle {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::RequestParameters(res)) => res,
                 Ok(e) => Err(Error::OperationFetch(format!("Expected RequestParameters, found {:?}", e)))
+            }
+        }
+    }
+
+    /// Async method, which tries to request a parameter string from the scheduler, but returns a 
+    /// None if the scheduler is not ready.
+    pub fn async_try_request_parameters(&self) -> impl Future<Output=Result<Option<String>,Error>> {
+        debug!("SchedulerHandle: Building async_try_request_parameters future");
+        let mut chan = self._sender.clone();
+        async move {
+            let (sender, receiver) = oneshot::channel();
+            trace!("SchedulerHandle::async_try_request_parameters_future: Sending input");
+            chan.send((sender, OperationInput::TryRequestParameters))
+                .await
+                .map_err(|e| Error::Channel(e.to_string()))?;
+            trace!("SchedulerHandle::async_try_request_parameters_future: Awaiting output");
+            match receiver.await {
+                Err(e) => Err(Error::OperationFetch(format!("{}", e))),
+                Ok(OperationOutput::TryRequestParameters(res)) => res,
+                Ok(e) => Err(Error::OperationFetch(format!("Expected TryRequestParameters, found {:?}", e)))
             }
         }
     }

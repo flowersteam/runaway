@@ -1,5 +1,4 @@
 //! liborchestra/primitives.rs
-//! Author: Alexandre Péré
 //! 
 //! This module contains some primitives types and structures used throughout the project. In 
 //! particular several types here are meant to implement a part of the program logic in the type 
@@ -20,6 +19,7 @@ use std::process::{Output};
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::marker::PhantomData;
 
 
 //------------------------------------------------------------------------------------------- ERRORS
@@ -256,6 +256,7 @@ impl AsResult for Output {
 /// rc_list.push(zshrc); // this works, as bashrc and zshrc have compatible signatures.
 /// rc_list.push(fishrc); // this is caught by the compiler, as signatures are incompatible.
 /// ``` 
+#[derive(PartialEq, Debug)]
 pub struct RelativePath<R: AsRef<Path>, P: AsRef<Path>> {pub root: R, pub path: P}
 impl<R: AsRef<Path>, P: AsRef<Path>> RelativePath<R, P>{
     pub fn to_absolute(&self) -> AbsolutePath<PathBuf>{
@@ -268,6 +269,7 @@ impl<R: AsRef<Path>, P: AsRef<Path>> RelativePath<R, P>{
 pub struct AbsolutePath<P: AsRef<Path>>(pub P);
 
 /// Represents a file.
+#[derive(PartialEq, Debug)]
 pub struct File<P>(pub P);
 
 /// Represents a folder.
@@ -275,28 +277,37 @@ pub struct File<P>(pub P);
 pub struct Folder<P>(pub P);
 
 /// Represents an archive, which unites a file and a hash value.
-pub struct Archive<P>{pub file: File<P>, pub hash: u64}
+pub struct Archive<P>{pub file: File<P>, pub hash: String}
 
 /// Represents an ignore file.
 pub struct Ignore<P>(pub File<P>);
 
 /// Represents a located resource. This allows to attach the location of any resource with it.
+#[derive(PartialEq, Debug)]
 pub struct Located<L, C> {
     pub location: L, 
     pub content: C
 }
 
 /// Represents the local host
+#[derive(PartialEq, Debug, Clone, Copy)]
 pub struct LocalLocation;
 
 /// Represents any C located on the local host.
 pub type Local<C> = Located<LocalLocation, C>;
+pub fn local<T>(thing: T) -> Local<T>{
+    Located{location: LocalLocation, content: thing}
+}
 
-/// Represents a remote host marked with the marker M.
-pub struct RemoteLocation<M>{pub marker: M, pub node: crate::ssh::RemoteHandle}
+/// Represents a remote host.
+#[derive(PartialEq, Debug)]
+pub struct RemoteLocation(pub crate::ssh::RemoteHandle);
 
 /// Represents any C located on a remote M.
-pub type Remote<M, C> = Located<RemoteLocation<M>, C>;
+pub type Remote<C> = Located<RemoteLocation , C>;
+pub fn remote<C>(thing: C, node: crate::ssh::RemoteHandle) -> Remote<C>{
+    Located{location: RemoteLocation(node), content:thing}
+}
 
 /// Represents a command
 #[derive(Debug, Clone)]

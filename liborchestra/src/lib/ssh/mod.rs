@@ -567,13 +567,21 @@ enum OperationOutput {
 #[derive(Clone)]
 pub struct RemoteHandle {
     sender: mpsc::UnboundedSender<(oneshot::Sender<OperationOutput>, OperationInput)>,
-    repr: String,
+    profile: config::SshProfile,
     dropper: Dropper,
 }
 
 impl fmt::Debug for RemoteHandle{
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result{
-        write!(f, "RemoteHandle<{}>", self.repr)
+        write!(f, "RemoteHandle<{}>", self.profile.hostname
+            .as_ref()
+            .unwrap_or(self.profile.proxycommand.as_ref().unwrap_or(&"Unknown".to_string())))
+    }
+}
+
+impl PartialEq for RemoteHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.profile == other.profile
     }
 }
 
@@ -587,9 +595,10 @@ impl RemoteHandle {
             Some(p) => p.to_string(),
             None => format!("{}:{}", profile.hostname.as_ref().unwrap(), profile.port.as_ref().unwrap())
         };
+        let moving_profile = profile.clone();
         let handle = std::thread::Builder::new().name("remote".to_owned()).spawn(move || {
             trace!("Remote Thread: Creating resource in thread");
-            let remote = match Remote::from_profile(profile){
+            let remote = match Remote::from_profile(moving_profile){
                 Ok(r) =>{
                     start_tx.send(Ok(())).unwrap();
                     r
@@ -669,7 +678,7 @@ impl RemoteHandle {
         let drop_sender = sender.clone();
         Ok(RemoteHandle {
             sender,
-            repr,
+            profile,
             dropper: Dropper::from_closure(
                 Box::new(move ||{
                     drop_sender.close_channel();

@@ -1,5 +1,4 @@
 //! liborchestra/ssh/config.rs
-//! Author: Alexandre Péré
 //! 
 //! This module contains structures to parse openssh profiles. 
 
@@ -59,7 +58,7 @@ impl fmt::Display for Error {
 //------------------------------------------------------------------------------------- SSH-PROFILES
 
 
-#[derive(Debug, Clone, Hash)]
+#[derive(Debug, Clone, Hash, PartialEq)]
 /// Represents a reduced ssh host configuration.
 pub struct SshProfile {
     pub name: String,

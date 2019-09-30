@@ -1,5 +1,4 @@
 // liborchestra/utilities.rs
-// Author: Alexandre Péré
 ///
 /// Some utilities meant for private use of the library.
 

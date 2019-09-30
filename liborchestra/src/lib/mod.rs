@@ -1,9 +1,13 @@
 
 #![feature(trace_macros, async_await, result_map_or_else, trait_alias, try_blocks)]
 //! liborchestra/mod.rs
-//! Author: Alexandre Péré
-//! Liborchestra gives tools to manipulate expegit repositories, run scripts on user-defined hosts,
-//! and orchestrate the executions of batches of experiments under variations of parameters.
+//!
+//! Liborchestra:
+//! =============
+//!  
+//! Welcome to the developer documentation of liborchestra. Liborchestra gives tools to manipulate 
+//! expegit repositories, run scripts on user-defined hosts, and orchestrate the executions of 
+//! batches of experiments under variations of parameters.
 //! 
 //! Concepts around which the code is written:
 //! + Experiment: refers to the code of the experiment. By extension, refers to the separate
@@ -289,6 +293,7 @@ pub mod repository;
 pub mod primitives;
 //pub mod application;
 pub mod scheduler;
+pub mod asynclets;
 
 #[macro_use]
 pub mod error;

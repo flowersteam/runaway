@@ -1,5 +1,4 @@
 //! liborchestra/repository/mod.rs
-//! Author: Alexandre Péré
 //! 
 //! This module contains a `Campaign` structure representing a campaign repository, and providing the
 //! main methods to act on it. An asynchronous interface `CampaignResourceHandle` allows to act on
