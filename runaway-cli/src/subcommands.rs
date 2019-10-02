@@ -25,36 +25,44 @@ use log::*;
 use futures::executor::block_on;
 use futures::task::SpawnExt;
 use futures::channel::mpsc::*;
-use crate::{try_return_code, try_return_err};
-use crate::misc;
+use crate::{escape, to_exit};
+use crate::misc::{self, SendIgnore, FetchIgnore};
+use crate::exit::Exit;
+use liborchestra::primitives::{local, File, AbsolutePath, Folder};
+use liborchestra::asynclets;
+use std::path::{PathBuf, Path};
 
 
-//------------------------------------------------------------------------------------------ MODULES
+//-------------------------------------------------------------------------------------------- TYPES
 
 
-mod asn;
+/// A newtype representing a path to the local root folder, i.e. the path at which the command was 
+/// started.
+pub struct LocalRootDir(PathBuf);
+impl LocalRootDir{
+    fn from(path: PathBuf) -> LocalRootDir{
+        LocalRootDir(path)
+    }
+}
+impl AsRef<Path> for LocalRootDir{
+    fn as_ref(&self) -> &Path{
+        self.0.as_ref()
+    }
+}
+
 
 
 //-------------------------------------------------------------------------------------- SUBCOMMANDS
 
 
 /// Executes a single execution of the script with the command arguments and returns exit code.
-pub fn exec(matches: &clap::ArgMatches) -> i32 {
+pub fn exec(matches: &clap::ArgMatches) -> Result<(), Exit>{
 
     // We initialize the logger
     misc::init_logger(&matches);
 
     // We load the host
-    let host_path = dirs::home_dir()
-        .unwrap()
-        .join(PROFILES_FOLDER_RPATH)
-        .join(format!("{}.yml", matches.value_of("REMOTE").unwrap()));
-    let config = try_return_code!(HostConf::from_file(&host_path),
-                                   "can not load the host configuration",
-                                   1);
-    let host = try_return_code!(HostHandle::spawn(config), 
-                                 "failed to spawn host", 
-                                 2);
+    let host = misc::get_host(matches.value_of("REMOTE").unwrap())?;
 
     // We install ctrl-c handler
     misc::install_ctrlc_handler(host.clone());
@@ -62,17 +70,20 @@ pub fn exec(matches: &clap::ArgMatches) -> i32 {
     // We setup some parameters
     let leave = LeaveConfig::from(matches.value_of("leave").unwrap());
     let leave_tar = matches.is_present("leave-tars");
-    let script_path = matches.value_of("SCRIPT").unwrap();
     let parameters = matches.value_of("parameters").unwrap_or("");
-    let script_abs_path = try_return_code!(std::fs::canonicalize(script_path),
-                                            "failed to get absolute script path",
-                                            3);
-    let script_folder = try_return_code!(script_abs_path.parent().ok_or("None"),
-                                          "failed to get script folder",
-                                          4);
-    let script_name = try_return_code!(script_abs_path.file_name().ok_or("Non"),
-                                        "failed to get script name",
-                                        5);
+    let (script, folder) = misc::get_script_and_folder(matches.value_of("SCRIPT").unwrap())?;
+
+    // We setup ignore files
+    let send_ignore_globs = misc::get_send_ignore_globs(matches.value_of("send-ignore").unwrap())?;
+
+    // We list script_folder
+    let files_to_send = to_exit!(asynclets::list_local_folder(local(folder.content.0), 
+                                                              send_ignore_globs, 
+                                                              vec!()),
+                                 Exit::ReadFolder)?;
+    
+    let fetch_ignore_globs = misc::get_fetch_ignore_globs(matches.value_of("fetch-ignore").unwrap(), 
+                                                          &files_to_send)?;
 
     // We declare the future 
     let future = async move{
@@ -143,6 +154,7 @@ pub fn exec(matches: &clap::ArgMatches) -> i32 {
     return out;
 }
 
+/*
 
 // Executes a batch of executions on a remote host.
 pub fn batch(matches: &clap::ArgMatches) -> i32 {
@@ -846,3 +858,4 @@ pub fn sched(matches: &clap::ArgMatches) -> i32 {
 }
 
 
+*/

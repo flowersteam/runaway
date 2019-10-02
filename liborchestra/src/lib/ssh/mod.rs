@@ -35,7 +35,7 @@ use dirs;
 use crate::KNOWN_HOSTS_RPATH;
 use futures::future::Future;
 use crate::derive_from_error;
-use crate::primitives::Dropper;
+use crate::commons::Dropper;
 use std::intrinsics::transmute;
 use futures::lock::Mutex;
 use futures::executor;
@@ -45,13 +45,12 @@ use futures::task::LocalSpawnExt;
 use futures::FutureExt;
 use futures::SinkExt;
 use futures::channel::{mpsc, oneshot};
-use crate::primitives::{
+use crate::commons::{
     Cwd, 
     EnvironmentStore, 
     EnvironmentKey, 
     EnvironmentValue, 
     RawCommand, 
-    AbsolutePath, 
     TerminalContext
 };
 use crate::*;
@@ -253,9 +252,9 @@ impl fmt::Display for Error {
 
 derive_from_error!(Error, config::Error, Config);
 
-impl From<Error> for crate::primitives::Error{
-    fn from(other: Error) -> crate::primitives::Error{
-        crate::primitives::Error::Operation(format!("{}", other))
+impl From<Error> for crate::commons::Error{
+    fn from(other: Error) -> crate::commons::Error{
+        crate::commons::Error::Operation(format!("{}", other))
     }
 }
 
@@ -495,7 +494,7 @@ impl Remote {
         if commands.is_empty(){
             return Err(Error::ExecutionFailed("No command was provided.".to_string()))
         }
-        let TerminalContext{cwd: Cwd(AbsolutePath(cwd)), envs } = context;
+        let TerminalContext{cwd: Cwd(cwd), envs } = context;
         let mut channel = acquire_pty_channel(&remote).await
             .map_err(|e| Error::ExecutionFailed(format!("Failed to start pty channel: {}", e)))?;
         setup_pty(&mut channel, &cwd, &envs).await?;
@@ -1031,7 +1030,7 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
     let mut stream = BufReader::new(channel);
     let mut buffer = String::new();
     let mut out_ctx = TerminalContext{
-        cwd: Cwd(AbsolutePath(PathBuf::from("/"))),
+        cwd: Cwd(PathBuf::from("/")),
         envs: EnvironmentStore::new()
     };
 
@@ -1088,7 +1087,7 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
                 stderr_cb(err.as_bytes().to_vec());
             // We receive a CWD message.
             } else if buffer.starts_with("RUNAWAY_CWD:"){
-                out_ctx.cwd = Cwd(AbsolutePath(PathBuf::from(buffer.replace("RUNAWAY_CWD: ", ""))));
+                out_ctx.cwd = Cwd(PathBuf::from(buffer.replace("RUNAWAY_CWD: ", "")));
             // We receive a env message.
             } else if buffer.starts_with("RUNAWAY_ENV:"){
                 let env = buffer.replace("RUNAWAY_ENV: ", "")
@@ -1461,7 +1460,7 @@ mod test {
             let remote = RemoteHandle::spawn(profile).unwrap();
             // Check order of outputs
             let mut context = TerminalContext::default();
-            context.cwd = Cwd(AbsolutePath("/tmp".into()));
+            context.cwd = Cwd("/tmp".into());
             context.envs.insert(EnvironmentKey("RW_TEST".into()),
                                              EnvironmentValue("VAL1".into()));
             let commands = vec![RawCommand("pwd".into()), 

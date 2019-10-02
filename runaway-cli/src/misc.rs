@@ -6,18 +6,140 @@
 //-------------------------------------------------------------------------------------------IMPORTS
 
 
-use liborchestra::PROFILES_FOLDER_RPATH;
-use liborchestra::hosts::HostHandle;
-use clap;
 use dirs;
 use env_logger;
 use ctrlc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+use std::path;
+use liborchestra::{
+    SEND_ARCH_RPATH, 
+    FETCH_IGNORE_RPATH, 
+    FETCH_ARCH_RPATH,
+    PROFILES_FOLDER_RPATH};
+use liborchestra::hosts::{HostConf, HostHandle, LeaveConfig};
+use liborchestra::scheduler::SchedulerHandle;
+use clap;
+//use chrono::prelude::*;
+use std::io::prelude::*;
+use uuid;
+use log::*;
+use futures::executor::block_on;
+use futures::task::SpawnExt;
+use futures::channel::mpsc::*;
+use crate::{try_return_code, try_return_err};
+use crate::misc;
+use crate::exit::Exit;
+use liborchestra::primitives::{local, Local, File, AbsolutePath, Folder, Glob};
+use liborchestra::asynclets;
 
 
-//----------------------------------------------------------------------------------------- FUNCTIONS
+//-------------------------------------------------------------------------------------------- MACRO
 
+
+/// This macro allows to execute a `Result` expression. On error, it prints an error message to the 
+/// user, and returns an error code. On ok, it unwraps the value.
+#[macro_export]
+macro_rules! try_return_code {
+    ($result:expr, $text:expr, $ecode:expr) => {
+        match $result{
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("runaway: {}: {}", $text, e);
+                return $ecode;
+            }
+        };
+    }
+}
+
+/// This macro allows to execute a `Result` expression. On error, the error is printed, and mapped 
+/// to the provided exit.
+#[macro_export]
+macro_rules! to_exit {
+    ($result:expr, $exit:expr) => {
+        match $result{
+            Ok(h) => Ok(h),
+            Err(e) => {
+                eprintln!("runaway: {}", e);
+                Err($exit)
+            }
+        };
+    }
+}
+
+/// This macro allows to execute a `Result` expression. On error, the containing function returns 
+/// the error. On ok, it unwraps the value.
+#[macro_export]
+macro_rules! try_return_err {
+    ($result:expr) => {
+        match $result{
+            Ok(h) => h,
+            Err(e) => {
+                return Err(e);
+            }
+        };
+    }
+}
+
+
+//-------------------------------------------------------------------------------------------- TYPES
+
+
+pub struct SendIgnore(pub File<AbsolutePath<PathBuf>>);
+
+pub struct FetchIgnore(pub File<AbsolutePath<PathBuf>>);
+
+pub struct Script(pub File<AbsolutePath<PathBuf>>);
+
+pub struct ScriptFolder(pub Folder<AbsolutePath<PathBuf>>);
+
+
+//---------------------------------------------------------------------------------------- FUNCTIONS
+
+
+/// Allows to load host from a host path configuration
+pub fn get_host(host_name: &str) -> Result<HostHandle, Exit>{
+    let host_path = get_host_path(host_name);
+    let config = to_exit!(HostConf::from_file(&host_path), Exit::LoadHostConfiguration)?;
+    to_exit!(HostHandle::spawn(config), Exit::SpawnHost)
+}
+
+/// Allows to get script 
+pub fn get_script_and_folder(script_path: &str) -> Result<(Local<Script>, Local<ScriptFolder>), Exit>{
+        let script_abs_path = to_exit!(std::fs::canonicalize(script_path), Exit::ScriptPath)?;
+        let script_abs_folder = to_exit!(script_abs_path.parent().ok_or(""), Exit::ScriptFolder)?;
+        Ok((local(Script(File(AbsolutePath(script_abs_path)))), 
+            local(ScriptFolder(Folder(AbsolutePath(script_abs_folder.to_path_buf()))))))
+}
+
+/// Allows to generate globs from send ignore file.
+pub fn get_send_ignore_globs(file_path: &str) -> Result<Vec<Glob<String>>, Exit>{
+    let send_ignore_path = PathBuf::from(file_path);
+    if send_ignore_path.file_name().unwrap() != ".sendignore".into() && !send_ignore_path.exists(){
+        return Exit::SendIgnoreNotFound;
+    }
+    if send_ignore_path.exists(){
+        let file = local(File(AbsolutePath(std::fs::canonicalize(send_ignore_path).unwrap())));
+        to_exit!(asynclets::read_globs_from_file(file), Exit::SendIgnoreRead)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+/// Allows to generate globs from fetch ignore file if any.
+pub fn get_send_ignore_globs(file_path: &str, sent_files: Vec<Local<File<RelativePath<&) -> Result<Vec<Glob<String>>, Exit>{
+    let send_ignore_path = PathBuf::from(file_path);
+    if send_ignore_path.file_name().unwrap() != ".sendignore".into() && !send_ignore_path.exists(){
+        return Exit::SendIgnoreNotFound;
+    }
+    if send_ignore_path.exists(){
+        let file = local(File(AbsolutePath(std::fs::canonicalize(send_ignore_path).unwrap())));
+        to_exit!(asynclets::read_globs_from_file(file), Exit::SendIgnoreRead)
+    } else {
+        Ok(Vec::new())
+    }
+}
 
 /// Allows to parse cartesian product strings to generate a set of parameters. 
 pub fn parse_parameters(param_string: &str, repeats: usize) -> Vec<String> {
@@ -163,4 +285,12 @@ pub fn init_logger(matches: &clap::ArgMatches) {
     }
 
     env_logger::init();
+}
+
+/// Returns the path to the host config file.
+pub fn get_host_path(name: &str) -> PathBuf{
+    dirs::home_dir()
+        .unwrap()
+        .join(PROFILES_FOLDER_RPATH)
+        .join(format!("{}.yml", name))
 }

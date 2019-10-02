@@ -1,349 +1,486 @@
 //! liborchestra/primitives.rs
-//! 
-//! This module contains some primitives types and structures used throughout the project. In 
-//! particular several types here are meant to implement a part of the program logic in the type 
-//! system. This allows a part of the program to be checked at compile time. 
+//!
+//! This module contains primitives functions (asynchronous or not) that can be assembled to produce 
+//! larger pieces of logic commonly used in the applications.
 
 
 //------------------------------------------------------------------------------------------ IMPORTS
 
 
-use std::error;
-use std::fmt;
-use std::fmt::Debug;
-use std::sync::{Arc, Mutex};
-use futures::channel::mpsc::UnboundedSender;
-use chrono::prelude::*;
-use std::ops::Deref;
-use std::process::{Output};
 use std::path::{Path, PathBuf};
-use std::collections::HashMap;
-use std::hash::Hash;
-use std::marker::PhantomData;
-
-
-//------------------------------------------------------------------------------------------- ERRORS
-
-
-#[derive(Debug, Clone)]
-pub enum Error {
-    FuturePoll(String),
-    Operation(String),
-}
-
-impl error::Error for Error {}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Error::FuturePoll(s) => write!(f, "An error occurred while polling a future:\n{}", s),
-            Error::Operation(s) => write!(
-                f,
-                "An error occurred while performing the operation:\n{}",
-                s
-            ),
-        }
-    }
-}
-
-
-//------------------------------------------------------------------------------------------ DROPPER
-
-
-/// Most of this library code relies on a structure that handles messages from the receiving end of 
-/// a channel in a separate thread. Handles to the transmitting end of the channel are freely cloned
-/// in the rest of the program with the insurance of the operations being synchronized by the 
-/// channel. When the last handle is dropped, it is important to close the channel and wait for the 
-/// thread to cleanup and join.
-/// 
-/// This structure allows to do just that. It holds a reference to a closure, and at drop time, 
-/// checks whether it is the last handle or not. If it is, it waits for the handle to join before 
-/// dropping. This dropper should be included as the __last__ field of the handle structure, to 
-/// ensure that it is dropped last (see https://github.com/rust-lang/rfcs/blob/246ff86b320a72f98ed2df92805e8e3d48b402d6/text/1857-stabilize-drop-order.md)
-/// 
-/// A `Dropper` could be either `Strong` or `Weak`. If Strong, the dropper is accounted for in the 
-/// dropping. In practice, a handle with a `Strong` dropper is guaranteed to access the resource (if 
-/// not crashed). On the other side, if `Weak`, the dropper is not accounted for in the dropping. 
-/// This means that a handle with a weak dropper is not guaranteed to access the resource. 
-/// 
-/// In practice, `Weak` droppers are used for references that do not need to be waited for, and 
-/// could ruin the dropping strategy. Two cases can arise:
-///     + A self referential handle as seen in the `application` module
-///     + A handle that is never dropped during program execution, as seen in ctrl-c handling. 
-#[derive(Clone)]
-pub enum Dropper{
-    Strong(Arc<Mutex<Option<Box<dyn FnOnce()+Send+'static>>>>, String),
-    Weak,
-}
-impl Dropper {
-    /// Creates a `Dropper` instance from the closure to execute at drop-time.
-    pub fn from_closure(other: Box<dyn FnOnce()+Send+'static>, name: String) -> Dropper {
-        Dropper::Strong(Arc::new(Mutex::new(Some(other))), name)
-    }
-
-    /// Downgrade a `Strong` dropper to a `Weak` dropper.
-    pub fn downgrade(&mut self){
-        if let Dropper::Strong(r, s) = self{
-            *self = Dropper::Weak;
-        }
-    }
-}
-
-impl Drop for Dropper{
-    fn drop(&mut self) {
-        match &self{
-            Dropper::Weak => {},
-            Dropper::Strong(r, s) if Arc::strong_count(&r) == 1 => {
-                trace!("Dropper<{}>: Counter at 1. Joining...", s);
-                (r.lock().unwrap().take().unwrap())();
-            }
-            Dropper::Strong(r, s) =>{
-                trace!("Dropper<{}>: Counter at {}. Dropping...", s, Arc::strong_count(&r))
-            }
-        }
-    }
-}
-
-
-//---------------------------------------------------------------------------------------- EXPIRABLE
-
-
-/// A smart pointer containing an expirable value, a value that should not be used after a given 
-/// time. Used to implement the handle acquisition in `hosts`.
-#[derive(Clone)]
-pub struct Expire<T:Clone+Send+Sync>{
-    inner: T,
-    expiration: DateTime<Utc>,
-}
-
-impl<T> Expire<T> where T:Clone+Send+Sync{
-    /// Creates a new Expire pointer. 
-    pub fn new(inner: T, expiration: DateTime<Utc>) -> Expire<T>{
-        Expire{inner, expiration}
-    }
-
-    /// Checks if the value has expired.
-    pub fn is_expired(&self) -> bool {
-        Utc::now() > self.expiration
-    }
-}
-
-impl<T> Deref for Expire<T> where T:Clone+Send+Sync{
-    type Target = T;
-    fn deref(&self) -> &T {
-        &self.inner
-    }
-}
-
-impl<T> Debug for Expire<T> where T:Clone+Send+Sync+Debug{
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error>{
-        write!(f, "Expire[@{}]<{:?}>", self.expiration.to_rfc3339(), self.inner)
-    }
-}
-
-
-//--------------------------------------------------------------------------------- DROPBACK POINTER
-
-
-/// A smart pointer representing a value that should be sent back through a channel at drop-time.
-/// Take good care about consuming every unnecessary DropBack. Indeed, if the value is not consumed,
-/// then, a self-referential sending loop can occur, that would prevent the whole channel to be 
-/// closed.
-#[derive(Clone)]
-pub struct DropBack<T:Clone+Send+Sync>{
-    inner: Option<T>,
-    channel: UnboundedSender<DropBack<T>>,
-}
-
-impl<T> DropBack<T> where T:Clone+Send+Sync{
-    /// Creates a new DropBack pointer. 
-    pub fn new(inner: T, channel: UnboundedSender<DropBack<T>>) -> DropBack<T>{
-        DropBack{
-            inner: Some(inner),
-            channel
-        }
-    }
-
-    /// Consumes the DropBack pointer, by taking the value inside. Nothing will be sent back after 
-    /// that. 
-    pub fn consume(mut self) -> T{
-        self.inner.take().unwrap()
-    }
-}
-
-impl<T> Drop for DropBack<T> where T:Clone+Send+Sync{
-    fn drop(&mut self) {
-        trace!("DropBack: Dropping.");
-        if self.inner.is_some(){
-            trace!("DropBack: Still some data. Sending back.");
-            if self.channel.unbounded_send(self.clone()).is_err(){
-                error!("DropBack: Failed to send the value back.")
-            };
-        } else {
-            trace!("DropBack: No more data. Disconnecting");
-        }
-    }
-}
-
-impl<T> Deref for DropBack<T> where T:Clone+Send+Sync{
-    type Target = T;
-    fn deref(&self) -> &T {
-        self.inner.as_ref().unwrap()
-    }
-}
-
-impl<T> Debug for DropBack<T> where T:Clone+Send+Sync+Debug{
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error>{
-        write!(f, "DropBack<{:?}>", self.inner)
-    }
-}
-
-
-//-------------------------------------------------------------------------------------------- TRAIT
-
-
-/// A trait allowing to turn a structure into a resultdepending on the exit code.
-pub trait AsResult {
-    /// Consumes the object to make a result out of it.
-    fn result(self) -> Result<String, String>;
-}
-
-/// Implementation for `Ouput`. The exit code is used as a marker for failure. 
-impl AsResult for Output {
-    fn result(self) -> Result<String, String> {
-        if self.status.success() {
-            Ok(format!(
-                "Successful execution\nstdout: {}\nstderr: {}",
-                String::from_utf8(self.stdout).unwrap(),
-                String::from_utf8(self.stderr).unwrap()
-            ))
-        } else {
-            Err(format!(
-                "Failed execution({})\nstdout: {}\nstderr: {}",
-                self.status.code().unwrap_or(911),
-                String::from_utf8(self.stdout).unwrap(),
-                String::from_utf8(self.stderr).unwrap()
-            ))
-        }
-    }
-}
+use std::fs;
+use sha1::{Sha1, Digest};
+use crate::commons::{AsResult, RawCommand};
+use crate::ssh::RemoteHandle;
+use globset;
+use std::io::Read;
 
 
 //-------------------------------------------------------------------------------------------- TYPES
-//
-// Using types to represent a part of your program logic allows it to be checked by the compiler 
-// before being executed. This is pretty interesting in terms of safety and is one of the 'good 
-// points' of strongly typed functional languages, plus it makes the api more readable, as part of 
-// logic is made explicit in the function signatures.
-//
-// For instance, for paths, we prefer to express the logic of a path being absolute or relative in 
-// the type system, to avoid this kind of errors at runtime.
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Glob<S: AsRef<str>>(S);
+
+pub struct Sha1Hash(String);
 
 
-/// Represents a path expressed in a relative fashion. Note that you can use the 'R' generic to 
-/// enforce a set of paths to be expressed at the same root.
-/// ```
-/// pub struct HomePath(PathBuf);
-/// impl Asref<Path> for HomePath{ // implement traits } 
-/// let home = HomePath(PathBuf::from(r"/home/user"));
-/// 
-/// let bashrc = RelativePath{root: home, path: PathBuf::from(r".bashrc")};
-/// let zshhrc = RelativePath{root: home, path: PathBuf::from(r".zshrc")};
-/// let fishrc = RelativePath{root: PathBuf::from(r"/home/user"), path: PathBuf::from(r".fishrc")};
-/// 
-/// let mut rc_list = Vec::new();
-/// rc_list.push(bashrc);
-/// rc_list.push(zshrc); // this works, as bashrc and zshrc have compatible signatures.
-/// rc_list.push(fishrc); // this is caught by the compiler, as signatures are incompatible.
-/// ``` 
-#[derive(PartialEq, Debug)]
-pub struct RelativePath<R: AsRef<Path>, P: AsRef<Path>> {pub root: R, pub path: P}
-impl<R: AsRef<Path>, P: AsRef<Path>> RelativePath<R, P>{
-    pub fn to_absolute(&self) -> AbsolutePath<PathBuf>{
-        AbsolutePath(self.root.as_ref().join(self.path.as_ref()))
+//---------------------------------------------------------------------------------------- ASYNCLETS
+
+
+/// Reads globs specs from a file
+pub fn read_globs_from_file(file: &PathBuf) -> Result<Vec<Glob<String>>, String>{
+
+    // We read the file
+    let mut cnt = String::new();
+    let mut  file = std::fs::File::open(file).map_err(|e| format!("Failed to open glob file: {}", e))?;
+    file.read_to_string(&mut cnt).map_err(|e| format!("Failed to read blog file: {}", e))?;
+
+    // We extract the globs
+    let globs = cnt.lines()
+        .map(|e| Glob(e.to_owned()))
+        .collect();
+
+    Ok(globs)
+
+}
+
+/// List a local folder. Returns paths to every files relative to the root. Ignore globs can be 
+/// along with include_globs, which supersede the ignore globs.
+pub fn list_local_folder(root: &PathBuf, 
+                         ignore_globs: &Vec<Glob<String>>, 
+                         include_globs: &Vec<Glob<String>>)
+                        -> Result<Vec<PathBuf>, String>{
+    
+    // We create ignore globset
+    let mut ignore = globset::GlobSetBuilder::new();
+    ignore_globs.iter()
+        .map(|Glob(e)| globset::Glob::new(root.join(e).to_str().unwrap()))
+        .collect::<Result<Vec<globset::Glob>, globset::Error>>()
+        .map_err(|e| format!("Failed to parse ignore glob: {}", e))?
+        .into_iter()
+        .for_each(|g| {ignore.add(g);});
+    let ignore = ignore.build().map_err(|e| format!("Failed to build ignore: {}", e))?;
+
+    // We create include globset
+    let mut include = globset::GlobSetBuilder::new();
+    include_globs.iter()
+        .map(|Glob(e)| globset::Glob::new(root.join(e).to_str().unwrap()))
+        .collect::<Result<Vec<globset::Glob>, globset::Error>>()
+        .map_err(|e| format!("Failed to parse include glob: {}", e))?
+        .into_iter()
+        .for_each(|g| {include.add(g);});
+    let include = include.build().map_err(|e| format!("Failed to build include: {}", e))?;
+
+    // We list files
+    walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .map(|p| p.path().to_owned())
+        .filter(|e| e.is_file())
+        .filter(|p| !ignore.is_match(p) || include.is_match(p))
+        .map(|p| p.strip_prefix(&root).unwrap().to_path_buf())
+        .map(|path| Ok(path))
+        .collect()
+
+}
+
+
+/// Compress a set of local files into a local tar archive.
+pub fn tar_local_files(root: &PathBuf, 
+                       files: &Vec<PathBuf>, 
+                       output: &PathBuf)
+                      -> Result<Sha1Hash, String>{
+
+    // We create the archive
+    let archive_file = fs::File::create(output).unwrap();
+    let mut archive = tar::Builder::new(archive_file);
+    // We add the files
+    files.into_iter()
+        // We add files
+        .map(|path| {
+            archive
+                .append_file(
+                    path,
+                    &mut fs::File::open(root.join(path)).unwrap(),
+                )
+                .map_err(|e| format!("Failed to add file to the archive: {}", e))
+        })
+        // We check if any error occurred
+        .collect::<Result<Vec<_>, String>>()?;
+    // We close the archive
+    archive
+        .finish()
+        .map_err(|e| format!("Failed to finish the archive: {}", e))?;
+    // We compute hash 
+    compute_local_sha1(output)
+
+}
+
+/// Computes the sha1 hash of a local file.
+pub fn compute_local_sha1(file: &PathBuf) -> Result<Sha1Hash, String>{
+
+    // We read the file
+    let mut file = fs::File::open(file).map_err(|_| "Failed to open file".to_string())?;
+    let mut hasher = Sha1::new();
+    std::io::copy(&mut file, &mut hasher).map_err(|_| "Failed to compute hash".to_string())?;
+    // We compute the hash
+    Ok(Sha1Hash(format!("{:x}", hasher.result())))
+
+}
+
+
+// Uncompresses a tar achive into a set of files.
+pub fn untar_local_archive(archive: &PathBuf, root: &PathBuf) -> Result<Vec<PathBuf>, String> {
+
+    // We open the archive and unpacks it
+    let arch_file = fs::File::open(archive)
+        .map_err(|e| format!("Failed to open archive: {}", e))?;
+    let mut archive = tar::Archive::new(arch_file);
+    // We unpack
+    archive.unpack(root)
+        .map_err(|e| format!("Failed to unpack archive: {}", e))?;
+    // We list files
+    list_local_folder(root, &vec!(), &vec!())
+
+} 
+
+// Moves a local file to a remote file.
+pub async fn send_local_file(from: &PathBuf, to: &PathBuf, node: &RemoteHandle)-> Result<(),String>{
+
+    // We check if file already exists on the remote end
+    let already_there = node.async_exec(format!("test -f {}", to.to_str().unwrap()).into())
+        .await
+        .map_err(|e| format!("Failed to test file: {}", e))?;
+    // Depending on the result, we send the file
+    if already_there.status.success() {
+        return Err("File already exists".into())
+    } else {
+        node.async_scp_send(from.to_path_buf(), 
+                            to.to_path_buf())
+            .await
+            .map_err(|e| format!("Failed to send input data: {}", e))?;
     }
+    Ok(())
+
 }
 
-/// Represents a path expressed in a absolute fashion.
-#[derive(Debug, Clone)]
-pub struct AbsolutePath<P: AsRef<Path>>(pub P);
+// Fetches a remote file 
+pub async fn fetch_remote_file(from: &PathBuf, to: &PathBuf, node: &RemoteHandle) -> Result<(),String>{
 
-/// Represents a file.
-#[derive(PartialEq, Debug)]
-pub struct File<P>(pub P);
+    // We check if file already exists
+    if to.exists(){
+        return Err("File already exists".into())
+    } 
+    // Depending on the result, we fetch the file
+    node.async_scp_fetch(from.to_owned(), to.to_owned())
+        .await
+        .map_err(|e| format!("Failed to fetch file: {}", e))?;
+    Ok(())
 
-/// Represents a folder.
-#[derive(Debug, Clone)]
-pub struct Folder<P>(pub P);
-
-/// Represents an archive, which unites a file and a hash value.
-pub struct Archive<P>{pub file: File<P>, pub hash: String}
-
-/// Represents an ignore file.
-pub struct Ignore<P>(pub File<P>);
-
-/// Represents a located resource. This allows to attach the location of any resource with it.
-#[derive(PartialEq, Debug)]
-pub struct Located<L, C> {
-    pub location: L, 
-    pub content: C
 }
 
-/// Represents the local host
-#[derive(PartialEq, Debug, Clone, Copy)]
-pub struct LocalLocation;
 
-/// Represents any C located on the local host.
-pub type Local<C> = Located<LocalLocation, C>;
-pub fn local<T>(thing: T) -> Local<T>{
-    Located{location: LocalLocation, content: thing}
+//  Lists the files in a remote folder.
+pub async fn list_remote_folder(root: &PathBuf, 
+                                ignore_globs: &Vec<Glob<String>>, 
+                                include_globs: &Vec<Glob<String>>,
+                                node: &RemoteHandle) 
+                               -> Result<Vec<PathBuf>, String>{
+    
+    // We create ignore globset
+    let mut ignore = globset::GlobSetBuilder::new();
+    ignore_globs.iter()
+        .map(|Glob(e)| globset::Glob::new(e))
+        .collect::<Result<Vec<globset::Glob>, globset::Error>>()
+        .map_err(|e| format!("Failed to parse ignore glob: {}", e))?
+        .into_iter()
+        .for_each(|g| {ignore.add(g);});
+    let ignore = ignore.build().map_err(|e| format!("Failed to build ignore: {}", e))?;
+
+    // We create include globset
+    let mut include = globset::GlobSetBuilder::new();
+    include_globs.iter()
+        .map(|Glob(e)| globset::Glob::new(e))
+        .collect::<Result<Vec<globset::Glob>, globset::Error>>()
+        .map_err(|e| format!("Failed to parse include glob: {}", e))?
+        .into_iter()
+        .for_each(|g| {include.add(g);});
+    let include = include.build().map_err(|e| format!("Failed to build include: {}", e))?;
+
+    // We list all files in dir
+    let output = node.async_exec(format!("find {} -type f", root.to_str().unwrap()).into())
+        .await
+        .map_err(|e| format!("Failed to list remote files: {}", e))?;
+    String::from_utf8(output.stdout).unwrap()
+        .lines()
+        .map(PathBuf::from)
+        .map(|l| l.strip_prefix(root).unwrap().to_path_buf())
+        .filter(|p| !ignore.is_match(p) || include.is_match(p))
+        .map(|path| Ok(path))
+        .collect()
 }
 
-/// Represents a remote host.
-#[derive(PartialEq, Debug)]
-pub struct RemoteLocation(pub crate::ssh::RemoteHandle);
 
-/// Represents any C located on a remote M.
-pub type Remote<C> = Located<RemoteLocation , C>;
-pub fn remote<C>(thing: C, node: crate::ssh::RemoteHandle) -> Remote<C>{
-    Located{location: RemoteLocation(node), content:thing}
+/// Compress a set of remote files into a local tar archive.
+pub async fn tar_remote_files (root: &PathBuf, 
+                               files: &Vec<PathBuf>, 
+                               output: &PathBuf,
+                               node: &RemoteHandle) 
+                              -> Result<Sha1Hash, String>{
+    
+    // We create the files string
+    let files_string = files.iter()
+        .fold(String::new(), |mut s, path| {
+            s.push_str(path.to_str().unwrap());
+            s.push(' ');
+            s
+        });
+    // We create the archive
+    let command = RawCommand(format!("cd {} && tar -cvf {} {}", 
+        root.to_str().unwrap(), 
+        output.to_str().unwrap(),
+        files_string));
+    node.async_exec(command)
+        .await
+        .map_err(|e| format!("Failed to execute tar command: {}", e))?
+        .result()
+        .map_err(|e| format!("Failed to tar files: {}", e))?;
+    // We compute the hash
+    compute_remote_sha1(output, node).await
+
 }
 
-/// Represents a command
-#[derive(Debug, Clone)]
-pub struct RawCommand<S: AsRef<str>>(pub S);
-impl<S: AsRef<str>> From<S> for RawCommand<S>{
-    fn from(s: S) -> Self{
-        RawCommand(s)
+/// Compress a set of remote files into a local tar archive.
+pub async fn compute_remote_sha1(file: &PathBuf, node: &RemoteHandle)
+        -> Result<Sha1Hash, String>{
+
+    // We compute the hash
+    let output = node.async_exec(format!("sha1sum {}", file.to_str().unwrap()).into())
+        .await
+        .map_err(|e| format!("Failed to execute sha1sum command: {}", e))?;
+    if !output.status.success(){
+        return Err("Failed to compute sha1 hash".into())
     }
+    Ok(Sha1Hash(String::from_utf8(output.stdout)
+        .unwrap()
+        .split(' ')
+        .nth(0)
+        .unwrap()
+        .to_owned()))
 }
 
-/// Represents an environment variable key
-#[derive(PartialEq, Eq, Hash, Clone, Debug)]
-pub struct EnvironmentKey<S: AsRef<str>>(pub S);
 
-/// Represents an environment variable value
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EnvironmentValue<S: AsRef<str>>(pub S);
+// Uncompresses a tar achive into a set of files.
+pub async fn untar_remote_archive(archive: &PathBuf, root: &PathBuf, node: &RemoteHandle)
+        -> Result<Vec<PathBuf>, String> {
 
-/// Represents a set of environment variables
-pub type EnvironmentStore = HashMap<EnvironmentKey<String>, EnvironmentValue<String>>;
+    // We open the archive and unpacks it
+    let command = RawCommand(format!("tar -xvf {} -C {}", 
+        archive.to_str().unwrap(), 
+        root.to_str().unwrap()));
+    node.async_exec(command)
+        .await
+        .map_err(|e| format!("Failed to execute tar command: {}", e))?
+        .result()
+        .map_err(|e| format!("Failed to untar files: {}", e))?;
+    // We read the entries of the archive
+    let none = vec!();
+    list_remote_folder(root, &none, &none, node).await
 
-/// Represents a Current Working Directory
-#[derive(Debug, Clone)]
-pub struct Cwd<P: AsRef<Path>>(pub AbsolutePath<P>);
-
-/// Represents a classic terminal context made out of a cwd and some enrironment variables
-#[derive(Debug, Clone)]
-pub struct TerminalContext<P:AsRef<Path>>{
-    pub cwd: Cwd<P>,
-    pub envs: EnvironmentStore
 }
-impl Default for TerminalContext<PathBuf>{
-     fn default() -> Self{
-        TerminalContext{
-            cwd: Cwd(AbsolutePath(PathBuf::from("/"))),
-            envs: EnvironmentStore::new(),
+
+
+//-------------------------------------------------------------------------------------------- TESTS
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+    use shells::wrap_sh;
+    use futures::executor::block_on;
+    use std::collections::BTreeSet;
+    use std::iter::FromIterator;
+    use crate::ssh::{config::SshProfile, RemoteHandle};
+    
+    #[test]
+    fn test_read_globs_from_file(){
+        wrap_sh!("echo '*.gz\nfolder/*' > /tmp/test_glob").unwrap();
+        let globs = read_globs_from_file(&PathBuf::from("/tmp/test_glob")).unwrap();
+        assert_eq!(globs.len(), 2);
+        assert_eq!(&Glob("*.gz".into()), globs.get(0).unwrap());
+        assert_eq!(&Glob("folder/*".into()), globs.get(1).unwrap());
+        wrap_sh!("rm /tmp/test_glob").unwrap();
+    }
+
+    #[test]
+    fn test_list_local_folder() {
+        wrap_sh!("mkdir /tmp/test_dir && mkdir /tmp/test_dir/folder").unwrap();
+        wrap_sh!("touch /tmp/test_dir/1 && touch /tmp/test_dir/folder/2 && touch /tmp/test_dir/3").unwrap();
+        let root = PathBuf::from("/tmp/test_dir");
+        let files = list_local_folder(&root,
+                &Vec::new(),
+                &Vec::new()).unwrap();
+        assert_eq!(files.len(), 3);
+        assert!(files.contains(&PathBuf::from("1")));
+        assert!(files.contains(&PathBuf::from("3")));
+        assert!(files.contains(&PathBuf::from("folder/2")));
+        // With ignore
+        let files = list_local_folder(&root,
+            &vec!(Glob("folder/*".into())),
+            &Vec::new()).unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files.contains(&PathBuf::from("1")));
+        assert!(files.contains(&PathBuf::from("3")));
+        //With include
+        let files = list_local_folder(&root,
+                &vec!(Glob("folder/*".into())),
+                &vec!(Glob("**/2".into()))
+            ).unwrap();
+        assert_eq!(files.len(), 3);
+        assert!(files.contains(&PathBuf::from("1")));
+        assert!(files.contains(&PathBuf::from("3")));
+        assert!(files.contains(&PathBuf::from("folder/2")));
+        wrap_sh!("rm -rf /tmp/test_dir").unwrap();
+    }
+
+    #[test]
+    fn test_tar_untar_local_file(){
+        wrap_sh!("mkdir /tmp/test_dir && mkdir /tmp/test_dir/folder").unwrap();
+        wrap_sh!("touch /tmp/test_dir/1 && touch /tmp/test_dir/folder/2 && touch /tmp/test_dir/3").unwrap();
+        wrap_sh!("mkdir /tmp/test_dir2").unwrap();
+        let root = PathBuf::from("/tmp/test_dir");
+        let files = vec![
+            "1".into(),
+            "3".into(),
+            "folder/2".into(),
+        ];
+        let output = PathBuf::from("/tmp/test_archive");
+        let tar_archive = tar_local_files(&root, &files, &output).unwrap();
+        assert!(output.exists());
+        let shell_sha1 = wrap_sh!("sha1sum /tmp/test_archive").unwrap();
+        let sha1 = shell_sha1.split(' ').nth(0).unwrap();
+        assert_eq!(sha1, tar_archive.0);
+
+        let root = PathBuf::from("/tmp/test_dir2");
+        let files = untar_local_archive(&output, &root).unwrap();
+        let expected_files = vec![
+            "1".into(),
+            "3".into(),
+            "folder/2".into(),
+        ];
+        for a in expected_files.iter(){
+            assert!(files.contains(a))
         }
-     }
+        for a in files.iter(){
+            assert!(expected_files.contains(a))
+        }
+        wrap_sh!("rm -rf /tmp/test_dir /tmp/test_dir2 /tmp/test_archive").unwrap();
+    }
+
+    #[test]
+    fn test_send_fetch() {
+        let profile = SshProfile{
+            name: "test".to_owned(),
+            hostname: Some("localhost".to_owned()),
+            user: Some("apere".to_owned()),
+            port: Some(22),
+            proxycommand: None // Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
+        };
+        let node = RemoteHandle::spawn(profile).unwrap();
+        wrap_sh!("touch /tmp/test_file").unwrap();
+        let local_before = PathBuf::from("/tmp/test_file");
+        let remote_then = PathBuf::from("/tmp/test_file2");
+        block_on(send_local_file(&local_before, &remote_then, &node)).unwrap();
+        assert!(remote_then.exists());
+        let local_after = PathBuf::from("/tmp/test_file3");
+        block_on(fetch_remote_file(&remote_then, &local_after, &node)).unwrap();
+        assert!(local_after.exists());
+        wrap_sh!("rm /tmp/test_file*").unwrap();
+    }
+
+
+    #[test]
+    fn test_list_remote_folder() {
+        let profile = SshProfile{
+            name: "test".to_owned(),
+            hostname: Some("localhost".to_owned()),
+            user: Some("apere".to_owned()),
+            port: Some(22),
+            proxycommand: None // Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
+        };
+        let node = RemoteHandle::spawn(profile).unwrap();
+        wrap_sh!("mkdir /tmp/test_dir && mkdir /tmp/test_dir/folder").unwrap();
+        wrap_sh!("touch /tmp/test_dir/1 && touch /tmp/test_dir/folder/2 && touch /tmp/test_dir/3").unwrap();
+        let root = PathBuf::from("/tmp/test_dir");
+        let files = block_on(list_remote_folder(&root,
+                                                &Vec::new(),
+                                                &Vec::new(),
+                                                &node)).unwrap();
+        assert_eq!(files.len(), 3);
+        assert!(files.contains(&PathBuf::from("1")));
+        assert!(files.contains(&PathBuf::from("3")));
+        assert!(files.contains(&PathBuf::from("folder/2")));
+        // With ignore
+        let files = block_on(list_remote_folder(&root,
+                                                &vec!(Glob("folder/*".into())),
+                                                &Vec::new(),
+                                                &node)).unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files.contains(&PathBuf::from("1")));
+        assert!(files.contains(&PathBuf::from("3")));
+        //With include
+        let files = block_on(list_remote_folder(&root,
+                                                &vec!(Glob("folder/*".into())),
+                                                &vec!(Glob("**/2".into())),
+                                                &node)).unwrap();
+        assert_eq!(files.len(), 3);
+        assert!(files.contains(&PathBuf::from("1")));
+        assert!(files.contains(&PathBuf::from("3")));
+        assert!(files.contains(&PathBuf::from("folder/2")));
+        wrap_sh!("rm -rf /tmp/test_dir").unwrap();
+    }
+
+
+    #[test]
+    fn test_tar_untar_remote_file(){
+        let profile = SshProfile{
+            name: "test".to_owned(),
+            hostname: Some("localhost".to_owned()),
+            user: Some("apere".to_owned()),
+            port: Some(22),
+            proxycommand: None // Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
+        };
+        let node = RemoteHandle::spawn(profile).unwrap();
+        wrap_sh!("mkdir /tmp/test_dir && mkdir /tmp/test_dir/folder").unwrap();
+        wrap_sh!("touch /tmp/test_dir/1 && touch /tmp/test_dir/folder/2 && touch /tmp/test_dir/3").unwrap();
+        wrap_sh!("mkdir /tmp/test_dir2").unwrap();
+        let root = PathBuf::from("/tmp/test_dir");
+        let files = vec![
+            "1".into(),
+            "3".into(),
+            "folder/2".into(),
+        ];
+        let output = PathBuf::from("/tmp/test_archive");
+        let tar_archive = block_on(tar_remote_files(&root, &files, &output, &node)).unwrap();
+        assert!(output.exists());
+        let shell_sha1 = wrap_sh!("sha1sum /tmp/test_archive").unwrap();
+        let sha1 = shell_sha1.split(' ').nth(0).unwrap();
+        assert_eq!(sha1, tar_archive.0);
+
+        let root = PathBuf::from("/tmp/test_dir2");
+        let files = block_on(untar_remote_archive(&output, &root, &node)).unwrap();
+        let expected_files = vec![
+            "1".into(),
+            "3".into(),
+            "folder/2".into(),
+        ];
+        for a in expected_files.iter(){
+            assert!(files.contains(a))
+        }
+        for a in files.iter(){
+            assert!(expected_files.contains(a))
+        }
+        wrap_sh!("rm -rf /tmp/test_dir /tmp/test_dir2 /tmp/test_archive").unwrap();
+    }
+    
 }

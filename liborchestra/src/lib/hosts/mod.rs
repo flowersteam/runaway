@@ -11,7 +11,7 @@
 
 
 use crate::derive_from_error;
-use crate::primitives::{Dropper, DropBack, Expire, AsResult};
+use crate::commons::{Dropper, DropBack, Expire, AsResult};
 use crate::ssh;
 use crate::ssh::RemoteHandle;
 use dirs;
@@ -31,7 +31,7 @@ use std::path::{PathBuf};
 use crate::misc;
 use crate::*;
 use std::ops::Deref;
-use crate::primitives::{EnvironmentKey, EnvironmentValue, RawCommand, TerminalContext};
+use crate::commons::{EnvironmentKey, EnvironmentValue, RawCommand, TerminalContext};
 use crate::SSH_CONFIG_RPATH;
 use std::sync::Arc;
 use futures::lock::Mutex;
@@ -101,9 +101,9 @@ impl fmt::Display for Error {
     }
 }
 
-impl From<Error> for crate::primitives::Error {
-    fn from(other: Error) -> crate::primitives::Error {
-        crate::primitives::Error::Operation(format!("{}", other))
+impl From<Error> for crate::commons::Error {
+    fn from(other: Error) -> crate::commons::Error {
+        crate::commons::Error::Operation(format!("{}", other))
     }
 }
 

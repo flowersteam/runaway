@@ -10,13 +10,6 @@
 
 
 #![feature(async_await, futures_api)]
-use std::path;
-use liborchestra::{hosts, SEND_ARCH_RPATH, FETCH_IGNORE_RPATH, FETCH_ARCH_RPATH,
-                   PROFILES_FOLDER_RPATH};
-use liborchestra::hosts::{HostConf, HostHandle, LeaveConfig, NodeHandle};
-use liborchestra::ssh::RemoteHandle;
-use liborchestra::primitives::AsResult;
-use liborchestra::primitives::{DropBack, Expire};
 use clap;
 
 
@@ -24,46 +17,14 @@ use clap;
 
 mod subcommands;
 mod misc;
+mod exit;
 
 //---------------------------------------------------------------------------------------- CONSTANTS
 
-const NAME: &'static str = env!("CARGO_PKG_NAME");
-const VERSION: &'static str = env!("CARGO_PKG_VERSION");
-const AUTHOR: &'static str = env!("CARGO_PKG_AUTHORS");
-const DESC: &'static str = "Execute code on remote hosts.";
-
-
-//-------------------------------------------------------------------------------------------- MACRO
-
-
-/// This macro allows to execute a `Result` expression. On error, it prints an error message to the 
-/// user, and returns an error code. On ok, it unwraps the value.
-#[macro_export]
-macro_rules! try_return_code {
-    ($result:expr, $text:expr, $ecode:expr) => {
-        match $result{
-            Ok(h) => h,
-            Err(e) => {
-                eprintln!("runaway: {}: {}", $text, e);
-                return $ecode;
-            }
-        };
-    }
-}
-
-/// This macro allows to execute a `Result` expression. On error, the containing function returns 
-/// the error. On ok, it unwraps the value.
-#[macro_export]
-macro_rules! try_return_err {
-    ($result:expr) => {
-        match $result{
-            Ok(h) => h,
-            Err(e) => {
-                return Err(e);
-            }
-        };
-    }
-}
+const NAME: &str = env!("CARGO_PKG_NAME");
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const AUTHOR: &str = env!("CARGO_PKG_AUTHORS");
+const DESC: &str = "Execute code on remote hosts.";
 
 
 //--------------------------------------------------------------------------------------------- MAIN
@@ -104,6 +65,16 @@ fn main(){
             .arg(clap::Arg::with_name("leave-tars")
                 .long("leave-tars")
                 .help("Leave transfered tar files to debug .*ignore files."))
+            .arg(clap::Arg::with_name("send-ignore")
+                .short("s")
+                .long("send-ignore")
+                .default_value(".sendignore")
+                .help("File containing glob patterns used to ignore files when sending data."))
+            .arg(clap::Arg::with_name("fetch-ignore")
+                .short("f")
+                .long("fetch-ignore")
+                .default_value(".fetchignore")
+                .help("File containing glob patterns used to ignore files when fetching data."))
             .arg(clap::Arg::with_name("leave")
                 .short("l")
                 .long("leave")
@@ -176,6 +147,16 @@ fn main(){
                 .takes_value(true)
                 .default_value("batch")
                 .help("The output folder to put the executions result in."))
+            .arg(clap::Arg::with_name("send-ignore")
+                .short("s")
+                .long("send-ignore")
+                .default_value(".sendignore")
+                .help("File containing glob patterns used to ignore files when sending data."))
+            .arg(clap::Arg::with_name("fetch-ignore")
+                .short("f")
+                .long("fetch-ignore")
+                .default_value(".fetchignore")
+                .help("File containing glob patterns used to ignore files when fetching data."))
            .arg(clap::Arg::with_name("parameters_string")
                 .help("Script parameters product string.")
                 .multiple(true)
@@ -210,6 +191,16 @@ fn main(){
                 .possible_value("everything")
                 .default_value("nothing")
                 .help("What to leave on the remote host after execution"))
+            .arg(clap::Arg::with_name("send-ignore")
+                .short("s")
+                .long("send-ignore")
+                .default_value(".sendignore")
+                .help("File containing glob patterns used to ignore files when sending data."))
+            .arg(clap::Arg::with_name("fetch-ignore")
+                .short("f")
+                .long("fetch-ignore")
+                .default_value(".fetchignore")
+                .help("File containing glob patterns used to ignore files when fetching data."))
             .arg(clap::Arg::with_name("output_folder")
                 .short("o")
                 .long("output_folder")
@@ -245,14 +236,18 @@ fn main(){
 
     // We rispatch to subcommands and exit;
     if let Some(matches) = matches.subcommand_matches("test"){
-        std::process::exit(subcommands::test(matches));
+        //std::process::exit(subcommands::test(matches));
+        std::process::exit(exit::Exit::AllGood.into());
     } else if let Some(matches) = matches.subcommand_matches("exec"){
-        std::process::exit(subcommands::exec(matches));
+        std::process::exit(subcommands::exec(matches).into());
     } else if let Some(matches) = matches.subcommand_matches("batch"){
-        std::process::exit(subcommands::batch(matches));
+        //std::process::exit(subcommands::batch(matches));
+        std::process::exit(exit::Exit::AllGood.into());
     } else if let Some(_) = matches.subcommand_matches("install-completion"){
-        std::process::exit(subcommands::install_completion(application));
+        //std::process::exit(subcommands::install_completion(application));
+        std::process::exit(exit::Exit::AllGood.into());
     } else if let Some(matches) = matches.subcommand_matches("sched"){
-        std::process::exit(subcommands::sched(matches));
+        //std::process::exit(subcommands::sched(matches));
+        std::process::exit(exit::Exit::AllGood.into());
     }
 }

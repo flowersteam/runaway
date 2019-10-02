@@ -271,6 +271,7 @@ pub fn get_hostname() -> Result<String, crate::Error> {
 
 use std::process::{Output};
 use std::os::unix::process::ExitStatusExt;
+
 /// Compacts a list of outputs in a single output: 
 /// + The stdouts are concatenated
 /// + The stderrs are concatenated

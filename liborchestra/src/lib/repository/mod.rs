@@ -12,7 +12,7 @@
 
 use super::{CMPCONF_RPATH, DATA_RPATH, EXCCONF_RPATH, EXCS_RPATH, XPRP_RPATH};
 use crate::misc;
-use crate::primitives::Dropper;
+use crate::commons::Dropper;
 use chrono::prelude::*;
 use git2;
 use serde_yaml;
@@ -113,9 +113,9 @@ impl From<git2::Error> for Error {
     }
 }
 
-impl From<Error> for crate::primitives::Error {
-    fn from(other: Error) -> crate::primitives::Error {
-        return crate::primitives::Error::Operation(format!("{}", other));
+impl From<Error> for crate::commons::Error {
+    fn from(other: Error) -> crate::commons::Error {
+        return crate::commons::Error::Operation(format!("{}", other));
     }
 }
 
