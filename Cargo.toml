@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "liborchestra",
-#    "runaway-cli",
+    "runaway-cli",
 #    "remote-leak",
     "ssh2-rs",
     "libssh2-sys"]

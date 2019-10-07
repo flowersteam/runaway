@@ -188,6 +188,7 @@ rw_close(){
 
     # We leave
     echo RUNAWAY_EOF:
+
 }
 ";
 
@@ -499,7 +500,8 @@ impl Remote {
             .map_err(|e| Error::ExecutionFailed(format!("Failed to start pty channel: {}", e)))?;
         setup_pty(&mut channel, &cwd, &envs).await?;
         let (context, outputs) = perform_pty(&mut channel, commands, stdout_cb, stderr_cb).await?;
-        close_pty(&mut channel).await?;;
+        close_pty(&mut channel).await?;
+
         Ok((context, outputs))
     }
 
@@ -982,7 +984,7 @@ async fn acquire_pty_channel<'a>(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Ch
     trace!("Remote: Acquiring pty channel ");
 
     let mut channel = await_wouldblock_ssh!(await_retry_ssh!({remote.lock().await.session().channel_session()},-21))?;
-    await_wouldblock_ssh!(await_retry_n_ssh!(channel.request_pty("ansi", None, Some((0,0,0,0))), 10, -14))?;
+    await_wouldblock_ssh!(await_retry_n_ssh!(channel.request_pty("xterm", None, Some((0,0,0,0))), 10, -14))?;
     await_wouldblock_ssh!(channel.shell())?;
     Ok(channel)
 }
@@ -993,7 +995,7 @@ async fn setup_pty(channel: &mut ssh2::Channel<'_>, cwd: &PathBuf, envs: &Enviro
     trace!("Remote: Setting up a pty channel");
 
     // We make sure we run on bash
-    await_wouldblock_io!(channel.write_all("sh\n".as_bytes()))
+    await_wouldblock_io!(channel.write_all("export HISTFILE=/dev/null\nbash\n".as_bytes()))
         .map_err(|e| Error::ExecutionFailed(format!("Failed to start bash: {}", e)))?;
 
     // We inject the linux pty agent on the remote end.
@@ -1105,6 +1107,9 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
         }
     }
 
+    // We clear env of non-runaway environment variables.
+    out_ctx.envs.retain(|EnvironmentKey(k), _| k.starts_with("RUNAWAY") );
+
     // We return    
     Ok((out_ctx, outputs))
 
@@ -1116,7 +1121,7 @@ async fn close_pty(channel: &mut ssh2::Channel<'_>) -> Result<(), Error>{
     trace!("Remote: Closing pty channel");
 
     // We make sure to leave bash and the landing shell
-    await_wouldblock_io!(channel.write_all("exit\nexit\n".as_bytes()))
+    await_wouldblock_io!(channel.write_all("history -c \nexit\n history -c \nexit\n".as_bytes()))
         .map_err(|e| Error::ExecutionFailed(format!("Failed to start bash: {}", e)))?;
 
     // We close the channel
@@ -1441,6 +1446,34 @@ mod test {
             assert_eq!(String::from_utf8(output.stdout).unwrap(), "kikou_stdout\n");
             assert_eq!(String::from_utf8(output.stderr).unwrap(), "kikou_stderr\n");
             assert_eq!(output.status.code().unwrap(), 0);
+       }
+        block_on(test());
+    }
+
+    use crate::commons::OutputBuf;
+
+    #[test]
+    fn test_async_pty_program_stdout() {
+        use futures::executor::block_on;
+        async fn test() {
+            let profile = config::SshProfile{
+                name: "test".to_owned(),
+                hostname: Some("localhost".to_owned()),
+                user: Some("apere".to_owned()),
+                port: Some(22),
+                proxycommand: None//Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
+            };
+            let remote = RemoteHandle::spawn(profile).unwrap();
+            // Check order of outputs
+            let commands = vec![RawCommand("export PYTHONUNBUFFERED=x".into()),
+                                RawCommand("echo Python: $(which python)".into()),
+                                RawCommand("cd /home/apere/Downloads/test_runaway".into()), 
+                                RawCommand("./run.py 10".into()),
+                                RawCommand("echo Its over".into())];
+            let context = TerminalContext::default();
+            let (_, outputs) = remote.async_pty(context, commands, None, None).await.unwrap();
+            let outputs: Vec<OutputBuf> = outputs.into_iter().map(Into::into).collect();
+            dbg!(outputs);
        }
         block_on(test());
     }

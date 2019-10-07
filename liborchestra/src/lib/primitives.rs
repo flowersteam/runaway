@@ -14,14 +14,31 @@ use crate::commons::{AsResult, RawCommand};
 use crate::ssh::RemoteHandle;
 use globset;
 use std::io::Read;
+use std::fmt;
 
 
 //-------------------------------------------------------------------------------------------- TYPES
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct Glob<S: AsRef<str>>(S);
+pub struct Glob<S: AsRef<str>>(pub S);
+impl<S: AsRef<str>> From<S> for Glob<String>{
+    fn from(other: S) -> Self{
+        Glob(other.as_ref().to_owned())
+    }
+}
 
+#[derive(Clone, PartialEq)]
 pub struct Sha1Hash(String);
+impl From<Sha1Hash> for String{
+    fn from(other: Sha1Hash) -> String{
+        other.0.clone()
+    }
+}
+impl fmt::Display for Sha1Hash{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    } 
+}
 
 
 //---------------------------------------------------------------------------------------- ASYNCLETS
@@ -135,13 +152,19 @@ pub fn untar_local_archive(archive: &PathBuf, root: &PathBuf) -> Result<Vec<Path
     // We open the archive and unpacks it
     let arch_file = fs::File::open(archive)
         .map_err(|e| format!("Failed to open archive: {}", e))?;
-    let mut archive = tar::Archive::new(arch_file);
-    // We unpack
-    archive.unpack(root)
-        .map_err(|e| format!("Failed to unpack archive: {}", e))?;
     // We list files
-    list_local_folder(root, &vec!(), &vec!())
-
+    let files = tar::Archive::new(arch_file)
+        .entries()
+        .map_err(|e| format!("Failed to read archive entries: {}", e))?
+        .map(|e| e.unwrap().path().unwrap().into_owned())
+        .collect();
+    // We unpack
+    let arch_file = fs::File::open(archive)
+        .map_err(|e| format!("Failed to open archive: {}", e))?;
+    tar::Archive::new(arch_file)
+        .unpack(root)
+        .map_err(|e| format!("Failed to unpack archive: {}", e))?;
+    Ok(files)
 } 
 
 // Moves a local file to a remote file.
@@ -168,9 +191,9 @@ pub async fn send_local_file(from: &PathBuf, to: &PathBuf, node: &RemoteHandle)-
 pub async fn fetch_remote_file(from: &PathBuf, to: &PathBuf, node: &RemoteHandle) -> Result<(),String>{
 
     // We check if file already exists
-    if to.exists(){
-        return Err("File already exists".into())
-    } 
+    //if to.exists(){
+    //    return Err("File already exists".into())
+    //} 
     // Depending on the result, we fetch the file
     node.async_scp_fetch(from.to_owned(), to.to_owned())
         .await
@@ -288,6 +311,74 @@ pub async fn untar_remote_archive(archive: &PathBuf, root: &PathBuf, node: &Remo
     list_remote_folder(root, &none, &none, node).await
 
 }
+
+// Checks whether a file exists or not.
+pub async fn remote_file_exists(file: &PathBuf, node: &RemoteHandle) -> Result<bool, String> {
+
+    let command = RawCommand(format!("test -f {}", 
+        file.to_str().unwrap()));
+    Ok(node.async_exec(command)
+        .await
+        .map_err(|e| format!("Failed to execute check command: {}", e))?
+        .status
+        .success())
+
+}
+
+
+// Checks whether a file exists or not.
+pub async fn remote_folder_exists(folder: &PathBuf, node: &RemoteHandle) -> Result<bool, String> {
+
+    let command = RawCommand(format!("test -d {}", 
+        folder.to_str().unwrap()));
+    Ok(node.async_exec(command)
+        .await
+        .map_err(|e| format!("Failed to execute check command: {}", e))?
+        .status
+        .success())
+
+}
+
+
+// Removes a set of files
+pub async fn remove_remote_files(files: Vec<PathBuf>, node: &RemoteHandle) -> Result<(), String> {
+
+    let command = RawCommand(files.iter()
+        .fold("rm ".to_string(), |acc, f| format!("{} {}", acc, f.to_str().unwrap())));
+    node.async_exec(command)
+        .await
+        .map_err(|e| format!("Failed to execute remove command: {}", e))?
+        .result()
+        .map_err(|e| format!("Failed to remove files: {}", e))?;
+    Ok(())
+}
+
+
+// Removes a set of files
+pub async fn remove_remote_folder(folder: PathBuf, node: &RemoteHandle) -> Result<(), String> {
+
+    let command = RawCommand(format!("rm -rf {}", folder.to_str().unwrap()));
+    node.async_exec(command)
+        .await
+        .map_err(|e| format!("Failed to execute remove command: {}", e))?
+        .result()
+        .map_err(|e| format!("Failed to remove folder: {}", e))?;
+    Ok(())
+}
+
+// Creates a folder
+pub async fn create_remote_folder(folder: &PathBuf, node: &RemoteHandle) -> Result<(), String> {
+
+    let command = RawCommand(format!("mkdir {}", folder.to_str().unwrap()));
+    node.async_exec(command)
+        .await
+        .map_err(|e| format!("Failed to execute mkdir command: {}", e))?
+        .result()
+        .map_err(|e| format!("Failed to create folder: {}", e))?;
+    Ok(())
+
+}
+
 
 
 //-------------------------------------------------------------------------------------------- TESTS

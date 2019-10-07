@@ -11,6 +11,7 @@
 
 #![feature(async_await, futures_api)]
 use clap;
+use exit::Exit;
 
 
 //------------------------------------------------------------------------------------------ MODULES
@@ -62,9 +63,10 @@ fn main(){
             .arg(clap::Arg::with_name("vvverbose")
                 .long("vvverbose")
                 .help("Print all logs"))
-            .arg(clap::Arg::with_name("leave-tars")
-                .long("leave-tars")
-                .help("Leave transfered tar files to debug .*ignore files."))
+            .arg(clap::Arg::with_name("print-files")
+                .short("r")
+                .long("print-files")
+                .help("Prints transfered files (for debug purposes)"))
             .arg(clap::Arg::with_name("send-ignore")
                 .short("s")
                 .long("send-ignore")
@@ -84,7 +86,24 @@ fn main(){
                 .possible_value("everything")
                 .default_value("nothing")
                 .help("What to leave on the remote host after execution"))
-           .arg(clap::Arg::with_name("parameters")
+            .arg(clap::Arg::with_name("remote-folder")
+                .short("R")
+                .long("remote-folder")
+                .default_value("$RUNAWAY_PATH/$RUNAWAY_UUID")
+                .help("Folder to deflate data in, on the remote.")
+            )
+            .arg(clap::Arg::with_name("output-folder")
+                .short("o")
+                .long("output-folder")
+                .default_value(".")
+                .help("Folder to deflate data in, on local."))
+            .arg(clap::Arg::with_name("no-ecode")
+                .long("no-ecode")
+                .help("Do not copy the remote exit code to the local command. Returns 0 whatever the script exit code."))
+            .arg(clap::Arg::with_name("no-env-read")
+                .long("no-env-read")
+                .help("Do not read the local environment variables to apply it to the remote context."))
+            .arg(clap::Arg::with_name("parameters")
                 .help("Script parameters. In normal mode, it should be written as they would \
                        be for the program to execute. In batch mode, you can use a product \
                        parameters string.")
@@ -132,7 +151,7 @@ fn main(){
                 .default_value("nothing")
                 .help("What to leave on the remote host after execution"))
             .arg(clap::Arg::with_name("parameters_file")
-                .short("f")
+                .short("P")
                 .long("parameters_file")
                 .takes_value(true)
                 .help("A file specifying a list of newline-separated arguments."))
@@ -234,20 +253,38 @@ fn main(){
     // completion files. 
     let matches = application.clone().get_matches();
 
-    // We rispatch to subcommands and exit;
+    // We dispatch to subcommands and exit;
+    let output;
     if let Some(matches) = matches.subcommand_matches("test"){
-        //std::process::exit(subcommands::test(matches));
-        std::process::exit(exit::Exit::AllGood.into());
+        output = Ok(Exit::AllGood);
     } else if let Some(matches) = matches.subcommand_matches("exec"){
-        std::process::exit(subcommands::exec(matches).into());
+        output = subcommands::exec(matches);
     } else if let Some(matches) = matches.subcommand_matches("batch"){
-        //std::process::exit(subcommands::batch(matches));
-        std::process::exit(exit::Exit::AllGood.into());
+        output = Ok(Exit::AllGood);
     } else if let Some(_) = matches.subcommand_matches("install-completion"){
-        //std::process::exit(subcommands::install_completion(application));
-        std::process::exit(exit::Exit::AllGood.into());
+        output = Ok(Exit::AllGood);
     } else if let Some(matches) = matches.subcommand_matches("sched"){
-        //std::process::exit(subcommands::sched(matches));
-        std::process::exit(exit::Exit::AllGood.into());
+        output = Ok(Exit::AllGood);
+    } else {
+        output = Ok(Exit::AllGood);
     }
+
+    // Depending on the output, we return a different message
+    let exit = match output{
+        Ok(Exit::AllGood) => Exit::AllGood.into(),
+        Ok(Exit::ScriptFailedWithCode(e)) => {
+            eprintln!("runaway: script execution failed with exit code {}", e);
+            e
+        }
+        Ok(Exit::ScriptFailedWithoutCode) => {
+            eprintln!("runaway: script execution failed without returning exit code");
+            Exit::ScriptFailedWithoutCode.into()
+        }
+        Ok(_) => unreachable!(),
+        Err(e) => {
+            eprintln!("runaway: runaway has experienced an error: {}", e);
+            e.into()
+        }
+    };
+    std::process::exit(exit);
 }

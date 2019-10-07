@@ -11,9 +11,10 @@ use env_logger;
 use ctrlc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::path;
 use liborchestra::{
+    SEND_IGNORE_RPATH,
     SEND_ARCH_RPATH, 
     FETCH_IGNORE_RPATH, 
     FETCH_ARCH_RPATH,
@@ -31,10 +32,8 @@ use futures::channel::mpsc::*;
 use crate::{try_return_code, try_return_err};
 use crate::misc;
 use crate::exit::Exit;
-use liborchestra::primitives::{local, Local, File, AbsolutePath, Folder, Glob};
-use liborchestra::asynclets;
-
-
+use liborchestra::primitives::{read_globs_from_file, list_local_folder, Glob};
+use liborchestra::commons::{EnvironmentStore, EnvironmentKey, EnvironmentValue};
 //-------------------------------------------------------------------------------------------- MACRO
 
 
@@ -83,18 +82,6 @@ macro_rules! try_return_err {
 }
 
 
-//-------------------------------------------------------------------------------------------- TYPES
-
-
-pub struct SendIgnore(pub File<AbsolutePath<PathBuf>>);
-
-pub struct FetchIgnore(pub File<AbsolutePath<PathBuf>>);
-
-pub struct Script(pub File<AbsolutePath<PathBuf>>);
-
-pub struct ScriptFolder(pub Folder<AbsolutePath<PathBuf>>);
-
-
 //---------------------------------------------------------------------------------------- FUNCTIONS
 
 
@@ -105,39 +92,40 @@ pub fn get_host(host_name: &str) -> Result<HostHandle, Exit>{
     to_exit!(HostHandle::spawn(config), Exit::SpawnHost)
 }
 
-/// Allows to get script 
-pub fn get_script_and_folder(script_path: &str) -> Result<(Local<Script>, Local<ScriptFolder>), Exit>{
-        let script_abs_path = to_exit!(std::fs::canonicalize(script_path), Exit::ScriptPath)?;
-        let script_abs_folder = to_exit!(script_abs_path.parent().ok_or(""), Exit::ScriptFolder)?;
-        Ok((local(Script(File(AbsolutePath(script_abs_path)))), 
-            local(ScriptFolder(Folder(AbsolutePath(script_abs_folder.to_path_buf()))))))
-}
-
-/// Allows to generate globs from send ignore file.
-pub fn get_send_ignore_globs(file_path: &str) -> Result<Vec<Glob<String>>, Exit>{
-    let send_ignore_path = PathBuf::from(file_path);
-    if send_ignore_path.file_name().unwrap() != ".sendignore".into() && !send_ignore_path.exists(){
-        return Exit::SendIgnoreNotFound;
-    }
-    if send_ignore_path.exists(){
-        let file = local(File(AbsolutePath(std::fs::canonicalize(send_ignore_path).unwrap())));
-        to_exit!(asynclets::read_globs_from_file(file), Exit::SendIgnoreRead)
+/// Allows to generate globs from send and fetch ignore file.
+pub fn get_send_fetch_ignores_globs(root: &PathBuf, send_path: &str, fetch_path: &str) 
+        -> Result<(Vec<Glob<String>>, Vec<Glob<String>>), Exit>{
+    // We get the paths
+    let send_ignore_path = PathBuf::from(send_path);
+    let fetch_ignore_path = PathBuf::from(fetch_path);
+    // Depending on the case, we return a different set of globs.
+    if send_ignore_path.exists() && fetch_ignore_path.exists(){
+        let send_globs = to_exit!(read_globs_from_file(&send_ignore_path.canonicalize().unwrap()), 
+            Exit::SendIgnoreRead)?;
+        let fetch_globs = to_exit!(read_globs_from_file(&fetch_ignore_path.canonicalize().unwrap()), 
+            Exit::FetchIgnoreRead)?;
+        Ok((send_globs, fetch_globs))
+    } else if send_ignore_path.exists() {
+        let send_globs = to_exit!(read_globs_from_file(&send_ignore_path.canonicalize().unwrap()), 
+            Exit::SendIgnoreRead)?;
+        let include_globs = vec!();
+        let fetch_globs = to_exit!(list_local_folder(root, &send_globs, &include_globs), 
+            Exit::ReadLocalFolder)?;
+        let fetch_globs = fetch_globs.iter()
+            .map(AsRef::as_ref)
+            .map(Path::to_str)
+            .map(Option::unwrap)
+            .map(ToOwned::to_owned)
+            .map(Glob)
+            .collect();
+        Ok((send_globs, fetch_globs))
+    } else if fetch_ignore_path.exists() {
+        let send_globs = vec!();
+        let fetch_globs = to_exit!(read_globs_from_file(&fetch_ignore_path.canonicalize().unwrap()), 
+            Exit::FetchIgnoreRead)?;
+        Ok((send_globs, fetch_globs))
     } else {
-        Ok(Vec::new())
-    }
-}
-
-/// Allows to generate globs from fetch ignore file if any.
-pub fn get_send_ignore_globs(file_path: &str, sent_files: Vec<Local<File<RelativePath<&) -> Result<Vec<Glob<String>>, Exit>{
-    let send_ignore_path = PathBuf::from(file_path);
-    if send_ignore_path.file_name().unwrap() != ".sendignore".into() && !send_ignore_path.exists(){
-        return Exit::SendIgnoreNotFound;
-    }
-    if send_ignore_path.exists(){
-        let file = local(File(AbsolutePath(std::fs::canonicalize(send_ignore_path).unwrap())));
-        to_exit!(asynclets::read_globs_from_file(file), Exit::SendIgnoreRead)
-    } else {
-        Ok(Vec::new())
+        Ok((vec!(), vec!()))
     }
 }
 
@@ -183,6 +171,8 @@ pub fn install_ctrlc_handler(signal_host: HostHandle){
 
     // We set the ctrl c handler
     let signal_counter = AtomicUsize::new(0);
+
+
     ctrlc::set_handler(move || {
         eprintln!("runaway: received ctrl-c.");
         let host = signal_host.clone();
@@ -293,4 +283,23 @@ pub fn get_host_path(name: &str) -> PathBuf{
         .unwrap()
         .join(PROFILES_FOLDER_RPATH)
         .join(format!("{}.yml", name))
+}
+
+
+// Read environment variables starting with "RUNAWAY" and puts them in an environment store
+pub fn read_local_runaway_envs() -> EnvironmentStore{
+    let store = EnvironmentStore::new();
+    std::env::vars()
+        .filter(|(k, _)| k.starts_with("RUNAWAY"))
+        .fold(store, |mut store, (k,v)| {
+            store.insert(EnvironmentKey(k), EnvironmentValue(v));
+            store
+        })
+}
+
+// Writes environment variables starting with "RUNAWAY"
+pub fn write_local_runaway_envs(store: &EnvironmentStore) {
+    store.iter()
+        .filter(|(EnvironmentKey(k), _)| k.starts_with("RUNAWAY"))
+        .for_each(|(EnvironmentKey(k), EnvironmentValue(v))| std::env::set_var(k, v))
 }

@@ -157,7 +157,7 @@ struct HandleContext(TerminalContext<PathBuf>);
 
 /// Represents a the handles as produced by the async_aquire function
 #[derive(Clone, Debug)]
-pub struct NodeHandle{remote: ssh::RemoteHandle, context: TerminalContext<PathBuf>}
+pub struct NodeHandle{remote: ssh::RemoteHandle, pub context: TerminalContext<PathBuf>}
 impl Deref for NodeHandle {
     type Target = ssh::RemoteHandle;
     fn deref(&self) -> &Self::Target {
@@ -327,12 +327,15 @@ impl Host {
 
         // We generate the host
         trace!("Host: Connection acquired: {:?}", conn);
+        let mut context = FrontendContext(TerminalContext::default());
+        context.0.envs.insert(EnvironmentKey("RUNAWAY_PATH".into()), 
+                              EnvironmentValue(conf.directory.to_str().unwrap().into()));
         Ok(Host {
             conf,
             conn: Frontend(conn),
             profile,
             provider: provider::Provider::new(),
-            context: FrontendContext(TerminalContext::default())
+            context
         })
     }
 
@@ -644,6 +647,11 @@ impl HostHandle {
     /// Returns the name of the host.
     pub fn get_name(&self) -> String {
         self._conf.name.clone()
+    }
+
+    /// Returns the execution strings
+    pub fn get_execution_procedure(&self) -> Vec<RawCommand<String>>{
+        self._conf.execution.iter().map(Into::into).map(ToOwned::to_owned).map(RawCommand).collect()
     }
 
     /// Returns a handle to the frontend connection. 

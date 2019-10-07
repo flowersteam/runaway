@@ -12,12 +12,13 @@ use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use futures::channel::mpsc::UnboundedSender;
 use chrono::prelude::*;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::process::{Output};
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::marker::PhantomData;
+use std::os::unix::process::ExitStatusExt;
 
 
 //------------------------------------------------------------------------------------------- ERRORS
@@ -133,6 +134,12 @@ impl<T> Deref for Expire<T> where T:Clone+Send+Sync{
     }
 }
 
+impl<T> DerefMut for Expire<T> where T:Clone+Send+Sync{
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+}
+
 impl<T> Debug for Expire<T> where T:Clone+Send+Sync+Debug{
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error>{
         write!(f, "Expire[@{}]<{:?}>", self.expiration.to_rfc3339(), self.inner)
@@ -187,6 +194,12 @@ impl<T> Deref for DropBack<T> where T:Clone+Send+Sync{
     type Target = T;
     fn deref(&self) -> &T {
         self.inner.as_ref().unwrap()
+    }
+}
+
+impl<T> DerefMut for DropBack<T> where T:Clone+Send+Sync{
+    fn deref_mut(&mut self) -> &mut T {
+        self.inner.as_mut().unwrap()
     }
 }
 
@@ -248,6 +261,12 @@ pub struct EnvironmentValue<S: AsRef<str>>(pub S);
 
 /// Represents a set of environment variables
 pub type EnvironmentStore = HashMap<EnvironmentKey<String>, EnvironmentValue<String>>;
+pub fn substitute_environment(store: &EnvironmentStore, string: &str) -> String{
+    store.iter()
+        .fold(string.to_owned(), |acc, (EnvironmentKey(key), EnvironmentValue(val))| {
+            acc.replace(&format!("${}", key), val)
+        })
+}
 
 /// Represents a Current Working Directory
 #[derive(Debug, Clone)]
@@ -266,4 +285,25 @@ impl Default for TerminalContext<PathBuf>{
             envs: EnvironmentStore::new(),
         }
      }
+}
+
+/// Representing an output in a simpler form
+#[derive(Debug)]
+pub struct OutputBuf{
+    pub stdout: String,
+    pub stderr: String,
+    pub ecode: i32,
+}
+impl OutputBuf{
+    pub fn success(&self) -> bool{
+        self.ecode == 0
+    }
+}
+impl From<Output> for OutputBuf{
+    fn from(other: Output) -> OutputBuf{
+        let stdout = String::from_utf8(other.stdout.clone()).unwrap();
+        let stderr = String::from_utf8(other.stderr.clone()).unwrap();
+        let ecode = other.status.code().unwrap_or_else(|| other.status.signal().unwrap() );
+        OutputBuf{stdout, stderr, ecode}
+    }
 }
