@@ -19,7 +19,7 @@ use std::fmt;
 
 //-------------------------------------------------------------------------------------------- TYPES
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Glob<S: AsRef<str>>(pub S);
 impl<S: AsRef<str>> From<S> for Glob<String>{
     fn from(other: S) -> Self{

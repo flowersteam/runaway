@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::os::unix::process::ExitStatusExt;
-
+use std::ffi::OsStr;
 
 //------------------------------------------------------------------------------------------- ERRORS
 
@@ -254,10 +254,20 @@ impl<S: AsRef<str>> From<S> for RawCommand<S>{
 /// Represents an environment variable key
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub struct EnvironmentKey<S: AsRef<str>>(pub S);
+impl<S: AsRef<str>> AsRef<OsStr> for EnvironmentKey<S>{
+    fn as_ref(&self) -> &OsStr {
+        self.0.as_ref().as_ref()
+    }
+}
 
 /// Represents an environment variable value
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnvironmentValue<S: AsRef<str>>(pub S);
+impl<S: AsRef<str>> AsRef<OsStr> for EnvironmentValue<S>{
+    fn as_ref(&self) -> &OsStr {
+        self.0.as_ref().as_ref()
+    }
+}
 
 /// Represents a set of environment variables
 pub type EnvironmentStore = HashMap<EnvironmentKey<String>, EnvironmentValue<String>>;
@@ -266,6 +276,9 @@ pub fn substitute_environment(store: &EnvironmentStore, string: &str) -> String{
         .fold(string.to_owned(), |acc, (EnvironmentKey(key), EnvironmentValue(val))| {
             acc.replace(&format!("${}", key), val)
         })
+}
+pub fn push_env<K: AsRef<str>, V: AsRef<str>>(store: &mut EnvironmentStore, key: K, value: V){
+    store.insert(EnvironmentKey(key.as_ref().to_owned()), EnvironmentValue(value.as_ref().to_owned()));
 }
 
 /// Represents a Current Working Directory
@@ -305,5 +318,18 @@ impl From<Output> for OutputBuf{
         let stderr = String::from_utf8(other.stderr.clone()).unwrap();
         let ecode = other.status.code().unwrap_or_else(|| other.status.signal().unwrap() );
         OutputBuf{stdout, stderr, ecode}
+    }
+}
+impl AsResult for OutputBuf {
+    fn result(self) -> Result<String, String> {
+        if self.ecode ==0 {
+            Ok(format!(
+                "Successful execution\nstdout: {}\nstderr: {}", self.stdout, self.stderr
+            ))
+        } else {
+            Err(format!(
+                "Failed execution({})\nstdout: {}\nstderr: {}", self.ecode, self.stdout, self.stderr
+            ))
+        }
     }
 }

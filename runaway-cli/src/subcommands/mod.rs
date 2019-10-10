@@ -9,9 +9,10 @@
 
 
 mod exec;
-
 pub use exec::exec;
 
+mod batch;
+pub use batch::batch;
 
 
 /*
@@ -82,7 +83,7 @@ pub fn batch(matches: &clap::ArgMatches) -> i32 {
         }
         None => {
             params.iter()
-                .map(|_| output_folder.join(Utc::now().to_string()))
+                .map(|_| output_folder.join())
                 .collect::<Vec<path::PathBuf>>()
         }
     };

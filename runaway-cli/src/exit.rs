@@ -40,7 +40,16 @@ pub enum Exit {
     WrongRemoteFolderString,
     ScriptFailedWithCode(i32),
     ScriptFailedWithoutCode,
-
+    LoadArgumentsFile,
+    LoadRemotesFile,
+    LoadOutputsFile,
+    SpawnThreadPool,
+    RemotesExhausted,
+    OutputsExhausted,
+    ArgumentsExhausted,
+    PostProcFailed,
+    ExecutionSpawnFailed,
+    SomeExecutionFailed(u32),
 }
 
 impl std::fmt::Display for Exit {
@@ -77,7 +86,21 @@ impl std::fmt::Display for Exit {
             Exit::CreateRemoteFolder => write!(f, "failed to create remote folder"),
             Exit::WrongRemoteFolderString => write!(f, "remote folder template string is not absolute"),
             Exit::ScriptFailedWithCode(ecode) => write!(f, "script failed with error code {}", ecode),
-            Exit::ScriptFailedWithoutCode => write!(f, "script failed without exit code")
+            Exit::ScriptFailedWithoutCode => write!(f, "script failed without exit code"),
+            Exit::LoadArgumentsFile => write!(f, "the provided arguments file could not be loaded"),
+            Exit::LoadRemotesFile => write!(f, "the provided remotes file could not be loaded"),
+            Exit::LoadOutputsFile => write!(f, "the provided outputs file could not be loaded"),
+            Exit::SpawnThreadPool => write!(f, "could not spawn the executor thread pool"),
+            Exit::RemotesExhausted => write!(f, "wrong remote folders template: remote folders \
+                                                 exhausted before arguments"),
+            Exit::OutputsExhausted => write!(f, "wrong output folders template: output folders \
+                                                 exhausted before arguments"),
+            Exit::ArgumentsExhausted => write!(f, "wrong arguments template: arguments exhausted \
+                                                   after both remote and output folders"),
+            Exit::PostProcFailed => write!(f, "failed to execute the post-processing"),
+            Exit::ExecutionSpawnFailed => write!(f, "failed to spawn the execution"),
+            Exit::SomeExecutionFailed(nb) => write!(f, "{} executions failed", nb)
+
             }
     }
 }
@@ -116,7 +139,17 @@ impl From<Exit> for i32 {
             Exit::CreateRemoteFolder => 9928,
             Exit::WrongRemoteFolderString => 9929,
             Exit::ScriptFailedWithCode(ecode) => ecode,
-            Exit::ScriptFailedWithoutCode => 9930
+            Exit::ScriptFailedWithoutCode => 9930,
+            Exit::LoadArgumentsFile => 9931,
+            Exit::LoadRemotesFile => 9932,
+            Exit::LoadOutputsFile => 9933,
+            Exit::SpawnThreadPool => 9934,
+            Exit::RemotesExhausted => 9935,
+            Exit::OutputsExhausted => 9936,
+            Exit::ArgumentsExhausted => 9937,
+            Exit::PostProcFailed => 9938,
+            Exit::ExecutionSpawnFailed => 9940,
+            Exit::SomeExecutionFailed(_) => 9941
         }
     }
 }

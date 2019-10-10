@@ -2,28 +2,21 @@
 //! Author: Alexandre Péré
 //! 
 //! This module contains the exec subcommand. 
+//! 
+//! Todos: 
+//!     + Makes it possible to use patterns for output folder.
 
 
 //-------------------------------------------------------------------------------------------IMPORTS
 
 
-use std::path;
 use liborchestra::{
     SEND_ARCH_RPATH, 
-    FETCH_IGNORE_RPATH, 
-    FETCH_ARCH_RPATH,
-    PROFILES_FOLDER_RPATH};
-use liborchestra::hosts::{HostConf, HostHandle, LeaveConfig};
-use liborchestra::scheduler::SchedulerHandle;
+    FETCH_ARCH_RPATH};
+use liborchestra::hosts::LeaveConfig;
 use clap;
-use chrono::prelude::*;
-use std::io::prelude::*;
 use uuid;
-use dirs;
-use log::*;
 use futures::executor::block_on;
-use futures::task::SpawnExt;
-use futures::channel::mpsc::*;
 use crate::{to_exit};
 use liborchestra::commons::{EnvironmentKey, EnvironmentValue, substitute_environment, OutputBuf};
 use crate::misc;
@@ -36,7 +29,7 @@ use std::path::{PathBuf, Path};
 
 
 /// Executes a single execution of the script with the command arguments and returns exit code.
-pub fn exec(matches: &clap::ArgMatches) -> Result<Exit, Exit>{
+pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
 
 
     // We initialize the logger
@@ -53,7 +46,7 @@ pub fn exec(matches: &clap::ArgMatches) -> Result<Exit, Exit>{
 
     // We setup some parameters
     let leave = LeaveConfig::from(matches.value_of("leave").unwrap());
-    let parameters = matches.value_of("parameters").unwrap_or("");
+    let parameters = matches.value_of("parameters").unwrap_or("").to_owned();
     let script = PathBuf::from(matches.value_of("SCRIPT").unwrap());
     let local_folder = to_exit!(std::env::current_dir(), Exit::ScriptFolder)?;
     if !script.exists() {
@@ -72,7 +65,9 @@ pub fn exec(matches: &clap::ArgMatches) -> Result<Exit, Exit>{
 
     // We declare the future 
     let future = async move{
-
+        
+        // We copy the matches
+        let matches = matches.clone();
         
         // We generate an uuid
         let id = uuid::Uuid::new_v4().hyphenated().to_string();
@@ -222,11 +217,11 @@ pub fn exec(matches: &clap::ArgMatches) -> Result<Exit, Exit>{
 
 
         // We fetch data back
-        let local_output_folder = to_exit!(PathBuf::from(matches.value_of("output-folder").unwrap()).canonicalize(),
-                                           Exit::OutputFolder)?;
+        let local_output_string = substitute_environment(&context.envs, matches.value_of("output-folder").unwrap());
+        let local_output_folder = to_exit!(PathBuf::from(local_output_string).canonicalize(), Exit::OutputFolder)?;
         if !local_output_folder.exists(){
             to_exit!(std::fs::create_dir_all(&local_output_folder), Exit::OutputFolder)?;
-        }
+        } 
         let local_fetch_archive = local_output_folder.join(FETCH_ARCH_RPATH);
         to_exit!(primitives::fetch_remote_file(&remote_fetch_archive,
                                                &local_fetch_archive,

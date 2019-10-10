@@ -12,28 +12,16 @@ use ctrlc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::path;
 use liborchestra::{
-    SEND_IGNORE_RPATH,
-    SEND_ARCH_RPATH, 
-    FETCH_IGNORE_RPATH, 
-    FETCH_ARCH_RPATH,
     PROFILES_FOLDER_RPATH};
-use liborchestra::hosts::{HostConf, HostHandle, LeaveConfig};
-use liborchestra::scheduler::SchedulerHandle;
+use liborchestra::hosts::{HostConf, HostHandle};
 use clap;
-//use chrono::prelude::*;
-use std::io::prelude::*;
-use uuid;
-use log::*;
-use futures::executor::block_on;
-use futures::task::SpawnExt;
-use futures::channel::mpsc::*;
-use crate::{try_return_code, try_return_err};
-use crate::misc;
 use crate::exit::Exit;
 use liborchestra::primitives::{read_globs_from_file, list_local_folder, Glob};
 use liborchestra::commons::{EnvironmentStore, EnvironmentKey, EnvironmentValue};
+use itertools::Itertools;
+
+
 //-------------------------------------------------------------------------------------------- MACRO
 
 
@@ -129,36 +117,25 @@ pub fn get_send_fetch_ignores_globs(root: &PathBuf, send_path: &str, fetch_path:
     }
 }
 
-/// Allows to parse cartesian product strings to generate a set of parameters. 
-pub fn parse_parameters(param_string: &str, repeats: usize) -> Vec<String> {
-    // We compute the products of entered parameters recursively
-    fn parameters_generator(p: Vec<&str>, repeat: usize) -> Vec<String> {
-        if p.len() == 1 {
-            p.first()
-                .unwrap()
-                .split('|')
-                .map::<Vec<String>, _>(|s| {
-                    (0..repeat).map(|_| String::from(s.trim())).collect()
-                }).flatten()
-                .collect()
-        } else {
-            p.first()
-                .unwrap()
-                .split('|')
-                .map::<Vec<String>, _>(|s| {
-                    let mut params =
-                        parameters_generator(p.split_first().unwrap().1.to_vec(), repeat);
-                    params.iter_mut().for_each(|b| {
-                        b.insert(0, ' ');
-                        b.insert_str(0, s)
-                    });
-                    params
-                }).flatten()
-                .collect()
-        }
+/// Allows to expand a template string into a set of strings
+pub fn expand_template_string(param_string: &str) -> Vec<String> {
+
+    fn cut(p: &str, cut: &str, ig_left: char, ig_right: char) -> Vec<String> {
+        p.split(cut)
+            .map(|s| s.trim()
+                .trim_start_matches(ig_left)
+                .trim_end_matches(ig_right)
+                .into())
+            .collect()
     }
-    parameters_generator(param_string.split("&").collect(), repeats)
+
+    cut(param_string, "+", '{', '}').iter()
+        .map(|s| cut(s, ";", '\'', '\''))
+        .multi_cartesian_product()
+        .map(|v| v.join(""))
+        .collect()
 }
+
 
 /// Installs a ctrlc handler that takes care about cancelling the allocation on the host before 
 /// leaving. 
@@ -212,6 +189,7 @@ pub fn which_shell() -> Result<clap::Shell, String>{
         shell => Err(shell.into()),
     }
 }
+
 
 /// Returns the name of the binary.
 pub fn get_bin_name() -> String{
@@ -295,11 +273,4 @@ pub fn read_local_runaway_envs() -> EnvironmentStore{
             store.insert(EnvironmentKey(k), EnvironmentValue(v));
             store
         })
-}
-
-// Writes environment variables starting with "RUNAWAY"
-pub fn write_local_runaway_envs(store: &EnvironmentStore) {
-    store.iter()
-        .filter(|(EnvironmentKey(k), _)| k.starts_with("RUNAWAY"))
-        .for_each(|(EnvironmentKey(k), EnvironmentValue(v))| std::env::set_var(k, v))
 }

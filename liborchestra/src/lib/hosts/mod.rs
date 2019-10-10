@@ -16,7 +16,7 @@ use crate::ssh;
 use crate::ssh::RemoteHandle;
 use dirs;
 use futures::Future;
-use std::{error, fmt, fs, path, str};
+use std::{error, fs, path, str};
 use chrono::prelude::*;
 use futures::channel::{mpsc, oneshot};
 use futures::executor;
@@ -26,7 +26,7 @@ use futures::FutureExt;
 use futures::stream::{self, StreamExt};
 use std::thread;
 use futures::channel::mpsc::UnboundedSender;
-use std::fmt::{Display, Debug};
+use std::fmt::{self, Display, Debug};
 use std::path::{PathBuf};
 use crate::misc;
 use crate::*;
@@ -120,7 +120,7 @@ derive_from_error!(Error, ssh::config::Error, SshConfigParse);
 struct Frontend(ssh::RemoteHandle);
 
 /// Represents a node id.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct NodeId(String);
 
 /// Represents a node.
@@ -198,7 +198,6 @@ pub struct HostConf {
 impl HostConf {
     /// Load an host configuration from a file.
     pub fn from_file(host_path: &path::PathBuf) -> Result<HostConf, Error> {
-        debug!("Loading host from {}", host_path.to_str().unwrap());
         let file = fs::File::open(host_path).map_err(|_| {
             Error::ReadingHost(format!(
                 "Failed to open host configuration file {}",
@@ -216,7 +215,6 @@ impl HostConf {
 
     /// Writes host configuration to a file.
     pub fn to_file(&self, conf_path: &path::PathBuf) -> Result<(), Error> {
-        debug!("Writing host configuration {:?} to file", self);
         let file = fs::File::create(conf_path).map_err(|_| {
             Error::WritingHost(format!(
                 "Failed to open host configuration file {}",
@@ -250,6 +248,16 @@ impl<'a> From<&'a str> for LeaveConfig {
             _ => panic!("Unknown LeaveConfig input encountered {}", conf),
         }
     }
+}
+
+impl Display for LeaveConfig{
+   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+       match self{
+           LeaveConfig::Nothing => write!(f, "nothing"),
+           LeaveConfig::Code => write!(f, "code"),
+           LeaveConfig::Everything => write!(f, "everything")
+       }
+   }
 }
 
 
@@ -315,18 +323,16 @@ impl Host {
     // Builds a host from a configuration.
     fn from_conf(conf: HostConf) -> Result<Host, Error> {
         // We retrieve the ssh profile from the configuration
-        debug!("Host: Creating Host from HostConf: {:?}", conf);
         let profile = ssh::config::get_profile(
             &dirs::home_dir().unwrap().join(SSH_CONFIG_RPATH),
             &conf.ssh_configuration,
         )?;
 
         // We spawn the frontend remote
-        trace!("Host: Profile retrieved: {:?}", profile);
         let conn = ssh::RemoteHandle::spawn(profile.clone())?;
+        debug!("Host: Connection to frontend acquired: {:?}", conn);
 
         // We generate the host
-        trace!("Host: Connection acquired: {:?}", conn);
         let mut context = FrontendContext(TerminalContext::default());
         context.0.envs.insert(EnvironmentKey("RUNAWAY_PATH".into()), 
                               EnvironmentValue(conf.directory.to_str().unwrap().into()));
@@ -341,7 +347,6 @@ impl Host {
 
     // Starts an allocation
     async fn start_alloc(host: Arc<Mutex<Host>>) -> Result<(), Error> {
-
         // We lock the host. This prevent other futures to start an allocation in the same time.
         let mut host = host.lock().await;
 
@@ -351,11 +356,11 @@ impl Host {
         let frontend_context = allocate_nodes(&host.conn, &host.context, &start_alloc_proc).await?;
 
         // We update the host frontend context (needed to cancel allocation)
-        //{host.lock().await.context = frontend_context.clone()};
         host.context = frontend_context.clone();
 
         // We retrieve node ids from the terminal context
         let node_ids = extract_nodes(&frontend_context.0)?;
+        debug!("Host: Retrieved node ids: {:?}", node_ids);
 
         // We spawn the nodes
         let nodes = stream::iter(node_ids.clone())
@@ -500,16 +505,13 @@ impl HostHandle {
     /// This function spawns the thread that will handle all the repository operations using the
     /// CampaignResource, and returns a handle to it.
     pub fn spawn(host_conf: HostConf) -> Result<HostHandle, Error> {
-        debug!("HostHandle: Start host thread");
         let host = Host::from_conf(host_conf.clone())?;
         let conn = host.conn.clone();
         let (sender, receiver) = mpsc::unbounded();
         let handle = thread::Builder::new().name(format!("orch-host-{}", host_conf.name))
         .spawn(move || {
-            trace!("Host Thread: Creating resource in thread");
             let res = Arc::new(Mutex::new(host));
             let reres = res.clone();
-            trace!("Host Thread: Starting resource loop");
             let mut pool = executor::LocalPool::new();
             let mut spawner = pool.spawner();
             let handling_stream = receiver.for_each(
@@ -694,10 +696,16 @@ async fn allocate_nodes(frontend: &Frontend,
     let (context, outputs) = frontend.0.async_pty(context.to_owned(), cmds.to_owned(), None, None)
         .await
         .map_err(|e| Error::AllocationFailed(format!("Failed to allocate: {}", e)))?;
+    let output_len = outputs.len();
+    // We eventually print the 
+    debug!("Host: Allocation procedure returned:"); 
+    outputs.iter()
+        .zip(cmds)
+        .for_each(|(o, c)| debug!("   {} => {:?}", c.0, o));
     // If the allocation failed we return an error
     misc::compact_outputs(outputs)
         .result()
-        .map_err(|e| Error::AllocationFailed(format!("Allocation command failed: {}", e)))?;
+        .map_err(|e| Error::AllocationFailed(format!("Failed to allocate on command {:?}: {}", cmds.get(output_len-1).unwrap().0, e)))?;
     // We return the Allocation context
     Ok(FrontendContext(context))
 }

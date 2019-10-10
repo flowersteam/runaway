@@ -9,7 +9,6 @@
 //------------------------------------------------------------------------------------------ IMPORTS
 
 
-#![feature(async_await, futures_api)]
 use clap;
 use exit::Exit;
 
@@ -64,7 +63,7 @@ fn main(){
                 .long("vvverbose")
                 .help("Print all logs"))
             .arg(clap::Arg::with_name("print-files")
-                .short("r")
+                .short("p")
                 .long("print-files")
                 .help("Prints transfered files (for debug purposes)"))
             .arg(clap::Arg::with_name("send-ignore")
@@ -87,11 +86,10 @@ fn main(){
                 .default_value("nothing")
                 .help("What to leave on the remote host after execution"))
             .arg(clap::Arg::with_name("remote-folder")
-                .short("R")
+                .short("r")
                 .long("remote-folder")
                 .default_value("$RUNAWAY_PATH/$RUNAWAY_UUID")
-                .help("Folder to deflate data in, on the remote.")
-            )
+                .help("Folder to deflate data in, on the remote."))
             .arg(clap::Arg::with_name("output-folder")
                 .short("o")
                 .long("output-folder")
@@ -103,14 +101,11 @@ fn main(){
             .arg(clap::Arg::with_name("no-env-read")
                 .long("no-env-read")
                 .help("Do not read the local environment variables to apply it to the remote context."))
-            .arg(clap::Arg::with_name("parameters")
-                .help("Script parameters. In normal mode, it should be written as they would \
-                       be for the program to execute. In batch mode, you can use a product \
-                       parameters string.")
+            .arg(clap::Arg::with_name("ARGUMENTS")
+                .help("Script arguments")
                 .multiple(true)
                 .allow_hyphen_values(true)
-                .last(true))
-        )
+                .last(true)))
         .subcommand(clap::SubCommand::with_name("batch")
             .about("Runs a batch of executions on a remote host")
             .arg(clap::Arg::with_name("REMOTE")
@@ -129,14 +124,8 @@ fn main(){
             .arg(clap::Arg::with_name("vvverbose")
                 .long("vvverbose")
                 .help("Print all logs"))
-            .arg(clap::Arg::with_name("benchmark")
-                .long("benchmark")
-                .help("Print only allocations and executions messages for statistics purposes."))
-            .arg(clap::Arg::with_name("leave-tars")
-                .long("leave-tars")
-                .help("Leave transfered tar files to debug .*ignore files."))
             .arg(clap::Arg::with_name("repeats")
-                .short("R")
+                .short("x")
                 .long("repeats")
                 .takes_value(true)
                 .default_value("1")
@@ -150,22 +139,32 @@ fn main(){
                 .possible_value("everything")
                 .default_value("nothing")
                 .help("What to leave on the remote host after execution"))
-            .arg(clap::Arg::with_name("parameters_file")
-                .short("P")
-                .long("parameters_file")
+            .arg(clap::Arg::with_name("arguments-file")
+                .short("A")
+                .long("arguments-file")
                 .takes_value(true)
-                .help("A file specifying a list of newline-separated arguments."))
-            .arg(clap::Arg::with_name("outputs_file")
+                .help("A file specifying a list of newline-separated arguments. Template strings can also be used."))
+            .arg(clap::Arg::with_name("outputs-file")
                 .short("O")
-                .long("outputs_file")
+                .long("outputs-file")
                 .takes_value(true)
                 .help("A file specifying a list of newline-separated output directories."))
-            .arg(clap::Arg::with_name("output_folder")
+            .arg(clap::Arg::with_name("remotes-file")
+                .short("R")
+                .long("remotes-files")
+                .default_value(".")
+                .help("Folder to deflate data in, on local."))
+            .arg(clap::Arg::with_name("output-folders")
                 .short("o")
-                .long("output_folder")
+                .long("output-folders")
                 .takes_value(true)
-                .default_value("batch")
-                .help("The output folder to put the executions result in."))
+                .default_value("batch/$RUNAWAY_UUID")
+                .help("The output folders to put the results in. Template strings can be used."))
+            .arg(clap::Arg::with_name("remote-folders")
+                .short("r")
+                .long("remote-folders")
+                .default_value("$RUNAWAY_PATH/$RUNAWAY_UUID")
+                .help("The folders to put the code in, on the remote. Template strings can be used."))
             .arg(clap::Arg::with_name("send-ignore")
                 .short("s")
                 .long("send-ignore")
@@ -176,12 +175,30 @@ fn main(){
                 .long("fetch-ignore")
                 .default_value(".fetchignore")
                 .help("File containing glob patterns used to ignore files when fetching data."))
-           .arg(clap::Arg::with_name("parameters_string")
-                .help("Script parameters product string.")
+            .arg(clap::Arg::with_name("no-env-read")
+                .long("no-env-read")
+                .help("Do not read the local environment variables to apply it to the remote context."))
+            .arg(clap::Arg::with_name("post-proc-command")
+                .short("p")
+                .long("post-proc-command")
+                .default_value("cd $RUNAWAY_OUTPUT_FOLDER && \
+                                echo $RUNAWAY_ECODE > ecode && \
+                                echo $RUNAWAY_STDOUT > stdout && \
+                                echo $RUNAWAY_STDERR > stdout ")
+                .help("Bash command executed after the data were fetched to the local end. \
+                       Runaway environment variables from the execution can be used. In particular \
+                       we set $RUNAWAY_OUTPUT_FOLDER, $RUNAWAY_ECODE, $RUNAWAY_STDOUT and \
+                       $RUNAWAY_STDERR."))
+           .arg(clap::Arg::with_name("post-proc-script")
+                .short("P")
+                .long("post-proc-script")
+                .help("Bash script to execute instead of post-proc-command, after the data were \
+                       fetched to the local end."))
+           .arg(clap::Arg::with_name("ARGUMENTS")
+                .help("Script argument string. Template strings can be used.")
                 .multiple(true)
                 .allow_hyphen_values(true)
-                .last(true))
-        )
+                .last(true)))
         .subcommand(clap::SubCommand::with_name("sched")
             .about("Use an online scheduler to optimize / explore experiment results.")
             .arg(clap::Arg::with_name("REMOTE")
@@ -258,9 +275,9 @@ fn main(){
     if let Some(matches) = matches.subcommand_matches("test"){
         output = Ok(Exit::AllGood);
     } else if let Some(matches) = matches.subcommand_matches("exec"){
-        output = subcommands::exec(matches);
+        output = subcommands::exec(matches.clone());
     } else if let Some(matches) = matches.subcommand_matches("batch"){
-        output = Ok(Exit::AllGood);
+        output = subcommands::batch(matches.clone());
     } else if let Some(_) = matches.subcommand_matches("install-completion"){
         output = Ok(Exit::AllGood);
     } else if let Some(matches) = matches.subcommand_matches("sched"){
