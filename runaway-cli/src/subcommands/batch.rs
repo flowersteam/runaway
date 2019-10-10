@@ -315,7 +315,7 @@ async fn unpacks_send_on_node(remote_folder: &PathBuf,
 // Performs all actions that need access to the node: Deflate, run and send back.
 async fn perform_on_node(store: EnvironmentStore,
                          host: &HostHandle,
-                         parameters: &str,
+                         arguments: &str,
                          remote_send_archive: &PathBuf,
                          remote_folder_pattern: String,
                          output_folder_pattern: String,
@@ -326,7 +326,7 @@ async fn perform_on_node(store: EnvironmentStore,
 
 
     let mut store = store;
-    push_env(&mut store, "RUNAWAY_PARAMETERS", parameters);
+    push_env(&mut store, "RUNAWAY_ARGUMENTS", arguments);
 
 
     // We generate an uuid
@@ -337,10 +337,10 @@ async fn perform_on_node(store: EnvironmentStore,
     // We acquire the node
     let node = to_exit!(host.clone().async_acquire().await,
                             Exit::NodeAcquisition)?;
-
+    store.extend(node.context.envs.clone().into_iter());
 
     // We generate the remote folder and unpack data into it
-    let remote_folder= PathBuf::from(substitute_environment(&node.context.envs, remote_folder_pattern.as_str()));
+    let remote_folder= PathBuf::from(substitute_environment(&store, remote_folder_pattern.as_str()));
     push_env(&mut store, "RUNAWAY_PWD", remote_folder.to_str().unwrap());
     let (remote_files_before, _) = unpacks_send_on_node(
         &remote_folder, 
@@ -393,8 +393,7 @@ async fn perform_on_node(store: EnvironmentStore,
 
     // We generate output folder
     let local_output_string = substitute_environment(&execution_context.envs, output_folder_pattern.as_str());
-    let local_output_folder = to_exit!(PathBuf::from(local_output_string).canonicalize(),
-                                       Exit::OutputFolder)?;
+    let local_output_folder = PathBuf::from(local_output_string);
     if !local_output_folder.exists(){
         to_exit!(std::fs::create_dir_all(&local_output_folder), Exit::OutputFolder)?;
     }
@@ -472,8 +471,8 @@ fn unpacks_fetch_post_proc(matches: &clap::ArgMatches<'_>,
 
 
     // We execute the post processing
-    let command_string = if matches.is_present("post-proc-script"){
-        let path_str = PathBuf::from(matches.value_of("post-proc-script").unwrap())
+    let command_string = if matches.is_present("post-script"){
+        let path_str = PathBuf::from(matches.value_of("post-script").unwrap())
             .canonicalize()
             .unwrap()
             .to_str()
@@ -481,8 +480,9 @@ fn unpacks_fetch_post_proc(matches: &clap::ArgMatches<'_>,
             .to_owned();
         format!("bash {}", path_str)
     } else {
-        matches.value_of("post-proc-command").unwrap().to_owned()
+        matches.value_of("post-command").unwrap().to_owned()
     };
+    dbg!(&store);
     let post_proc_out = Command::new("bash")
         .arg("-c")
         .arg(command_string)

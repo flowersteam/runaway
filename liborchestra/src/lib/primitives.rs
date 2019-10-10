@@ -209,7 +209,6 @@ pub async fn list_remote_folder(root: &PathBuf,
                                 include_globs: &Vec<Glob<String>>,
                                 node: &RemoteHandle) 
                                -> Result<Vec<PathBuf>, String>{
-    
     // We create ignore globset
     let mut ignore = globset::GlobSetBuilder::new();
     ignore_globs.iter()

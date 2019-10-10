@@ -151,14 +151,14 @@ fn main(){
                 .help("A file specifying a list of newline-separated output directories."))
             .arg(clap::Arg::with_name("remotes-file")
                 .short("R")
-                .long("remotes-files")
-                .default_value(".")
+                .long("remotes-file")
+                .takes_value(true)
                 .help("Folder to deflate data in, on local."))
             .arg(clap::Arg::with_name("output-folders")
                 .short("o")
                 .long("output-folders")
                 .takes_value(true)
-                .default_value("batch/$RUNAWAY_UUID")
+                .default_value("./batch/$RUNAWAY_UUID")
                 .help("The output folders to put the results in. Template strings can be used."))
             .arg(clap::Arg::with_name("remote-folders")
                 .short("r")
@@ -178,20 +178,21 @@ fn main(){
             .arg(clap::Arg::with_name("no-env-read")
                 .long("no-env-read")
                 .help("Do not read the local environment variables to apply it to the remote context."))
-            .arg(clap::Arg::with_name("post-proc-command")
+            .arg(clap::Arg::with_name("post-command")
                 .short("p")
-                .long("post-proc-command")
+                .long("post-command")
                 .default_value("cd $RUNAWAY_OUTPUT_FOLDER && \
                                 echo $RUNAWAY_ECODE > ecode && \
                                 echo $RUNAWAY_STDOUT > stdout && \
-                                echo $RUNAWAY_STDERR > stdout ")
+                                echo $RUNAWAY_STDERR > stderr ")
                 .help("Bash command executed after the data were fetched to the local end. \
                        Runaway environment variables from the execution can be used. In particular \
                        we set $RUNAWAY_OUTPUT_FOLDER, $RUNAWAY_ECODE, $RUNAWAY_STDOUT and \
                        $RUNAWAY_STDERR."))
-           .arg(clap::Arg::with_name("post-proc-script")
+           .arg(clap::Arg::with_name("post-script")
                 .short("P")
-                .long("post-proc-script")
+                .long("post-script")
+                .takes_value(true)
                 .help("Bash script to execute instead of post-proc-command, after the data were \
                        fetched to the local end."))
            .arg(clap::Arg::with_name("ARGUMENTS")
