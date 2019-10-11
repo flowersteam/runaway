@@ -1065,7 +1065,7 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
                 output.status = ExitStatusExt::from_raw(ecode);
                 // If non zero, we stop the execution now. 
                 if ecode != 0{
-                    break 'commands
+                    cmds.clear();
                 }
                 // We write a new command if any
                 if cmds.is_empty(){

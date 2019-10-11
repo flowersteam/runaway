@@ -27,6 +27,9 @@ use std::iter;
 use std::process::{Command, Stdio};
 use std::mem;
 use std::convert::TryInto;
+use rand::{self, Rng};
+use std::io::Write;
+use termcolor::{BufferWriter, Color, ColorChoice, ColorSpec, WriteColor};
 
 
 //--------------------------------------------------------------------------------------- SUBCOMMAND
@@ -59,9 +62,10 @@ pub fn batch(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
     push_env(&mut store, "RUNAWAY_SCRIPT_PATH", script.to_str().unwrap());
 
     // We generate the iterator over things that will vary from executions to executions
-    let arguments_iter = extract_args_iter(&matches)?;
-    let remotes_iter = extract_remote_folders_iter(&matches)?;
-    let outputs_iter = extract_output_folders_iter(&matches)?;
+    let repeats: usize = matches.value_of("repeats").unwrap().parse().unwrap();
+    let arguments_iter = repeat_iter(extract_args_iter(&matches)?, repeats);
+    let remotes_iter = repeat_iter(extract_remote_folders_iter(&matches)?, repeats);
+    let outputs_iter = repeat_iter(extract_output_folders_iter(&matches)?, repeats);
 
     // We compute some paths
     let local_folder = to_exit!(std::env::current_dir(), Exit::ScriptFolder)?;
@@ -78,6 +82,8 @@ pub fn batch(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
         matches.value_of("fetch-ignore").unwrap()
     )?;
     send_ignore_globs.push(primitives::Glob(format!("**/{}", SEND_ARCH_RPATH)));
+    send_ignore_globs.push(primitives::Glob(matches.value_of("send-ignore").unwrap().into()));
+    send_ignore_globs.push(primitives::Glob(matches.value_of("fetch-ignore").unwrap().into()));
     let send_include_globs = vec!();
     let fetch_include_globs = vec!(); 
 
@@ -174,7 +180,7 @@ pub fn batch(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
         return Ok(Exit::AllGood)
     } else {
         let nb = exit.iter()
-            .filter(|e| mem::discriminant(e) != mem::discriminant(&&Exit::AllGood))
+            .filter(|e| mem::discriminant(*e) != mem::discriminant(&Exit::AllGood))
             .count();
         return Ok(Exit::SomeExecutionFailed(nb.try_into().unwrap()))
     }
@@ -193,6 +199,12 @@ impl<S> Iterator for OwnedVecIter<S>{
     fn next(&mut self) -> Option<Self::Item>{
        self.0.pop() 
     }
+}
+
+
+// Creates an iterator that repeats n times the iterator given
+fn repeat_iter(iterator: Box<dyn std::iter::Iterator<Item=String>>, n: usize) -> Box<dyn std::iter::Iterator<Item=String>>{
+    Box::new(iterator.map(move |el| itertools::repeat_n(el, n)).flatten())
 }
 
 // Extracts the arguments list depending on the given cli arguments.
@@ -350,15 +362,24 @@ async fn perform_on_node(store: EnvironmentStore,
 
 
     // We perform the job
+    let color: u8 = rand::thread_rng().gen();
     let stdout_id = id.clone();
+    let stdout = BufferWriter::stdout(ColorChoice::Always);
     let stdout_callback = Box::new(move |a|{
         let string = String::from_utf8(a).unwrap().replace("\r\n", "");
-        print!("{}: {}", stdout_id, string);
+        let mut stdout_buffer = stdout.buffer();
+        stdout_buffer.set_color(ColorSpec::new().set_fg(Some(Color::Ansi256(color)))).unwrap();
+        write!(&mut stdout_buffer, "{}: {}", stdout_id, string).unwrap();
+        stdout.print(&stdout_buffer).unwrap();
     });
     let stderr_id = id.clone();
+    let stderr = BufferWriter::stderr(ColorChoice::Always);
     let stderr_callback = Box::new(move |a|{
         let string = String::from_utf8(a).unwrap().replace("\r\n", "");
-        eprint!("{}: {}", stderr_id, string);
+        let mut stderr_buffer = stderr.buffer();
+        stderr_buffer.set_color(ColorSpec::new().set_fg(Some(Color::Ansi256(color)))).unwrap();
+        write!(&mut stderr_buffer, "{}: {}", stderr_id, string).unwrap();
+        stderr.print(&stderr_buffer).unwrap();
     });
     let mut context = node.context.clone();
     context.envs.extend(store.into_iter());
@@ -370,8 +391,8 @@ async fn perform_on_node(store: EnvironmentStore,
         Exit::Execute)?;
     let out: OutputBuf = liborchestra::misc::compact_outputs(outs).into();
     push_env(&mut execution_context.envs, "RUNAWAY_ECODE", format!("{}", out.ecode));
-    push_env(&mut execution_context.envs, "RUNAWAY_STDOUT", out.stdout);
-    push_env(&mut execution_context.envs, "RUNAWAY_STDERR", out.stderr);
+    push_env(&mut execution_context.envs, "RUNAWAY_STDOUT", &out.stdout);
+    push_env(&mut execution_context.envs, "RUNAWAY_STDERR", &out.stderr);
 
 
     // We list the files to fetch
@@ -482,7 +503,6 @@ fn unpacks_fetch_post_proc(matches: &clap::ArgMatches<'_>,
     } else {
         matches.value_of("post-command").unwrap().to_owned()
     };
-    dbg!(&store);
     let post_proc_out = Command::new("bash")
         .arg("-c")
         .arg(command_string)

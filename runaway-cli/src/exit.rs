@@ -6,7 +6,7 @@
 
 //--------------------------------------------------------------------------------------------- EXIT
 
-
+#[derive(Debug)]
 pub enum Exit {
     AllGood,
     LoadHostConfiguration,

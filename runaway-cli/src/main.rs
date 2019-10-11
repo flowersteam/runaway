@@ -182,9 +182,9 @@ fn main(){
                 .short("p")
                 .long("post-command")
                 .default_value("cd $RUNAWAY_OUTPUT_FOLDER && \
-                                echo $RUNAWAY_ECODE > ecode && \
-                                echo $RUNAWAY_STDOUT > stdout && \
-                                echo $RUNAWAY_STDERR > stderr ")
+                                echo \"$RUNAWAY_ECODE\" > ecode && \
+                                echo \"$RUNAWAY_STDOUT\" > stdout && \
+                                echo \"$RUNAWAY_STDERR\" > stderr ")
                 .help("Bash command executed after the data were fetched to the local end. \
                        Runaway environment variables from the execution can be used. In particular \
                        we set $RUNAWAY_OUTPUT_FOLDER, $RUNAWAY_ECODE, $RUNAWAY_STDOUT and \
@@ -297,6 +297,10 @@ fn main(){
         Ok(Exit::ScriptFailedWithoutCode) => {
             eprintln!("runaway: script execution failed without returning exit code");
             Exit::ScriptFailedWithoutCode.into()
+        }
+        Ok(Exit::SomeExecutionFailed(nb)) => {
+            eprintln!("runaway: {} executions failed.", nb);
+            Exit::SomeExecutionFailed(nb).into()
         }
         Ok(_) => unreachable!(),
         Err(e) => {
