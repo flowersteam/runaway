@@ -50,6 +50,9 @@ pub enum Exit {
     PostProcFailed,
     ExecutionSpawnFailed,
     SomeExecutionFailed(u32),
+    SpawnScheduler,
+    FeaturesNotSet,
+    RecordFeatures,
 }
 
 impl std::fmt::Display for Exit {
@@ -99,8 +102,10 @@ impl std::fmt::Display for Exit {
                                                    after both remote and output folders"),
             Exit::PostProcFailed => write!(f, "failed to execute the post-processing"),
             Exit::ExecutionSpawnFailed => write!(f, "failed to spawn the execution"),
-            Exit::SomeExecutionFailed(nb) => write!(f, "{} executions failed", nb)
-
+            Exit::SomeExecutionFailed(nb) => write!(f, "{} executions failed", nb),
+            Exit::SpawnScheduler => write!(f, "failed to spawn scheduler"),
+            Exit::FeaturesNotSet => write!(f, "features were not set"),
+            Exit::RecordFeatures => write!(f, "failed to record features"),
             }
     }
 }
@@ -149,7 +154,10 @@ impl From<Exit> for i32 {
             Exit::ArgumentsExhausted => 9937,
             Exit::PostProcFailed => 9938,
             Exit::ExecutionSpawnFailed => 9940,
-            Exit::SomeExecutionFailed(_) => 9941
+            Exit::SomeExecutionFailed(_) => 9941,
+            Exit::SpawnScheduler => 9942,
+            Exit::FeaturesNotSet => 9943,
+            Exit::RecordFeatures => 9944,
         }
     }
 }

@@ -1,7 +1,7 @@
-//! runaway-cli/subcommands/batch.rs
+//! runaway-cli/subcommands/sched.rs
 //! Author: Alexandre Péré
 //! 
-//! This module contains the batch subcommand. 
+//! This module contains the sched subcommand. 
 
 
 //-------------------------------------------------------------------------------------------IMPORTS
@@ -16,13 +16,15 @@ use uuid;
 use futures::executor::block_on;
 use futures::task::SpawnExt;
 use crate::{to_exit};
-use liborchestra::commons::{EnvironmentStore,substitute_environment, push_env, OutputBuf, AsResult};
+use liborchestra::commons::{EnvironmentStore,substitute_environment, push_env, OutputBuf, AsResult,
+                            EnvironmentKey, EnvironmentValue};
 use liborchestra::primitives::{self, Glob, Sha1Hash};
 use liborchestra::ssh::RemoteHandle;
+use liborchestra::scheduler::SchedulerHandle;
 use crate::misc;
 use crate::exit::Exit;
 use std::path::{PathBuf, Path};
-use itertools::{EitherOrBoth, Itertools};
+use itertools::{Itertools};
 use std::iter;
 use std::process::{Command, Stdio};
 use std::mem;
@@ -30,13 +32,14 @@ use std::convert::TryInto;
 use rand::{self, Rng};
 use std::io::Write;
 use termcolor::{BufferWriter, Color, ColorChoice, ColorSpec, WriteColor};
-
-
+use futures::stream::{StreamExt, poll_fn};
+use futures::future::{Future, FutureExt};
+use futures::task::Poll;
 //--------------------------------------------------------------------------------------- SUBCOMMAND
 
 
-/// Executes a batch of executions.
-pub fn batch(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
+/// Schedules executions auto;atically
+pub fn sched(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
 
     // We initialize the logger
     misc::init_logger(&matches);
@@ -52,9 +55,6 @@ pub fn batch(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
     let host = misc::get_host(matches.value_of("REMOTE").unwrap())?;
     push_env(&mut store, "RUNAWAY_REMOTE", host.get_name());
 
-    // We install ctrl-c handler
-    misc::install_ctrlc_handler(Some(host.clone()), None);
-
     // We setup a few variables that will be used afterward.
     let leave = LeaveConfig::from(matches.value_of("leave").unwrap());
     push_env(&mut store, "RUNAWAY_LEAVE", format!("{}", leave));
@@ -62,10 +62,8 @@ pub fn batch(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
     push_env(&mut store, "RUNAWAY_SCRIPT_PATH", script.to_str().unwrap());
 
     // We generate the iterator over things that will vary from executions to executions
-    let repeats: usize = matches.value_of("repeats").unwrap().parse().unwrap();
-    let arguments_iter = repeat_iter(extract_args_iter(&matches)?, repeats);
-    let remotes_iter = repeat_iter(extract_remote_folders_iter(&matches)?, repeats);
-    let outputs_iter = repeat_iter(extract_output_folders_iter(&matches)?, repeats);
+    let remotes_template = matches.value_of("remote-folders").unwrap().to_owned();
+    let outputs_template = matches.value_of("output-folders").unwrap().to_owned();
 
     // We compute some paths
     let local_folder = to_exit!(std::env::current_dir(), Exit::ScriptFolder)?;
@@ -87,7 +85,7 @@ pub fn batch(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
     let send_include_globs = vec!();
     let fetch_include_globs = vec!(); 
 
-    // We list the local fils to be send
+    // We list the local files to be send
     let files_to_send = to_exit!(primitives::list_local_folder(
             &local_folder, 
             &send_ignore_globs, 
@@ -113,22 +111,40 @@ pub fn batch(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
                 .create(),
         Exit::SpawnThreadPool)?;
 
+    // We spawn the scheduler command.
+    let sched_string = matches.value_of("SCHEDULER").unwrap().to_owned();
+    let mut sched_args: Vec<String> = sched_string
+        .split(' ')
+        .map(ToOwned::to_owned)
+        .collect();
+    let mut sched_cmd = Command::new(sched_args.remove(0));
+    sched_cmd.args(sched_args)
+        .envs(&store)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    let sched = to_exit!(SchedulerHandle::spawn(sched_cmd, sched_string), Exit::SpawnScheduler)?;
+    let poll_sched = sched.clone();
+    let sched_stream = poll_fn(|mut cx| {
+        let fut = poll_sched.async_request_parameters();
+        futures::pin_mut!(fut);
+        let res = fut.as_mut().poll(&mut cx);
+        match res {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(Ok(params)) => Poll::Ready(Some(params)),
+                    Poll::Ready(Err(liborchestra::scheduler::Error::Shutdown)) => Poll::Ready(None),
+                    Poll::Ready(Err(e)) => {
+                        eprintln!("poll_fn returned an unexpected error: {}", e); 
+                        Poll::Ready(None)
+                    }
+                }
+        });
 
-    // We loop through the arguments to create a future for each argument.
-    let mut execution_handles = vec!();
-    for generated in arguments_iter.zip_longest(remotes_iter.zip_longest(outputs_iter)){
-        // We unpack the iterator and exit with a proper message if the remote or output iterator 
-        // consumes faster than the arguments iterator. This would mean the user made something 
-        // wrong with its templates.
-        use EitherOrBoth::{Both, Left, Right};
-        let (arguments, remote_folder, output_folder) = match generated{
-            Both(arguments, Both(remote_folder, output_folder)) => (arguments, remote_folder, output_folder),
-            Both(_, Left(_)) => return Err(Exit::OutputsExhausted),
-            Both(_, Right(_)) => return Err(Exit::RemotesExhausted),
-            Left(_) => return Err(Exit::ArgumentsExhausted),
-            Right(_) => break
-        };
+    // We install ctrl-c handler
+    misc::install_ctrlc_handler(Some(host.clone()), Some(sched.clone()));
 
+    // We generate the stream that will run executions.
+    let fut = sched_stream.then(|arguments| async {
         // We create local copies of some values to move to the future
         let fut_matches = matches.clone();
         let fut_store = store.clone();
@@ -136,29 +152,29 @@ pub fn batch(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
         let fut_remote_send_archive = remote_send_archive.clone();
         let fut_leave = leave.clone();
         let fut_fetch_ignore_globs = fetch_ignore_globs.clone();
-        let fut_fetch_include_globs = fetch_include_globs.clone(); 
+        let fut_fetch_include_globs = fetch_include_globs.clone();
 
-        // We spawn the execution
-        let fut = async move {
-            let (local_fetch_archive, store, remote_fetch_hash, execution_code) = perform_on_node(
-                fut_store,
-                &fut_host,
-                &arguments,
-                &fut_remote_send_archive,
-                remote_folder,
-                output_folder,
-                &fut_leave,
-                &fut_fetch_ignore_globs,
-                &fut_fetch_include_globs
-            ).await?;
-            unpacks_fetch_post_proc(&fut_matches, local_fetch_archive, store, remote_fetch_hash, execution_code)
-        };
-        let handle = to_exit!(executor.spawn_with_handle(fut), Exit::ExecutionSpawnFailed)?;
-        execution_handles.push(handle);
-    }
-
-    // We build the future waiting for all handles to finish
-    let fut = futures::future::join_all(execution_handles);
+        // We perform the exec
+        let (local_fetch_archive, store, remote_fetch_hash, execution_code) = perform_on_node(
+            fut_store,
+            &fut_host,
+            &arguments,
+            &fut_remote_send_archive,
+            &remotes_template,
+            &outputs_template,
+            &fut_leave,
+            &fut_fetch_ignore_globs,
+            &fut_fetch_include_globs
+        ).await?;
+        let ret = unpacks_fetch_post_proc(&fut_matches, local_fetch_archive, store.clone(), remote_fetch_hash, execution_code);
+        if let Some(EnvironmentValue(features)) = store.get(&EnvironmentKey("RUNAWAY_FEATURES".into())) {
+            to_exit!(sched.async_record_output(arguments, features.to_string()).await, Exit::RecordFeatures)?;
+        } else {
+            eprintln!("RUNAWAY_FEATURES was not set.");
+            return Err(Exit::FeaturesNotSet);
+        }
+        ret
+    }).collect::<Vec<Result<Exit, Exit>>>();
 
     // We execute this future 
     let exits = executor.run(fut);
@@ -201,74 +217,23 @@ impl<S> Iterator for OwnedVecIter<S>{
     }
 }
 
-
 // Creates an iterator that repeats n times the iterator given
 fn repeat_iter(iterator: Box<dyn std::iter::Iterator<Item=String>>, n: usize) -> Box<dyn std::iter::Iterator<Item=String>>{
     Box::new(iterator.map(move |el| itertools::repeat_n(el, n)).flatten())
 }
 
-// Extracts the arguments list depending on the given cli arguments.
-fn extract_args_iter(matches: &clap::ArgMatches) -> Result<Box<dyn std::iter::Iterator<Item=String>>, Exit>{
-    if matches.is_present("arguments-file"){
-        let content = to_exit!(std::fs::read_to_string(matches.value_of("arguments-file").unwrap()), Exit::LoadArgumentsFile)?;
-        let content: Vec<String> = content.lines().map(ToOwned::to_owned).collect();
-        Ok(Box::new(OwnedVecIter(content)
-            .map(|l| misc::expand_template_string(&l).into_iter())
-            .flatten()))
-    } else {
-        let content = matches.value_of("ARGUMENTS").unwrap();
-        Ok(Box::new(misc::expand_template_string(content).into_iter()))
-    }
-}
-
 // Extracts the remote folders list depending on the cli arguments.
 fn extract_remote_folders_iter(matches: &clap::ArgMatches) -> Result<Box<dyn std::iter::Iterator<Item=String>>, Exit>{
-
-    // We retrieve the remote folders string.
-    let content;
-    if matches.is_present("remotes-file"){
-        content = to_exit!(std::fs::read_to_string(matches.value_of("remotes-file").unwrap()), Exit::LoadRemotesFile)?;
-    } else if matches.is_present("remote-folders"){
-        content = matches.value_of("remote-folders").unwrap().to_owned();
-    } else {
-        panic!("no remote folder settings was set.")
-    };
-
-    // The string can either be a template string to expand or a pattern string to repeat.
-    let is_template_string = !content.lines().count() == 1 ||
-                             !misc::expand_template_string(content.lines().nth(0).unwrap()).len() == 1 ;
-    if is_template_string { // template => expand
-        Ok(Box::new(OwnedVecIter(content.lines().map(ToOwned::to_owned).collect())
-           .map(|l| misc::expand_template_string(&l).into_iter())
-           .flatten()))   
-    } else { // pattern => repeat
-        Ok(Box::new(iter::repeat(content.lines().nth(0).unwrap().to_owned())))
-    }
+    // We retrieve the remote folders string
+    let content = matches.value_of("remote-folders").unwrap().to_owned();
+    Ok(Box::new(iter::repeat(content)))
 }
 
 // Extracts the output folders list depending on the cli arguments.
 fn extract_output_folders_iter(matches: &clap::ArgMatches) -> Result<Box<dyn std::iter::Iterator<Item=String>>, Exit>{
-
     // We retrieve the output folders string.
-    let content;
-    if matches.is_present("outputs-file"){
-        content = to_exit!(std::fs::read_to_string(matches.value_of("outputs-file").unwrap()), Exit::LoadOutputsFile)?;
-    } else if matches.is_present("output-folders"){
-        content = matches.value_of("output-folders").unwrap().to_owned();
-    } else {
-        panic!("no output folder settings was set.")
-    };
-
-    // The string can either be a template string to expand or a pattern string to repeat.
-    let is_template_string = !content.lines().count() == 1 ||
-                             !misc::expand_template_string(content.lines().nth(0).unwrap()).len() == 1 ;
-    if is_template_string { // template => expand
-        Ok(Box::new(OwnedVecIter(content.lines().map(ToOwned::to_owned).collect())
-           .map(|l| misc::expand_template_string(&l).into_iter())
-           .flatten()))   
-    } else { // pattern => repeat
-        Ok(Box::new(iter::repeat(content.lines().nth(0).unwrap().to_owned())))
-    }
+    let content = matches.value_of("output-folders").unwrap().to_owned();
+    Ok(Box::new(iter::repeat(content.lines().nth(0).unwrap().to_owned())))
 }
 
 
@@ -329,8 +294,8 @@ async fn perform_on_node(store: EnvironmentStore,
                          host: &HostHandle,
                          arguments: &str,
                          remote_send_archive: &PathBuf,
-                         remote_folder_pattern: String,
-                         output_folder_pattern: String,
+                         remote_folder_pattern: &str,
+                         output_folder_pattern: &str,
                          leave: &LeaveConfig,
                          fetch_ignore_globs: &Vec<Glob<String>>,
                          fetch_include_globs: &Vec<Glob<String>>,
@@ -352,7 +317,7 @@ async fn perform_on_node(store: EnvironmentStore,
     store.extend(node.context.envs.clone().into_iter());
 
     // We generate the remote folder and unpack data into it
-    let remote_folder= PathBuf::from(substitute_environment(&store, remote_folder_pattern.as_str()));
+    let remote_folder= PathBuf::from(substitute_environment(&store, remote_folder_pattern));
     push_env(&mut store, "RUNAWAY_PWD", remote_folder.to_str().unwrap());
     let (remote_files_before, _) = unpacks_send_on_node(
         &remote_folder, 
@@ -413,7 +378,7 @@ async fn perform_on_node(store: EnvironmentStore,
 
 
     // We generate output folder
-    let local_output_string = substitute_environment(&execution_context.envs, output_folder_pattern.as_str());
+    let local_output_string = substitute_environment(&execution_context.envs, output_folder_pattern);
     let local_output_folder = PathBuf::from(local_output_string);
     if !local_output_folder.exists(){
         to_exit!(std::fs::create_dir_all(&local_output_folder), Exit::OutputFolder)?;

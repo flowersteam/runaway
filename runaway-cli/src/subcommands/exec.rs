@@ -41,7 +41,7 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
 
 
     // We install ctrl-c handler
-    misc::install_ctrlc_handler(host.clone());
+    misc::install_ctrlc_handler(Some(host.clone()), None);
 
 
     // We setup some parameters

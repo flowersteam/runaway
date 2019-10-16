@@ -31,6 +31,7 @@ use std::process::Command;
 use crate::*;
 use serde::{Deserialize, Serialize};
 use serde_json;
+use std::os::unix::process::ExitStatusExt;
 
 
 //----------------------------------------------------------------------------------------- MESSAGES
@@ -44,8 +45,8 @@ pub enum RequestMessages{
     /// Example of json transcript: `{"GET_PARAMETERS_REQUEST": {}}`
     GetParametersRequest{},
     /// Example of json transcript: `{"RECORD_OUTPUT_REQUEST": {"parametes": "some params", 
-    /// "features": [0.5, 0.5] }}`
-    RecordOutputRequest{ parameters: String, features: Vec<f64>},
+    /// "features": "[0.5, 0.5]"} }`
+    RecordOutputRequest{ parameters: String, features: String},
     // Example of json transcript: `{"SHUTDOWN_REQUEST": {}}`
     ShutdownRequest{},
 }
@@ -105,7 +106,7 @@ macro_rules! query_command {
                 // We parse the answer
                 let output = String::from_utf8(output).unwrap();
                 serde_json::from_str(output.as_str())
-                    .map_err(|e| Error::Message(format!("Failed to parse message: \n{}", e)))
+                    .map_err(|e| Error::Message(format!("Unknown message received from scheduler: \n{}", e)))
             }
     };
 }
@@ -122,6 +123,8 @@ pub enum Error {
     Channel(String),
     OperationFetch(String),
     Spawn(String),
+    Crashed,
+    Shutdown,
 }
 
 impl error::Error for Error {}
@@ -134,7 +137,9 @@ impl fmt::Display for Error {
             Error::Command(ref s) => write!(f, "Command returned an error: \n{}", s),
             Error::Channel(ref s) => write!(f, "Channel error: \n{}", s),
             Error::OperationFetch(ref s) => write!(f, "When fetching operation result: \n{}", s),
-            Error::Spawn(ref s) => write!(f, "Error occurred when spawning the command: \n {}", s)
+            Error::Spawn(ref s) => write!(f, "Error occurred when spawning the command: \n {}", s),
+            Error::Crashed => write!(f, "The scheduler crashed"),
+            Error::Shutdown => write!(f, "The scheduler is shutdown"),
         }
     }
 }
@@ -149,6 +154,13 @@ use futures::SinkExt;
 use futures::StreamExt;
 use std::process::{Child, ChildStdin, ChildStdout};
 
+/// An enumeration representing the status of the scheduler
+enum SchedulerStatus{
+    Running,
+    Crashed,
+    Shutdown,
+}
+
 /// A `Scheduler` represents an instance of a running process which implement an automatic scheduling 
 /// logic, and which can be communicated with through the json messaging exposed earlier via stdin
 /// and stdout. The child process handles to stdin and stdout are turned into non-blocking ones, 
@@ -157,6 +169,7 @@ struct Scheduler {
     child: Child,
     stdin: ChildStdin,
     stdout: ChildStdout,
+    status: SchedulerStatus,
 }
 
 impl Scheduler {
@@ -174,7 +187,23 @@ impl Scheduler {
             child,
             stdin,
             stdout,
+            status: SchedulerStatus::Running
         })
+    }
+
+    /// Transitions scheduler status
+    fn transitions(&mut self){
+        match self.status{
+            SchedulerStatus::Running => {
+                if let Ok(Some(status)) = self.child.try_wait(){
+                    let status = status.code().unwrap_or(status.signal().unwrap());
+                    error!("Scheduler: Transitions to crashed with exit status {}.", status);
+                    self.status = SchedulerStatus::Crashed;
+                }
+            }
+            SchedulerStatus::Crashed | SchedulerStatus::Shutdown => {} // absorbing states.
+        }
+        
     }
 
     /// Inner future containing the logic to request parameters. 
@@ -188,6 +217,14 @@ impl Scheduler {
             // messages meant for this task. Note, that this is different from the ssh connection 
             // case where io ocurs on the same connection, but separate channels.
             let mut sched = sched.lock().await;
+
+            // We transition and checks if the scheduler crashed to respond approprietely.
+            sched.transitions();
+            match sched.status{
+                SchedulerStatus::Running => {}
+                SchedulerStatus::Crashed => {return Err(Error::Crashed)}
+                SchedulerStatus::Shutdown => {return Err(Error::Shutdown)}
+            }
  
             // We query the command
             let request = RequestMessages::GetParametersRequest{};
@@ -208,7 +245,7 @@ impl Scheduler {
     }
 
     /// Inner future containing the logic to record an output. 
-    async fn record_output(sched: Arc<Mutex<Scheduler>>, parameters: String, features: Vec<f64>) -> Result<(), Error>{
+    async fn record_output(sched: Arc<Mutex<Scheduler>>, parameters: String, features: String) -> Result<(), Error>{
         debug!("Scheduler: Recording output");
         {   
             // We bind the command to this scope. Such that if one of the io blocks, we are sure that 
@@ -216,6 +253,14 @@ impl Scheduler {
             // messages meant for this task. Note, that this is different from the ssh connection 
             // case where io ocurs on the same connection, but separate channels.
             let mut sched = sched.lock().await;
+            
+            // We transition and checks if the scheduler crashed to respond approprietely.
+            sched.transitions();
+            match sched.status{
+                SchedulerStatus::Running => {}
+                SchedulerStatus::Crashed => {return Err(Error::Crashed)}
+                SchedulerStatus::Shutdown => {return Err(Error::Shutdown)}
+            }
  
             // We query the command
             let request = RequestMessages::RecordOutputRequest{parameters, features};
@@ -235,6 +280,14 @@ impl Scheduler {
             // messages meant for this task. Note, that this is different from the ssh connection 
             // case where io ocurs on the same connection, but separate channels.
             let mut sched = sched.lock().await;
+
+            // We transition and checks if the scheduler crashed to respond approprietely.
+            sched.transitions();
+            match sched.status{
+                SchedulerStatus::Running => {}
+                SchedulerStatus::Crashed => {return Err(Error::Crashed)}
+                SchedulerStatus::Shutdown => {return Ok(())}
+            }
  
             // We query the command 
             let request = RequestMessages::ShutdownRequest{};
@@ -246,6 +299,9 @@ impl Scheduler {
             // We wait for the child to close. No need to yield the thread, since there should be no
             // other tasks left.
             sched.child.wait().unwrap();
+
+            // We mutate the status
+            sched.status = SchedulerStatus::Shutdown;
 
             Ok(())
         }
@@ -260,7 +316,8 @@ impl Scheduler {
 enum OperationInput{
     RequestParameters,
     TryRequestParameters,
-    RecordOutput(String, Vec<f64>),
+    RecordOutput(String, String),
+    Shutdown,
 }
 
 #[derive(Debug)]
@@ -270,6 +327,7 @@ enum OperationOutput{
     RequestParameters(Result<String, Error>),
     TryRequestParameters(Result<Option<String>, Error>),
     RecordOutput(Result<(), Error>),
+    Shutdown(Result<(), Error>)
 }
 
 #[derive(Clone)]
@@ -350,6 +408,17 @@ impl SchedulerHandle {
                                     })
                             )
                         }
+                        OperationInput::Shutdown => {
+                            spawner.spawn_local(
+                                Scheduler::shutdown(res.clone())
+                                    .map(|a| {
+                                        sender.send(OperationOutput::Shutdown(a))
+                                            .map_err(|e| error!("Scheduler Thread: Failed to \\
+                                            send an operation output: \n{:?}", e))
+                                            .unwrap();
+                                    })
+                            )
+                        }
                     }.map_err(|e| error!("Scheduler Thread: Failed to spawn the operation: \n{:?}", e))
                     .unwrap();
                     future::ready(())
@@ -366,11 +435,6 @@ impl SchedulerHandle {
             // that will return when the channel closes)
             trace!("Scheduler Thread: Starting local executor.");
             pool.run();
-
-            // All the tasks are done, we shutdown the resource.
-            trace!("Scheduler Thread: All futures processed. Shutting command down.");
-            executor::block_on(Scheduler::shutdown(reres.clone()))
-                .unwrap_or_else(|e| error!("Scheduler: Failed to shutdown scheduler: \n {}", e));
             trace!("Scheduler Thread: All good. Leaving...");
         }).expect("Failed to spawn scheduler thread.");
 
@@ -430,7 +494,7 @@ impl SchedulerHandle {
     }
 
     /// Async method, returning a future that ultimately resolves after the output was recorded.
-    pub fn async_record_output(&self, parameters: String, output: Vec<f64>) -> impl Future<Output=Result<(),Error>> {
+    pub fn async_record_output(&self, parameters: String, output: String) -> impl Future<Output=Result<(),Error>> {
         debug!("SchedulerHandle: Building async_record_output future");
         let mut chan = self._sender.clone();
         async move {
@@ -447,6 +511,31 @@ impl SchedulerHandle {
             }
         }
     }
+
+    /// Async method, returning a future that ultimately resolves after the scheduler was shutdown.
+    pub fn async_shutdown(&self) -> impl Future<Output=Result<(),Error>> {
+        debug!("SchedulerHandle: Building shutdown future");
+        let mut chan = self._sender.clone();
+        async move {
+            let (sender, receiver) = oneshot::channel();
+            trace!("SchedulerHandle::async_shutdown_future: Sending input");
+            chan.send((sender, OperationInput::Shutdown))
+                .await
+                .map_err(|e| Error::Channel(e.to_string()))?;
+            trace!("SchedulerHandle::async_shutdown_future: Awaiting output");
+            match receiver.await {
+                Err(e) => Err(Error::OperationFetch(format!("{}", e))),
+                Ok(OperationOutput::Shutdown(res)) => res,
+                Ok(e) => Err(Error::OperationFetch(format!("Expected Shutdown, found {:?}", e)))
+            }
+        }
+    }
+
+     /// Downgrades the handle, meaning that the resource could be dropped before this guy.
+    pub fn downgrade(&mut self) {
+        self._dropper.downgrade();
+    }
+
 }
 
 impl Debug for SchedulerHandle{
@@ -602,6 +691,7 @@ if __name__ == \"__main__\":
 
         block_on(scheduler.async_record_output("params_from_rust".into(), vec![1.5])).unwrap_err();
 
+        
 
     }
 

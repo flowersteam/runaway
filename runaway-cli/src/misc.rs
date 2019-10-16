@@ -19,6 +19,7 @@ use clap;
 use crate::exit::Exit;
 use liborchestra::primitives::{read_globs_from_file, list_local_folder, Glob};
 use liborchestra::commons::{EnvironmentStore, EnvironmentKey, EnvironmentValue};
+use liborchestra::scheduler::SchedulerHandle;
 use itertools::Itertools;
 
 
@@ -137,34 +138,50 @@ pub fn expand_template_string(param_string: &str) -> Vec<String> {
 }
 
 
-/// Installs a ctrlc handler that takes care about cancelling the allocation on the host before 
-/// leaving. 
-pub fn install_ctrlc_handler(signal_host: HostHandle){
+// When the user wants to leave runaway, it will likely hit Ctrl-C. In this case, we may need to clean
+// a few things before leaving. For instance, the allocation should always be revoked before leaving
+// to avoid spending credit for nothing. Also, when using a scheduler, we would need to shut it down 
+// before leaving. All that is handled by the following Ctrl-C handler.
+pub fn install_ctrlc_handler(signal_host: Option<HostHandle>, signal_scheduler: Option<SchedulerHandle>){
+
     // We have to downgrade the handle to the host, because the ctrl-c handler is not dropped during
     // program execution. This would prevent the host from being dropped by the dropper. For this 
     // reason we have to downgrade the dropper. 
     let mut signal_host = signal_host;
-    signal_host.downgrade();
-
+    if let Some(host) = signal_host.as_mut() { host.downgrade() }
+    let mut signal_scheduler = signal_scheduler;
+    if let Some(sched) = signal_scheduler.as_mut() { sched.downgrade() }
+   
     // We set the ctrl c handler
     let signal_counter = AtomicUsize::new(0);
 
-
     ctrlc::set_handler(move || {
         eprintln!("runaway: received ctrl-c.");
-        let host = signal_host.clone();
+        let mut host = signal_host.clone();
+        let mut sched = signal_scheduler.clone();
         let n_ctrlc = signal_counter.fetch_add(1, Ordering::SeqCst);
         match n_ctrlc{
             0 => {
-                futures::executor::block_on(host.async_abort()).unwrap();
-                eprintln!("runaway: waiting for running execution to finish");
+                if let Some(sched) = sched.as_mut() {
+                    futures::executor::block_on(sched.async_shutdown())
+                        .unwrap_or_else(|e| eprintln!("runaway: failed to shutdown scheduler: {}", e));
+                    eprintln!("runaway: scheduler shutdown.") 
+                }
+                if let Some(host) = host.as_mut(){ 
+                    futures::executor::block_on(host.async_abort())
+                        .unwrap_or_else(|e| eprintln!("runaway: failed to abort host: {}", e));
+                    eprintln!("runaway: host aborted. Waiting for running execution ... ");
+                }
             }
             1 => {
-                futures::executor::block_on(host.async_shutdown()).unwrap();
-                eprintln!("runaway: host shutdown. Saving execution data.");
+                if let Some(host) = host.as_mut(){ 
+                    futures::executor::block_on(host.async_shutdown())
+                        .unwrap_or_else(|e| eprintln!("Frunaway: failed to shutdown host: {}", e));
+                    eprintln!("runaway: shutting host down. Execution were not awaited. Saving execution data.");
+                }
             }
             2 => {
-                eprintln!("runaway: you want to quit too hard. Leaving.");
+                eprintln!("runaway: Data were not saved. Leaving.");
                 std::process::exit(900);
             }
             _ => {
