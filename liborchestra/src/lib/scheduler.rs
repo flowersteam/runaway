@@ -207,39 +207,35 @@ impl Scheduler {
     }
 
     /// Inner future containing the logic to request parameters. 
-    async fn request_parameters(sched: Arc<Mutex<Scheduler>>, wait: bool) 
+    async fn request_parameters(sched: Arc<Mutex<Scheduler>>) 
         -> Result<Option<String>, Error>
     {
         debug!("Scheduler: Requesting parameters");
-        {   
-            // We bind the command to this scope. Such that if one of the io blocks, we are sure that 
-            // an other task doesn't get woken up before this one, and reads/write the end of the
-            // messages meant for this task. Note, that this is different from the ssh connection 
-            // case where io ocurs on the same connection, but separate channels.
-            let mut sched = sched.lock().await;
+        loop{
+            let response = {
+                // Bind sched here.
+                let mut sched = sched.lock().await;
 
-            // We transition and checks if the scheduler crashed to respond approprietely.
-            sched.transitions();
-            match sched.status{
-                SchedulerStatus::Running => {}
-                SchedulerStatus::Crashed => {return Err(Error::Crashed)}
-                SchedulerStatus::Shutdown => {return Err(Error::Shutdown)}
-            }
- 
-            // We query the command
-            let request = RequestMessages::GetParametersRequest{};
-            loop{
-                match query_command!(sched, &request)?{
-                    ResponseMessages::GetParametersResponse{parameters: p} => return Ok(Some(p)),
-                    ResponseMessages::NotReadyResponse{} => {
-                        if wait{
-                            async_sleep!(std::time::Duration::from_secs(5))
-                        } else {
-                            return Ok(None)
-                        }
-                    }
-                    m => return Err(Error::Message(format!("Unexpected message received {:?}", m)))
+                // We transition and checks if the scheduler crashed to respond approprietely.
+                sched.transitions();
+                match sched.status{
+                    SchedulerStatus::Running => {}
+                    SchedulerStatus::Crashed => {return Err(Error::Crashed)}
+                    SchedulerStatus::Shutdown => {return Err(Error::Shutdown)}
                 }
+
+                // We query the command
+                let request = RequestMessages::GetParametersRequest{};
+                query_command!(sched, &request)?
+            };
+ 
+            // We act depending on response
+            match response {
+                ResponseMessages::GetParametersResponse{parameters: p} => return Ok(Some(p)),
+                ResponseMessages::NotReadyResponse{} => {
+                    async_sleep!(std::time::Duration::from_secs(5))
+                }
+                m => return Err(Error::Message(format!("Unexpected message received {:?}", m)))
             }
         }
     }
@@ -315,7 +311,6 @@ impl Scheduler {
 /// This contains the input of the operation if any.
 enum OperationInput{
     RequestParameters,
-    TryRequestParameters,
     RecordOutput(String, String),
     Shutdown,
 }
@@ -325,7 +320,6 @@ enum OperationInput{
 /// operation.
 enum OperationOutput{
     RequestParameters(Result<String, Error>),
-    TryRequestParameters(Result<Option<String>, Error>),
     RecordOutput(Result<(), Error>),
     Shutdown(Result<(), Error>)
 }
@@ -376,21 +370,10 @@ impl SchedulerHandle {
                     match operation {
                         OperationInput::RequestParameters => {
                             spawner.spawn_local(
-                                Scheduler::request_parameters(res.clone(), true)
+                                Scheduler::request_parameters(res.clone())
                                     .map(|a| {
                                         sender.send(OperationOutput::RequestParameters(a
                                                 .and_then(|a| Ok(a.unwrap()))))
-                                            .map_err(|e| error!("Scheduler Thread: Failed to \\
-                                            send an operation output: \n{:?}", e))
-                                            .unwrap();
-                                    })
-                            )
-                        }
-                        OperationInput::TryRequestParameters => {
-                            spawner.spawn_local(
-                                Scheduler::request_parameters(res.clone(), false)
-                                    .map(|a| {
-                                        sender.send(OperationOutput::TryRequestParameters(a))
                                             .map_err(|e| error!("Scheduler Thread: Failed to \\
                                             send an operation output: \n{:?}", e))
                                             .unwrap();
@@ -435,6 +418,11 @@ impl SchedulerHandle {
             // that will return when the channel closes)
             trace!("Scheduler Thread: Starting local executor.");
             pool.run();
+
+            // All the tasks are done, we shutdown the resource.
+            trace!("Scheduler Thread: All futures processed. Shutting command down.");
+            executor::block_on(Scheduler::shutdown(reres.clone()))
+                .unwrap_or_else(|e| error!("Scheduler: Failed to shutdown scheduler: \n {}", e));
             trace!("Scheduler Thread: All good. Leaving...");
         }).expect("Failed to spawn scheduler thread.");
 
@@ -469,26 +457,6 @@ impl SchedulerHandle {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::RequestParameters(res)) => res,
                 Ok(e) => Err(Error::OperationFetch(format!("Expected RequestParameters, found {:?}", e)))
-            }
-        }
-    }
-
-    /// Async method, which tries to request a parameter string from the scheduler, but returns a 
-    /// None if the scheduler is not ready.
-    pub fn async_try_request_parameters(&self) -> impl Future<Output=Result<Option<String>,Error>> {
-        debug!("SchedulerHandle: Building async_try_request_parameters future");
-        let mut chan = self._sender.clone();
-        async move {
-            let (sender, receiver) = oneshot::channel();
-            trace!("SchedulerHandle::async_try_request_parameters_future: Sending input");
-            chan.send((sender, OperationInput::TryRequestParameters))
-                .await
-                .map_err(|e| Error::Channel(e.to_string()))?;
-            trace!("SchedulerHandle::async_try_request_parameters_future: Awaiting output");
-            match receiver.await {
-                Err(e) => Err(Error::OperationFetch(format!("{}", e))),
-                Ok(OperationOutput::TryRequestParameters(res)) => res,
-                Ok(e) => Err(Error::OperationFetch(format!("Expected TryRequestParameters, found {:?}", e)))
             }
         }
     }
@@ -604,13 +572,13 @@ if __name__ == \"__main__\":
     while True:
         inpt = json.loads(input())
         if \"GET_PARAMETERS_REQUEST\" in inpt.keys():
-            sys.stderr.write(\"Python received GET_PARAMETERS_REQUEST\\n\")
+            sys.stderr.write(f\"Python received GET_PARAMETERS_REQUEST {inpt} \\n\")
             print(json.dumps({\"GET_PARAMETERS_RESPONSE\": {\"parameters\": \"params_from_python\"}}))
             sys.stderr.write(\"Python sent GET_PARAMETERS_RESPONSE\")
         elif \"RECORD_OUTPUT_REQUEST\" in inpt.keys():
-            sys.stderr.write(\"Python received RECORD_OUTPUT_REQUEST\\n\")
+            sys.stderr.write(f\"Python received RECORD_OUTPUT_REQUEST {inpt}\\n\")
             if inpt[\"RECORD_OUTPUT_REQUEST\"][\"parameters\"] != \"params_from_rust\": raise Exception()
-            if inpt[\"RECORD_OUTPUT_REQUEST\"][\"features\"] != [1.5]: raise Exception()
+            if inpt[\"RECORD_OUTPUT_REQUEST\"][\"features\"] != '1.5': raise Exception()
             sys.stdout.write(json.dumps({\"RECORD_OUTPUT_RESPONSE\": {}}))
             sys.stdout.write(\"\\n\")
         elif \"SHUTDOWN_REQUEST\" in inpt.keys():
@@ -636,13 +604,13 @@ if __name__ == \"__main__\":
     while True:
         inpt = json.loads(input())
         if \"GET_PARAMETERS_REQUEST\" in inpt.keys():
-            sys.stderr.write(\"Python received GET_PARAMETERS_REQUEST\\n\")
+            sys.stderr.write(f\"Python received GET_PARAMETERS_REQUEST: {inpt} \\n\")
             print(json.dumps({\"ERROR_RESPONSE\": {\"message\": \"error_from_python\"}}))
             sys.stderr.write(\"Python sent GET_PARAMETERS_RESPONSE\")
         elif \"RECORD_OUTPUT_REQUEST\" in inpt.keys():
             sys.stderr.write(\"Python received RECORD_OUTPUT_REQUEST\\n\")
             if inpt[\"RECORD_OUTPUT_REQUEST\"][\"parameters\"] != \"params_from_rust\": raise Exception()
-            if inpt[\"RECORD_OUTPUT_REQUEST\"][\"features\"] != [1.5]: raise Exception()
+            if inpt[\"RECORD_OUTPUT_REQUEST\"][\"features\"] != '1.5': raise Exception()
             print(json.dumps({\"ERROR_RESPONSE\": {\"message\": \"error_from_python\"}}))
         elif \"SHUTDOWN_REQUEST\" in inpt.keys():
             sys.stderr.write(\"Python rceived SHUTDOWN_REQUEST\\n\")
@@ -675,7 +643,7 @@ if __name__ == \"__main__\":
         let parameters = block_on(scheduler.async_request_parameters()).unwrap();
         assert_eq!(parameters, format!("params_from_python"));
 
-        block_on(scheduler.async_record_output("params_from_rust".into(), vec![1.5])).unwrap();
+        block_on(scheduler.async_record_output("params_from_rust".into(), "1.5".into())).unwrap();
 
         drop(scheduler);
 
@@ -689,7 +657,7 @@ if __name__ == \"__main__\":
 
         block_on(scheduler.async_request_parameters()).unwrap_err();
 
-        block_on(scheduler.async_record_output("params_from_rust".into(), vec![1.5])).unwrap_err();
+        block_on(scheduler.async_record_output("params_from_rust".into(), "1.5".into())).unwrap_err();
 
         
 
