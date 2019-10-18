@@ -270,16 +270,6 @@ fn main(){
                 .takes_value(true)
                 .help("Bash script to execute instead of post-proc-command, after the data were \
                        fetched to the local end."))
-            .arg(clap::Arg::with_name("send-ignore")
-                .short("s")
-                .long("send-ignore")
-                .default_value(".sendignore")
-                .help("File containing glob patterns used to ignore files when sending data."))
-            .arg(clap::Arg::with_name("fetch-ignore")
-                .short("f")
-                .long("fetch-ignore")
-                .default_value(".fetchignore")
-                .help("File containing glob patterns used to ignore files when fetching data."))
             .arg(clap::Arg::with_name("stop-on-fail")
                 .long("stop-on-fail")
                 .help(""))
@@ -321,7 +311,7 @@ fn main(){
     } else if let Some(_) = matches.subcommand_matches("install-completion"){
         output = Ok(Exit::AllGood);
     } else if let Some(matches) = matches.subcommand_matches("sched"){
-        output = Ok(Exit::AllGood);
+        output = subcommands::sched(matches.clone());
     } else {
         output = Ok(Exit::AllGood);
     }

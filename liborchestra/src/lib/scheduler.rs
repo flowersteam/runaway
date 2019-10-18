@@ -207,9 +207,7 @@ impl Scheduler {
     }
 
     /// Inner future containing the logic to request parameters. 
-    async fn request_parameters(sched: Arc<Mutex<Scheduler>>) 
-        -> Result<Option<String>, Error>
-    {
+    async fn request_parameters(sched: Arc<Mutex<Scheduler>>) -> Result<String, Error> {
         debug!("Scheduler: Requesting parameters");
         loop{
             let response = {
@@ -228,10 +226,10 @@ impl Scheduler {
                 let request = RequestMessages::GetParametersRequest{};
                 query_command!(sched, &request)?
             };
- 
+
             // We act depending on response
             match response {
-                ResponseMessages::GetParametersResponse{parameters: p} => return Ok(Some(p)),
+                ResponseMessages::GetParametersResponse{parameters: p} => return Ok(p),
                 ResponseMessages::NotReadyResponse{} => {
                     async_sleep!(std::time::Duration::from_secs(5))
                 }
@@ -372,8 +370,7 @@ impl SchedulerHandle {
                             spawner.spawn_local(
                                 Scheduler::request_parameters(res.clone())
                                     .map(|a| {
-                                        sender.send(OperationOutput::RequestParameters(a
-                                                .and_then(|a| Ok(a.unwrap()))))
+                                        sender.send(OperationOutput::RequestParameters(a))
                                             .map_err(|e| error!("Scheduler Thread: Failed to \\
                                             send an operation output: \n{:?}", e))
                                             .unwrap();

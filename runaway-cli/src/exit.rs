@@ -6,7 +6,7 @@
 
 //--------------------------------------------------------------------------------------------- EXIT
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Exit {
     AllGood,
     LoadHostConfiguration,
@@ -51,8 +51,11 @@ pub enum Exit {
     ExecutionSpawnFailed,
     SomeExecutionFailed(u32),
     SpawnScheduler,
+    RequestParameters,
     FeaturesNotSet,
     RecordFeatures,
+    SchedulerCrashed,
+    SchedulerShutdown,
 }
 
 impl std::fmt::Display for Exit {
@@ -104,8 +107,11 @@ impl std::fmt::Display for Exit {
             Exit::ExecutionSpawnFailed => write!(f, "failed to spawn the execution"),
             Exit::SomeExecutionFailed(nb) => write!(f, "{} executions failed", nb),
             Exit::SpawnScheduler => write!(f, "failed to spawn scheduler"),
+            Exit::RequestParameters => write!(f, "failed to request parameters"),
             Exit::FeaturesNotSet => write!(f, "features were not set"),
             Exit::RecordFeatures => write!(f, "failed to record features"),
+            Exit::SchedulerCrashed => write!(f, "scheduler crashed"),
+            Exit::SchedulerShutdown => write!(f, "scheduler was shutdown"),
             }
     }
 }
@@ -156,8 +162,11 @@ impl From<Exit> for i32 {
             Exit::ExecutionSpawnFailed => 9940,
             Exit::SomeExecutionFailed(_) => 9941,
             Exit::SpawnScheduler => 9942,
-            Exit::FeaturesNotSet => 9943,
-            Exit::RecordFeatures => 9944,
+            Exit::RequestParameters => 9943,
+            Exit::FeaturesNotSet => 9944,
+            Exit::RecordFeatures => 9945,
+            Exit::SchedulerCrashed => 9946,
+            Exit::SchedulerShutdown => 9947,
         }
     }
 }

@@ -13,18 +13,18 @@ use liborchestra::{
 use liborchestra::hosts::{HostHandle, LeaveConfig};
 use clap;
 use uuid;
-use futures::executor::block_on;
+use futures::executor::{block_on};
 use futures::task::SpawnExt;
 use crate::{to_exit};
 use liborchestra::commons::{EnvironmentStore,substitute_environment, push_env, OutputBuf, AsResult,
-                            EnvironmentKey, EnvironmentValue};
+                            EnvironmentKey, EnvironmentValue, DropBack, Expire};
+use liborchestra::hosts::NodeHandle;
 use liborchestra::primitives::{self, Glob, Sha1Hash};
 use liborchestra::ssh::RemoteHandle;
 use liborchestra::scheduler::SchedulerHandle;
 use crate::misc;
 use crate::exit::Exit;
 use std::path::{PathBuf, Path};
-use itertools::{Itertools};
 use std::iter;
 use std::process::{Command, Stdio};
 use std::mem;
@@ -32,9 +32,8 @@ use std::convert::TryInto;
 use rand::{self, Rng};
 use std::io::Write;
 use termcolor::{BufferWriter, Color, ColorChoice, ColorSpec, WriteColor};
-use futures::stream::{StreamExt, poll_fn};
-use futures::future::{Future, FutureExt};
-use futures::task::Poll;
+
+
 //--------------------------------------------------------------------------------------- SUBCOMMAND
 
 
@@ -124,60 +123,96 @@ pub fn sched(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
     let sched = to_exit!(SchedulerHandle::spawn(sched_cmd, sched_string), Exit::SpawnScheduler)?;
-    let poll_sched = sched.clone();
-    let sched_stream = poll_fn(|mut cx| {
-        let fut = poll_sched.async_request_parameters();
-        futures::pin_mut!(fut);
-        let res = fut.as_mut().poll(&mut cx);
-        match res {
-                    Poll::Pending => Poll::Pending,
-                    Poll::Ready(Ok(params)) => Poll::Ready(Some(params)),
-                    Poll::Ready(Err(liborchestra::scheduler::Error::Shutdown)) => Poll::Ready(None),
-                    Poll::Ready(Err(e)) => {
-                        eprintln!("poll_fn returned an unexpected error: {}", e); 
-                        Poll::Ready(None)
-                    }
-                }
-        });
 
     // We install ctrl-c handler
     misc::install_ctrlc_handler(Some(host.clone()), Some(sched.clone()));
 
-    // We generate the stream that will run executions.
-    let fut = sched_stream.then(|arguments| async {
-        // We create local copies of some values to move to the future
-        let fut_matches = matches.clone();
-        let fut_store = store.clone();
-        let fut_host = host.clone();
-        let fut_remote_send_archive = remote_send_archive.clone();
-        let fut_leave = leave.clone();
-        let fut_fetch_ignore_globs = fetch_ignore_globs.clone();
-        let fut_fetch_include_globs = fetch_include_globs.clone();
+    // We perform the executions
+    let mut execs_handle = Vec::new();
 
-        // We perform the exec
-        let (local_fetch_archive, store, remote_fetch_hash, execution_code) = perform_on_node(
-            fut_store,
-            &fut_host,
-            &arguments,
-            &fut_remote_send_archive,
-            &remotes_template,
-            &outputs_template,
-            &fut_leave,
-            &fut_fetch_ignore_globs,
-            &fut_fetch_include_globs
-        ).await?;
-        let ret = unpacks_fetch_post_proc(&fut_matches, local_fetch_archive, store.clone(), remote_fetch_hash, execution_code);
-        if let Some(EnvironmentValue(features)) = store.get(&EnvironmentKey("RUNAWAY_FEATURES".into())) {
-            to_exit!(sched.async_record_output(arguments, features.to_string()).await, Exit::RecordFeatures)?;
-        } else {
-            eprintln!("RUNAWAY_FEATURES was not set.");
-            return Err(Exit::FeaturesNotSet);
-        }
-        ret
-    }).collect::<Vec<Result<Exit, Exit>>>();
+    let stopping_exit = loop{
 
-    // We execute this future 
-    let exits = executor.run(fut);
+        // We make local copies of variables
+        let host = host.clone();
+        let remote_send_archive = remote_send_archive.clone();
+        let remotes_template = remotes_template.clone();
+        let outputs_template = outputs_template.clone();
+        let leave = leave.clone();
+        let fetch_ignore_globs = fetch_ignore_globs.clone();
+        let fetch_include_globs = fetch_include_globs.clone();
+        let sched = sched.clone();
+        let store = store.clone();
+        let matches = matches.clone();
+
+        // This first future captures the arguments and the nodes.
+        let arg_and_node_and_store_fut = async {
+
+            // Again, we make local copies.
+            let sched = sched.clone();
+            let host = host.clone();
+
+            // We get the arguments
+            let arguments: String = match sched.async_request_parameters().await{
+                Ok(arg) => Ok(arg),
+                Err(liborchestra::scheduler::Error::Crashed) => Err(Exit::SchedulerCrashed),
+                Err(liborchestra::scheduler::Error::Shutdown) => Err(Exit::SchedulerShutdown),
+                Err(e) => to_exit!(Err(e), Exit::RequestParameters)
+            }?;
+
+            // We acquire the node
+            let node = to_exit!(host.async_acquire().await, Exit::NodeAcquisition)?;
+            let mut store = store;
+            store.extend(node.context.envs.clone().into_iter());
+
+            Ok((arguments, node, store))
+        };
+
+        // We execute this future and breaks if an error was encountered
+        let (arguments, node, store) = match executor.run(arg_and_node_and_store_fut){
+            Ok(a) => a,
+            Err(e) => break e
+        };
+
+        // We spawn the execution future
+        let perform_fut = async move {
+
+            // We perform the exec
+            let (local_fetch_archive, store, remote_fetch_hash, execution_code) = perform_on_node(
+                store,
+                node,
+                &host,
+                arguments.as_str(),
+                &remote_send_archive,
+                &remotes_template,
+                &outputs_template,
+                &leave,
+                &fetch_ignore_globs,
+                &fetch_include_globs
+            ).await?;
+            let ret = unpacks_fetch_post_proc(&matches, local_fetch_archive, store.clone(), remote_fetch_hash, execution_code);
+            if let Some(EnvironmentValue(features)) = store.get(&EnvironmentKey("RUNAWAY_FEATURES".into())) {
+                to_exit!(sched.async_record_output(arguments, features.to_string()).await, Exit::RecordFeatures)?;
+            } else {
+                eprintln!("RUNAWAY_FEATURES was not set.");
+                return Err(Exit::FeaturesNotSet);
+            }
+            ret
+        };
+
+        // We spawn and add the handle
+        let handle = to_exit!(executor.spawn_with_handle(perform_fut), Exit::ExecutionSpawnFailed)?;
+        execs_handle.push(handle);
+
+    };
+
+    // We wait for the futures
+    let exits: Vec<Exit> = executor.run(futures::future::join_all(execs_handle))
+        .into_iter()
+        .map(|r| match r {
+            Ok(e) => e,
+            Err(e) => e,
+        })
+        .collect();
 
     // Depending on the leave options, we remove the send archive on the remote
     if let LeaveConfig::Nothing = leave{
@@ -188,17 +223,18 @@ pub fn sched(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
         to_exit!(res, Exit::Cleanup)?;
     }
 
-    // We return an exit depending on the execution exits
-    let exit: Result<Vec<Exit>, Exit> = exits.into_iter()
-        .collect();
-    let exit = exit?;
-    if exit.iter().all(|e| mem::discriminant(e) == mem::discriminant(&Exit::AllGood)){
-        return Ok(Exit::AllGood)
+    // If exit was triggered by user
+    if mem::discriminant(&stopping_exit) == mem::discriminant(&Exit::SchedulerShutdown){
+        if exits.iter().all(|e| mem::discriminant(e) == mem::discriminant(&Exit::AllGood)){
+            Ok(Exit::AllGood)
+        } else {
+            let nb = exits.iter()
+                .filter(|e| mem::discriminant(*e) != mem::discriminant(&Exit::AllGood))
+                .count();
+            Ok(Exit::SomeExecutionFailed(nb.try_into().unwrap()))
+        }
     } else {
-        let nb = exit.iter()
-            .filter(|e| mem::discriminant(*e) != mem::discriminant(&Exit::AllGood))
-            .count();
-        return Ok(Exit::SomeExecutionFailed(nb.try_into().unwrap()))
+        Err(stopping_exit)
     }
 }
 
@@ -291,6 +327,7 @@ async fn unpacks_send_on_node(remote_folder: &PathBuf,
 
 // Performs all actions that need access to the node: Deflate, run and send back.
 async fn perform_on_node(store: EnvironmentStore,
+                         node: DropBack<Expire<NodeHandle>>,
                          host: &HostHandle,
                          arguments: &str,
                          remote_send_archive: &PathBuf,
@@ -310,11 +347,6 @@ async fn perform_on_node(store: EnvironmentStore,
     let id = uuid::Uuid::new_v4().hyphenated().to_string();
     push_env(&mut store, "RUNAWAY_UUID", id.clone());
 
-
-    // We acquire the node
-    let node = to_exit!(host.clone().async_acquire().await,
-                            Exit::NodeAcquisition)?;
-    store.extend(node.context.envs.clone().into_iter());
 
     // We generate the remote folder and unpack data into it
     let remote_folder= PathBuf::from(substitute_environment(&store, remote_folder_pattern));
