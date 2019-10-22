@@ -16,13 +16,12 @@ use ssh2::{
     MethodType,
     KnownHostKeyFormat};
 use std::{
-    net::{TcpStream, SocketAddr, ToSocketAddrs, Shutdown},
+    net::{TcpStream, SocketAddr, ToSocketAddrs},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    io,
     io::{prelude::*, BufReader},
     process::{Stdio, Command, Output, ExitStatus},
     os::unix::process::ExitStatusExt,
@@ -31,13 +30,12 @@ use std::{
     path::PathBuf,
     collections::HashSet,
     fs::{File, OpenOptions},
-    time::Duration,
 };
 use dirs;
 use crate::KNOWN_HOSTS_RPATH;
 use futures::future::Future;
 use crate::derive_from_error;
-use crate::primitives::Dropper;
+use crate::commons::Dropper;
 use std::intrinsics::transmute;
 use futures::lock::Mutex;
 use futures::executor;
@@ -47,136 +45,21 @@ use futures::task::LocalSpawnExt;
 use futures::FutureExt;
 use futures::SinkExt;
 use futures::channel::{mpsc, oneshot};
-use crate::{
+use crate::commons::{
     Cwd, 
     EnvironmentStore, 
     EnvironmentKey, 
     EnvironmentValue, 
     RawCommand, 
-    AbsolutePath, 
     TerminalContext
 };
+use crate::*;
 
 
 //------------------------------------------------------------------------------------------  MODULE
 
 
 pub mod config;
-
-
-//------------------------------------------------------------------------------------------- MACROS
-
-/// This macro allows to asynchronously wait for (at least) a given time. This means that the thread
-/// is yielded when it is done. For now, it creates a separate thread each time a sleep is needed, 
-/// which is far from ideal.
-#[macro_export] 
-macro_rules! async_sleep {
-    ($dur: expr) => {
-        {
-            let (tx, rx) = oneshot::channel();
-            thread::spawn(move || {
-                thread::sleep($dur);
-                tx.send(()).unwrap();
-            });
-            rx.await.unwrap();
-
-        }
-    };
-}
-
-/// This macro allows to intercept a wouldblock error returned by the expression evaluation, and 
-/// awaits for 1 ns (at least) before retrying. 
-#[macro_export]
-macro_rules! await_wouldblock_io {
-    ($expr:expr) => {
-        {
-            loop{
-                match $expr {
-                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        async_sleep!(Duration::from_millis(1))
-                    }
-                    res => break res,
-                }
-            }
-        }
-    }
-}
-
-/// This macro allows to intercept a wouldblock error returned by the expression evaluation, and 
-/// awaits for 1 ns (at least) before retrying. 
-#[macro_export]
-macro_rules! await_wouldblock_ssh {
-    ($expr:expr) => {
-        {
-            loop{
-                match $expr {
-                    Err(ref e) if e.code() == -37 => {
-                        async_sleep!(Duration::from_millis(1))
-                    }
-                    Err(ref e) if e.code() == -21 => {
-                        async_sleep!(Duration::from_millis(1))
-                    }
-                    res => break res,
-                }
-            }
-        }
-    }
-}
-
-/// This macro allows to retry an ssh expression if the error code received was $code. It allows to 
-/// retry commands that fails every now and then for a limited amount of time.
-#[macro_export]
-macro_rules! await_retry_n_ssh {
-    ($expr:expr, $nb:expr, $($code:expr),*) => {
-       {    
-            let nb = $nb as usize;
-            let mut i = 1 as usize;
-            loop{
-                match $expr {
-                    Err(e)  => {
-                        if i == nb {
-                            break Err(e)
-                        }
-                        $(
-                            else if e.code() == $code as i32 {
-                                async_sleep!(Duration::from_nanos(1));
-                                i += 1;
-                            }
-                        )*
-                    }
-                    res => {
-                        break res
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// This macro allows to retry an ssh expression if the error code received was $code. It allows to 
-/// retry commands that fail but must be retried until it's ok. For example 
-#[macro_export]
-macro_rules! await_retry_ssh {
-    ($expr:expr, $($code:expr),*) => {
-       {    
-            loop{
-                match $expr {
-                    Err(e)  => {
-                        $(  if e.code() == $code as i32 {
-                                async_sleep!(Duration::from_nanos(1));
-                            } else  )*
-                        {
-                            break Err(e)
-                        }
-                    }
-                    res => {
-                        break res
-                    }
-                }
-            }
-        }
-    }
-}
 
 
 //---------------------------------------------------------------------------------------- PTY AGENT
@@ -305,6 +188,7 @@ rw_close(){
 
     # We leave
     echo RUNAWAY_EOF:
+
 }
 ";
 
@@ -369,9 +253,9 @@ impl fmt::Display for Error {
 
 derive_from_error!(Error, config::Error, Config);
 
-impl From<Error> for crate::primitives::Error{
-    fn from(other: Error) -> crate::primitives::Error{
-        crate::primitives::Error::Operation(format!("{}", other))
+impl From<Error> for crate::commons::Error{
+    fn from(other: Error) -> crate::commons::Error{
+        crate::commons::Error::Operation(format!("{}", other))
     }
 }
 
@@ -611,12 +495,13 @@ impl Remote {
         if commands.is_empty(){
             return Err(Error::ExecutionFailed("No command was provided.".to_string()))
         }
-        let TerminalContext{cwd: Cwd(AbsolutePath(cwd)), envs } = context;
+        let TerminalContext{cwd: Cwd(cwd), envs } = context;
         let mut channel = acquire_pty_channel(&remote).await
             .map_err(|e| Error::ExecutionFailed(format!("Failed to start pty channel: {}", e)))?;
         setup_pty(&mut channel, &cwd, &envs).await?;
         let (context, outputs) = perform_pty(&mut channel, commands, stdout_cb, stderr_cb).await?;
-        close_pty(&mut channel).await?;;
+        close_pty(&mut channel).await?;
+
         Ok((context, outputs))
     }
 
@@ -683,13 +568,21 @@ enum OperationOutput {
 #[derive(Clone)]
 pub struct RemoteHandle {
     sender: mpsc::UnboundedSender<(oneshot::Sender<OperationOutput>, OperationInput)>,
-    repr: String,
+    profile: config::SshProfile,
     dropper: Dropper,
 }
 
 impl fmt::Debug for RemoteHandle{
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result{
-        write!(f, "RemoteHandle<{}>", self.repr)
+        write!(f, "RemoteHandle<{}>", self.profile.hostname
+            .as_ref()
+            .unwrap_or(self.profile.proxycommand.as_ref().unwrap_or(&"Unknown".to_string())))
+    }
+}
+
+impl PartialEq for RemoteHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.profile == other.profile
     }
 }
 
@@ -703,9 +596,10 @@ impl RemoteHandle {
             Some(p) => p.to_string(),
             None => format!("{}:{}", profile.hostname.as_ref().unwrap(), profile.port.as_ref().unwrap())
         };
+        let moving_profile = profile.clone();
         let handle = std::thread::Builder::new().name("remote".to_owned()).spawn(move || {
             trace!("Remote Thread: Creating resource in thread");
-            let remote = match Remote::from_profile(profile){
+            let remote = match Remote::from_profile(moving_profile){
                 Ok(r) =>{
                     start_tx.send(Ok(())).unwrap();
                     r
@@ -785,7 +679,7 @@ impl RemoteHandle {
         let drop_sender = sender.clone();
         Ok(RemoteHandle {
             sender,
-            repr,
+            profile,
             dropper: Dropper::from_closure(
                 Box::new(move ||{
                     drop_sender.close_channel();
@@ -1062,7 +956,7 @@ async fn read_exec_out_err(channel: &mut ssh2::Channel<'_>) -> Result<Output, Er
         if eof{  // enf of field reached, everything was read.
             break
         } else { // if not, we wait for a while
-            async_sleep!(Duration::from_millis(1));
+            async_sleep!(std::time::Duration::from_millis(1));
         }
     }
     Ok(output)
@@ -1090,7 +984,7 @@ async fn acquire_pty_channel<'a>(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Ch
     trace!("Remote: Acquiring pty channel ");
 
     let mut channel = await_wouldblock_ssh!(await_retry_ssh!({remote.lock().await.session().channel_session()},-21))?;
-    await_wouldblock_ssh!(await_retry_n_ssh!(channel.request_pty("ansi", None, Some((0,0,0,0))), 10, -14))?;
+    await_wouldblock_ssh!(await_retry_n_ssh!(channel.request_pty("xterm", None, Some((0,0,0,0))), 10, -14))?;
     await_wouldblock_ssh!(channel.shell())?;
     Ok(channel)
 }
@@ -1101,7 +995,7 @@ async fn setup_pty(channel: &mut ssh2::Channel<'_>, cwd: &PathBuf, envs: &Enviro
     trace!("Remote: Setting up a pty channel");
 
     // We make sure we run on bash
-    await_wouldblock_io!(channel.write_all("sh\n".as_bytes()))
+    await_wouldblock_io!(channel.write_all("export HISTFILE=/dev/null\nbash\n".as_bytes()))
         .map_err(|e| Error::ExecutionFailed(format!("Failed to start bash: {}", e)))?;
 
     // We inject the linux pty agent on the remote end.
@@ -1138,7 +1032,7 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
     let mut stream = BufReader::new(channel);
     let mut buffer = String::new();
     let mut out_ctx = TerminalContext{
-        cwd: Cwd(AbsolutePath(PathBuf::from("/"))),
+        cwd: Cwd(PathBuf::from("/")),
         envs: EnvironmentStore::new()
     };
 
@@ -1171,7 +1065,7 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
                 output.status = ExitStatusExt::from_raw(ecode);
                 // If non zero, we stop the execution now. 
                 if ecode != 0{
-                    break 'commands
+                    cmds.clear();
                 }
                 // We write a new command if any
                 if cmds.is_empty(){
@@ -1195,7 +1089,7 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
                 stderr_cb(err.as_bytes().to_vec());
             // We receive a CWD message.
             } else if buffer.starts_with("RUNAWAY_CWD:"){
-                out_ctx.cwd = Cwd(AbsolutePath(PathBuf::from(buffer.replace("RUNAWAY_CWD: ", ""))));
+                out_ctx.cwd = Cwd(PathBuf::from(buffer.replace("RUNAWAY_CWD: ", "")));
             // We receive a env message.
             } else if buffer.starts_with("RUNAWAY_ENV:"){
                 let env = buffer.replace("RUNAWAY_ENV: ", "")
@@ -1213,6 +1107,9 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
         }
     }
 
+    // We clear env of non-runaway environment variables.
+    out_ctx.envs.retain(|EnvironmentKey(k), _| k.starts_with("RUNAWAY") );
+
     // We return    
     Ok((out_ctx, outputs))
 
@@ -1224,7 +1121,7 @@ async fn close_pty(channel: &mut ssh2::Channel<'_>) -> Result<(), Error>{
     trace!("Remote: Closing pty channel");
 
     // We make sure to leave bash and the landing shell
-    await_wouldblock_io!(channel.write_all("exit\nexit\n".as_bytes()))
+    await_wouldblock_io!(channel.write_all("history -c \nexit\n history -c \nexit\n".as_bytes()))
         .map_err(|e| Error::ExecutionFailed(format!("Failed to start bash: {}", e)))?;
 
     // We close the channel
@@ -1417,7 +1314,7 @@ mod test {
         let (proxy_command, address) = ProxyCommandForwarder::from_command("echo kikou").unwrap();
         let mut stream = TcpStream::connect(address).unwrap();
         let mut buf = [0 as u8; 5];
-        stream.read(&mut buf).unwrap();
+        stream.read_exact(&mut buf).unwrap();
         assert_eq!(buf, "kikou".as_bytes());
         assert!(TcpStream::connect(address).is_err());
     }
@@ -1553,6 +1450,34 @@ mod test {
         block_on(test());
     }
 
+    use crate::commons::OutputBuf;
+
+    #[test]
+    fn test_async_pty_program_stdout() {
+        use futures::executor::block_on;
+        async fn test() {
+            let profile = config::SshProfile{
+                name: "test".to_owned(),
+                hostname: Some("localhost".to_owned()),
+                user: Some("apere".to_owned()),
+                port: Some(22),
+                proxycommand: None//Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
+            };
+            let remote = RemoteHandle::spawn(profile).unwrap();
+            // Check order of outputs
+            let commands = vec![RawCommand("export PYTHONUNBUFFERED=x".into()),
+                                RawCommand("echo Python: $(which python)".into()),
+                                RawCommand("cd /home/apere/Downloads/test_runaway".into()), 
+                                RawCommand("./run.py 10".into()),
+                                RawCommand("echo Its over".into())];
+            let context = TerminalContext::default();
+            let (_, outputs) = remote.async_pty(context, commands, None, None).await.unwrap();
+            let outputs: Vec<OutputBuf> = outputs.into_iter().map(Into::into).collect();
+            dbg!(outputs);
+       }
+        block_on(test());
+    }
+
     #[test]
     fn test_async_pty_context() {
         use futures::executor::block_on;
@@ -1568,7 +1493,7 @@ mod test {
             let remote = RemoteHandle::spawn(profile).unwrap();
             // Check order of outputs
             let mut context = TerminalContext::default();
-            context.cwd = Cwd(AbsolutePath("/tmp".into()));
+            context.cwd = Cwd("/tmp".into());
             context.envs.insert(EnvironmentKey("RW_TEST".into()),
                                              EnvironmentValue("VAL1".into()));
             let commands = vec![RawCommand("pwd".into()), 

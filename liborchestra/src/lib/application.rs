@@ -1,5 +1,4 @@
 //! liborchestra/application.rs
-//! Author: Alexandre Péré
 //!
 //! This module contains a shared asynchronous resource, meant to be used to spawn jobs and handle 
 //! post-processing of jobs. It holds an inner threadpool that is used to drive the jobs to 
@@ -88,7 +87,7 @@ impl fmt::Display for Error {
 /// repository. Also, it contains an threadpool executor on which the jobs will be spawned. It is 
 /// important to understand that, though the application will be accessed by an asynchronous handle,
 /// the methods will not await for the whole execution of the job, but only for its submission. For 
-/// this reason, as soon as the job was submitted, there will be no way to keep rtack of it. In 
+/// this reason, as soon as the job was submitted, there will be no way to keep track of it. In 
 /// practice, a handle to the application will be given to the job, which will allow the executor to 
 /// call for a post-processing on the execution. This allows to sort of gain back the control on the
 /// execution once it was executed.
@@ -698,6 +697,7 @@ async fn reschedule_job(host: hosts::HostHandle,
 
 /// This function allows to pack an experiment folder into a tar archive, and returns its hash.
 pub fn pack_folder(folder_path: path::PathBuf) -> Result<u64, Error> {
+
     // We create the file iterator
     let mut walker = ignore::WalkBuilder::new(&folder_path);
     walker

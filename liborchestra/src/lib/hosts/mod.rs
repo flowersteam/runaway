@@ -11,12 +11,12 @@
 
 
 use crate::derive_from_error;
-use crate::primitives::{Dropper, DropBack, Expire, AsResult};
+use crate::commons::{Dropper, DropBack, Expire, AsResult};
 use crate::ssh;
 use crate::ssh::RemoteHandle;
 use dirs;
 use futures::Future;
-use std::{error, fmt, fs, path, str};
+use std::{error, fs, path, str};
 use chrono::prelude::*;
 use futures::channel::{mpsc, oneshot};
 use futures::executor;
@@ -26,11 +26,18 @@ use futures::FutureExt;
 use futures::stream::{self, StreamExt};
 use std::thread;
 use futures::channel::mpsc::UnboundedSender;
-use std::fmt::{Display, Debug};
+use std::fmt::{self, Display, Debug};
 use std::path::{PathBuf};
 use crate::misc;
 use crate::*;
 use std::ops::Deref;
+use crate::commons::{EnvironmentKey, EnvironmentValue, RawCommand, TerminalContext};
+use crate::SSH_CONFIG_RPATH;
+use std::sync::Arc;
+use futures::lock::Mutex;
+use futures::SinkExt;
+
+
 
 //------------------------------------------------------------------------------------------ MODULES
 
@@ -94,9 +101,9 @@ impl fmt::Display for Error {
     }
 }
 
-impl From<Error> for crate::primitives::Error {
-    fn from(other: Error) -> crate::primitives::Error {
-        crate::primitives::Error::Operation(format!("{}", other))
+impl From<Error> for crate::commons::Error {
+    fn from(other: Error) -> crate::commons::Error {
+        crate::commons::Error::Operation(format!("{}", other))
     }
 }
 
@@ -104,49 +111,16 @@ derive_from_error!(Error, ssh::Error, Ssh);
 derive_from_error!(Error, ssh::config::Error, SshConfigParse);
 
 
-//------------------------------------------------------------------------------------------- MACROS
-
-
-/// This macro allows to retry an expression it returns an error. It allows to 
-/// retry commands that fails every now and then for a limited amount of time.
-#[macro_export]
-macro_rules! await_retry_n {
-    ($expr:expr, $nb:expr) => {
-       {    
-            let nb = $nb as usize;
-            let mut i = 1 as usize;
-            loop{
-                match $expr {
-                    Err(e)  => {
-                        if i == nb {
-                            break Err(e)
-                        }
-                        else{
-                            async_sleep!(std::time::Duration::from_nanos(1));
-                            i += 1;
-                        }
-                    }
-                    res => {
-                        break res
-                    }
-                }
-            }
-        }
-    }
-}
-
-
 //-------------------------------------------------------------------------------------------- TYPES
 
 
-use crate::{EnvironmentKey, EnvironmentValue, RawCommand, TerminalContext};
 
 /// Represents a frontend
 #[derive(Clone)]
 struct Frontend(ssh::RemoteHandle);
 
 /// Represents a node id.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct NodeId(String);
 
 /// Represents a node.
@@ -183,13 +157,14 @@ struct HandleContext(TerminalContext<PathBuf>);
 
 /// Represents a the handles as produced by the async_aquire function
 #[derive(Clone, Debug)]
-pub struct NodeHandle{remote: ssh::RemoteHandle, context: TerminalContext<PathBuf>}
+pub struct NodeHandle{remote: ssh::RemoteHandle, pub context: TerminalContext<PathBuf>}
 impl Deref for NodeHandle {
     type Target = ssh::RemoteHandle;
     fn deref(&self) -> &Self::Target {
         &self.remote
     }
 }
+
 
 //--------------------------------------------------------------------------------------- STRUCTURES
 
@@ -223,7 +198,6 @@ pub struct HostConf {
 impl HostConf {
     /// Load an host configuration from a file.
     pub fn from_file(host_path: &path::PathBuf) -> Result<HostConf, Error> {
-        debug!("Loading host from {}", host_path.to_str().unwrap());
         let file = fs::File::open(host_path).map_err(|_| {
             Error::ReadingHost(format!(
                 "Failed to open host configuration file {}",
@@ -241,7 +215,6 @@ impl HostConf {
 
     /// Writes host configuration to a file.
     pub fn to_file(&self, conf_path: &path::PathBuf) -> Result<(), Error> {
-        debug!("Writing host configuration {:?} to file", self);
         let file = fs::File::create(conf_path).map_err(|_| {
             Error::WritingHost(format!(
                 "Failed to open host configuration file {}",
@@ -277,14 +250,30 @@ impl<'a> From<&'a str> for LeaveConfig {
     }
 }
 
+impl Display for LeaveConfig{
+   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+       match self{
+           LeaveConfig::Nothing => write!(f, "nothing"),
+           LeaveConfig::Code => write!(f, "code"),
+           LeaveConfig::Everything => write!(f, "everything")
+       }
+   }
+}
+
 
 //--------------------------------------------------------------------------------------------- HOST
 
 
-use crate::SSH_CONFIG_RPATH;
-use std::sync::Arc;
-use futures::lock::Mutex;
-use futures::SinkExt;
+// Enumeration for the messages in the channel.
+#[derive(Clone)] 
+enum ChannelMessages{
+    NoAllocationsMade,
+    Node(DropBack<Expire<RemoteHandle>>),
+    NoNodesLeft,
+    WaitForNodes,
+    Abort,
+    Shutdown
+}
 
 // This structure is the executor of an host configuration. It communicates with the host frontend 
 // and allows to perform the necessary operations to provide execution slots, i.e. connections to a 
@@ -334,30 +323,30 @@ impl Host {
     // Builds a host from a configuration.
     fn from_conf(conf: HostConf) -> Result<Host, Error> {
         // We retrieve the ssh profile from the configuration
-        debug!("Host: Creating Host from HostConf: {:?}", conf);
         let profile = ssh::config::get_profile(
             &dirs::home_dir().unwrap().join(SSH_CONFIG_RPATH),
             &conf.ssh_configuration,
         )?;
 
         // We spawn the frontend remote
-        trace!("Host: Profile retrieved: {:?}", profile);
         let conn = ssh::RemoteHandle::spawn(profile.clone())?;
+        debug!("Host: Connection to frontend acquired: {:?}", conn);
 
         // We generate the host
-        trace!("Host: Connection acquired: {:?}", conn);
+        let mut context = FrontendContext(TerminalContext::default());
+        context.0.envs.insert(EnvironmentKey("RUNAWAY_PATH".into()), 
+                              EnvironmentValue(conf.directory.to_str().unwrap().into()));
         Ok(Host {
             conf,
             conn: Frontend(conn),
             profile,
             provider: provider::Provider::new(),
-            context: FrontendContext(TerminalContext::default())
+            context
         })
     }
 
     // Starts an allocation
     async fn start_alloc(host: Arc<Mutex<Host>>) -> Result<(), Error> {
-
         // We lock the host. This prevent other futures to start an allocation in the same time.
         let mut host = host.lock().await;
 
@@ -367,11 +356,11 @@ impl Host {
         let frontend_context = allocate_nodes(&host.conn, &host.context, &start_alloc_proc).await?;
 
         // We update the host frontend context (needed to cancel allocation)
-        //{host.lock().await.context = frontend_context.clone()};
         host.context = frontend_context.clone();
 
         // We retrieve node ids from the terminal context
         let node_ids = extract_nodes(&frontend_context.0)?;
+        debug!("Host: Retrieved node ids: {:?}", node_ids);
 
         // We spawn the nodes
         let nodes = stream::iter(node_ids.clone())
@@ -457,6 +446,8 @@ impl Host {
 
     // Allows to trigger abort. Every node acquisition will return an error after that.
     async fn abort(host: Arc<Mutex<Host>>) -> Result<(), Error>{
+        let conf = {host.lock().await.conf.clone()};
+        debug!("Host: Aborting on {} ...", conf.name);
         let mut host = host.lock().await;
         host.provider.shutdown().await;
         Ok(())
@@ -514,16 +505,13 @@ impl HostHandle {
     /// This function spawns the thread that will handle all the repository operations using the
     /// CampaignResource, and returns a handle to it.
     pub fn spawn(host_conf: HostConf) -> Result<HostHandle, Error> {
-        debug!("HostHandle: Start host thread");
         let host = Host::from_conf(host_conf.clone())?;
         let conn = host.conn.clone();
         let (sender, receiver) = mpsc::unbounded();
         let handle = thread::Builder::new().name(format!("orch-host-{}", host_conf.name))
         .spawn(move || {
-            trace!("Host Thread: Creating resource in thread");
             let res = Arc::new(Mutex::new(host));
             let reres = res.clone();
-            trace!("Host Thread: Starting resource loop");
             let mut pool = executor::LocalPool::new();
             let mut spawner = pool.spawner();
             let handling_stream = receiver.for_each(
@@ -663,6 +651,11 @@ impl HostHandle {
         self._conf.name.clone()
     }
 
+    /// Returns the execution strings
+    pub fn get_execution_procedure(&self) -> Vec<RawCommand<String>>{
+        self._conf.execution.iter().map(Into::into).map(ToOwned::to_owned).map(RawCommand).collect()
+    }
+
     /// Returns a handle to the frontend connection. 
     pub fn get_frontend(&self) -> RemoteHandle{
         self._conn.clone()
@@ -703,10 +696,16 @@ async fn allocate_nodes(frontend: &Frontend,
     let (context, outputs) = frontend.0.async_pty(context.to_owned(), cmds.to_owned(), None, None)
         .await
         .map_err(|e| Error::AllocationFailed(format!("Failed to allocate: {}", e)))?;
+    let output_len = outputs.len();
+    // We eventually print the 
+    debug!("Host: Allocation procedure returned:"); 
+    outputs.iter()
+        .zip(cmds)
+        .for_each(|(o, c)| debug!("   {} => {:?}", c.0, o));
     // If the allocation failed we return an error
     misc::compact_outputs(outputs)
         .result()
-        .map_err(|e| Error::AllocationFailed(format!("Allocation command failed: {}", e)))?;
+        .map_err(|e| Error::AllocationFailed(format!("Failed to allocate on command {:?}: {}", cmds.get(output_len-1).unwrap().0, e)))?;
     // We return the Allocation context
     Ok(FrontendContext(context))
 }
@@ -856,6 +855,7 @@ mod test {
             execution: vec!["$RUNAWAY_COMMAND".to_owned()],
             directory: path::PathBuf::from("/projets/flowers/alex/executions"),
         };
+
         conf.to_file(&path::PathBuf::from("/tmp/test_host.yml"));
     }
 
@@ -886,6 +886,8 @@ mod test {
     // To test this, please add localhost2 in your /etc/hosts
     fn test_host_handles_envs() {
         use futures::executor::block_on;
+        use std::thread;
+        use std::time::Duration;
 
         //init();
 
@@ -966,6 +968,7 @@ mod test {
 
     #[test]
     fn test_stress_host_resource() {
+
         use futures::executor;
         use futures::task::SpawnExt;
         use std::thread;
@@ -991,6 +994,7 @@ mod test {
             execution: vec!["$RUNAWAY_COMMAND".to_owned()],
             directory: path::PathBuf::from("/projets/flowers/alex/executions"),
         };
+
         let res_handle = HostHandle::spawn(conf).unwrap();
 
         async fn test(res: HostHandle) {
@@ -1028,4 +1032,5 @@ mod test {
         assert_eq!(alloc_string, cancel_string);
         
     }
+
 }
