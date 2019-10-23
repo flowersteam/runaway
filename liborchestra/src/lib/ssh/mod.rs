@@ -1007,7 +1007,7 @@ async fn setup_pty(channel: &mut ssh2::Channel<'_>, cwd: &PathBuf, envs: &Enviro
     // We setup the context
     let context = envs.iter()
         .fold(format!("cd {}\n", cwd.to_str().unwrap()), |acc, (EnvironmentKey(n), EnvironmentValue(v))|{
-            format!("{}export {}={}\n", acc, n, v)
+            format!("{}export {}=\"{}\"\n", acc, n, v)
         });
     await_wouldblock_io!(channel.write_all(context.as_bytes()))
         .map_err(|e| Error::ExecutionFailed(format!("Failed to set context up: {}", e)))?;
