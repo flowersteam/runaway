@@ -46,7 +46,7 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
 
     // We setup some parameters
     let leave = LeaveConfig::from(matches.value_of("leave").unwrap());
-    let parameters = matches.value_of("parameters").unwrap_or("").to_owned();
+    let parameters = matches.value_of("ARGUMENTS").unwrap_or("").to_owned();
     let script = PathBuf::from(matches.value_of("SCRIPT").unwrap());
     let local_folder = to_exit!(std::env::current_dir(), Exit::ScriptFolder)?;
     if !script.exists() {
@@ -104,7 +104,7 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
         }
         node.context.envs.insert(EnvironmentKey("RUNAWAY_UUID".into()), EnvironmentValue(id.clone()));
         node.context.envs.insert(EnvironmentKey("RUNAWAY_SEND_HASH".into()), EnvironmentValue(local_send_hash.clone().into()));
-        node.context.envs.insert(EnvironmentKey("RUNAWAY_PARAMETERS".into()), EnvironmentValue(parameters.into()));
+        node.context.envs.insert(EnvironmentKey("RUNAWAY_ARGUMENTS".into()), EnvironmentValue(parameters.into()));
         node.context.envs.insert(EnvironmentKey("RUNAWAY_SCRIPT_PATH".into()), EnvironmentValue(script.to_str().unwrap().into()));
         node.context.envs.insert(EnvironmentKey("RUNAWAY_LOCAL_FOLDER".into()), EnvironmentValue(local_folder.to_str().unwrap().into()));
 
