@@ -55,7 +55,7 @@ use crate::commons::{
 };
 use crate::*;
 use tracing::{self, error, trace, warn, debug, info, instrument, trace_span};
-
+use tracing_futures::Instrument;
 
 
 //------------------------------------------------------------------------------------------  MODULE
@@ -647,13 +647,14 @@ impl RemoteHandle {
                     return ();
                 }
             };
+            let stream_span = trace_span!("Handling_Stream", ?remote);
             let remote = Arc::new(Mutex::new(remote));
             trace!("Starting handling stream");
             let mut pool = executor::LocalPool::new();
             let mut spawner = pool.spawner();
             let handling_stream = receiver.for_each(
                 move |(sender, operation): (oneshot::Sender<OperationOutput>, OperationInput)| {
-                    let span = trace_span!("Remote::Thread::Handling_Stream");
+                    let span = stream_span.clone();
                     let _guard = span.enter();
                     trace!(?operation, "Received operation");
                     match operation {
@@ -666,6 +667,7 @@ impl RemoteHandle {
                                             send an operation output: \n{:?}", e))
                                             .unwrap();
                                     })
+                                    .instrument(span.clone())
                             )
                         },
                         OperationInput::Pty(context, commands, stdout_cb, stderr_cb) => {
@@ -677,6 +679,7 @@ impl RemoteHandle {
                                             send an operation output: \n{:?}", e))
                                             .unwrap();
                                     })
+                                    .instrument(span.clone())
                             )
                         },                        
                         OperationInput::ScpSend(local_path, remote_path) => {
@@ -688,6 +691,7 @@ impl RemoteHandle {
                                             send an operation output: \n{:?}", e))
                                             .unwrap();
                                     })
+                                    .instrument(span.clone())
                             )
                         }
                         OperationInput::ScpFetch(remote_path, local_path) => {
@@ -699,6 +703,7 @@ impl RemoteHandle {
                                             send an operation output: \n{:?}", e))
                                             .unwrap();
                                     })
+                                    .instrument(span.clone())
                             )
                         }
                     }
