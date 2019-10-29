@@ -1404,7 +1404,7 @@ mod test {
 
     fn init(){
         let subscriber = Subscriber::builder()
-            //.compact()
+            .compact()
             .with_max_level(Level::TRACE)
             .without_time()
             .with_target(false)
