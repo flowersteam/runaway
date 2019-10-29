@@ -290,7 +290,6 @@ pub mod ssh;
 pub mod hosts;
 pub mod repository;
 pub mod primitives;
-//pub mod application;
 pub mod scheduler;
 pub mod commons;
 
