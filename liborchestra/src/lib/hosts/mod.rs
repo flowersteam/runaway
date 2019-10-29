@@ -36,7 +36,7 @@ use crate::SSH_CONFIG_RPATH;
 use std::sync::Arc;
 use futures::lock::Mutex;
 use futures::SinkExt;
-use tracing::{self, error, trace, warn, debug, info, instrument, trace_span};
+use tracing::{self, error, trace, instrument, trace_span};
 use tracing_futures::Instrument;
 
 

@@ -13,7 +13,7 @@ use std::io::prelude::*;
 use std::iter::Peekable;
 use std::path::PathBuf;
 use std::str::CharIndices;
-use tracing::{self, error, trace, warn, debug, info, instrument};
+use tracing::{self, trace, instrument};
 
 
 //------------------------------------------------------------------------------------------- ERRORS
@@ -71,13 +71,13 @@ pub struct SshProfile {
 
 impl SshProfile {
     fn from(name: String) -> SshProfile {
-        return SshProfile {
+        SshProfile {
             name,
             hostname: None,
             user: None,
             port: None,
             proxycommand: None,
-        };
+        }
     }
 
     fn set_hostname(mut self, hostname: String) -> SshProfile {
@@ -112,7 +112,7 @@ impl SshProfile {
                 std::env::var_os("USER").map_or("user".to_owned(), |s| s.into_string().unwrap());
             self.user = Some(user);
         }
-        return self;
+        self
     }
 }
 
@@ -131,12 +131,12 @@ struct IndexedSlice<'s>(&'s str, usize, usize);
 impl<'s> IndexedSlice<'s> {
    // Constructs an indexed slice which points to the beginning of the string.
     fn beginning(slice: &'s str) -> IndexedSlice<'s> {
-        return IndexedSlice(slice, 0, 0);
+        IndexedSlice(slice, 0, 0)
     }
 
     // Construct an indexed slice which points to the end of the string.
     fn end(slice: &'s str) -> IndexedSlice<'s> {
-        return IndexedSlice(slice, slice.len(), slice.len());
+        IndexedSlice(slice, slice.len(), slice.len())
     }
 
     // Moves begining to a new index
@@ -168,12 +168,12 @@ impl<'s> IndexedSlice<'s> {
 
     // Returns the indexed slice as an &str.
     fn as_str(&self) -> &str {
-        return &self.0[self.1..self.2];
+        &self.0[self.1..self.2]
     }
 
     // Return an owned IndexedString out of the indexed slice.
     fn to_owned(&self) -> IndexedString {
-        return IndexedString(self.0.to_owned(), self.1, self.2);
+        IndexedString(self.0.to_owned(), self.1, self.2)
     }
 
     // Allows to retrieve the index of the character e indexes before the i-th character.
@@ -365,7 +365,7 @@ impl<'s> Lexer<'s> {
         while let Some((_, '\n')) = self.iter.peek() {
             self.iter.next();
         }
-        return Some(Ok(ret));
+        Some(Ok(ret))
     }
 
     /// Consumes an indent token
@@ -400,7 +400,7 @@ impl<'s> Lexer<'s> {
                 }
             }
         }
-        return Some(Ok(ret));
+        Some(Ok(ret))   
     }
 
     /// Consumes a comment token
@@ -432,7 +432,7 @@ impl<'s> Lexer<'s> {
                 }
             }
         }
-        return Some(Ok(ret));
+        Some(Ok(ret))
     }
 
     /// Consumes a word token
@@ -567,9 +567,8 @@ impl<'s> Iterator for Parser<'s> {
                 }
             }
         } else {
-            return None;
+            None
         }
-
     }
 }
 
@@ -661,44 +660,44 @@ impl<'s> Parser<'s> {
         // We dispatch with next keyword
         match self.iter.peek() {
             Some(Ok(Token(TokenType::Word, ib))) if ib.as_str() == "HostName" => {
-                return self.consume_hostname_clause();
+                self.consume_hostname_clause()
             }
             Some(Ok(Token(TokenType::Word, ib))) if ib.as_str() == "User" => {
-                return self.consume_user_clause();
+                self.consume_user_clause()
             }
             Some(Ok(Token(TokenType::Word, ib))) if ib.as_str() == "Port" => {
-                return self.consume_port_clause();
+                self.consume_port_clause()
             }
             Some(Ok(Token(TokenType::Word, ib))) if ib.as_str() == "ProxyCommand" => {
-                return self.consume_proxycommand_clause();
+                self.consume_proxycommand_clause()
             }
             Some(Ok(Token(TokenType::NewLine, ib))) => {
-                return None;
+                None
             }
             Some(Ok(Token(TokenType::Word, ib))) => {
                 self.exhausted = true;
-                return Some(Err(Error::Parser(
+                Some(Err(Error::Parser(
                     ib.to_owned(),
                     "Only HostName, User, Port and ProxyCommand \
                      are supported."
                         .to_owned(),
-                )));
+                )))
             }
             Some(Ok(Token(_, ib))) => {
                 self.exhausted = true;
-                return Some(Err(Error::Parser(
+                Some(Err(Error::Parser(
                     ib.to_owned(),
                     "Expected a clause name here.".to_owned(),
-                )));
+                )))
             }
             None => {
                 self.exhausted = true;
-                return Some(Err(Error::Parser(
+                Some(Err(Error::Parser(
                     IndexedSlice::end(self.string).to_owned(),
                     "Expected a clause name here.".to_owned(),
-                )));
+                )))
             }
-            Some(Err(_)) => return None,
+            Some(Err(_)) => None,
         }
     }
 
@@ -741,20 +740,20 @@ impl<'s> Parser<'s> {
         match self.iter.peek() {
             Some(Ok(Token(TokenType::NewLine, _))) | None => {
                 self.iter.next();
-                return Some(Ok(ret));
+                Some(Ok(ret))
             }
             Some(Ok(Token(TokenType::Comment, _))) => {
                 self.iter.next();
-                return Some(Ok(ret));
+                Some(Ok(ret))
             }
             Some(Ok(Token(_, ib))) => {
                 self.exhausted = true;
-                return Some(Err(Error::Parser(
+                Some(Err(Error::Parser(
                     ib.to_owned(),
                     "Expected a newline here".to_owned(),
-                )));
+                )))
             }
-            Some(Err(_)) => return None,
+            Some(Err(_)) => None,
         }
     }
 
@@ -793,20 +792,20 @@ impl<'s> Parser<'s> {
         match self.iter.peek() {
             Some(Ok(Token(TokenType::NewLine, _))) | None => {
                 self.iter.next();
-                return Some(Ok(ret));
+                Some(Ok(ret))
             }
             Some(Ok(Token(TokenType::Comment, _))) => {
                 self.iter.next();
-                return Some(Ok(ret));
+                Some(Ok(ret))
             }
             Some(Ok(Token(_, ib))) => {
                 self.exhausted = true;
-                return Some(Err(Error::Parser(
+                Some(Err(Error::Parser(
                     ib.to_owned(),
                     "Expected a newline here.".to_owned(),
-                )));
+                )))
             }
-            Some(Err(_)) => return None,
+            Some(Err(_)) => None,
         }
     }
 
@@ -845,20 +844,20 @@ impl<'s> Parser<'s> {
         match self.iter.peek() {
             Some(Ok(Token(TokenType::NewLine, _))) | None => {
                 self.iter.next();
-                return Some(Ok(ret));
+                Some(Ok(ret))
             }
             Some(Ok(Token(TokenType::Comment, _))) => {
                 self.iter.next();
-                return Some(Ok(ret));
+                Some(Ok(ret))
             }
             Some(Ok(Token(_, ib))) => {
                 self.exhausted = true;
-                return Some(Err(Error::Parser(
+                Some(Err(Error::Parser(
                     ib.to_owned(),
                     "Expected a newline here".to_owned(),
-                )));
+                )))
             }
-            Some(Err(_)) => return None,
+            Some(Err(_)) => None,
         }
     }
 
@@ -931,7 +930,7 @@ impl<'s> Parser<'s> {
     fn consume_newline(&mut self) -> Option<Result<Node<'s>, Error>> {
         trace!("Consuming newline");
         match self.iter.next() {
-            Some(Ok(Token(TokenType::NewLine, _))) => return None,
+            Some(Ok(Token(TokenType::NewLine, _))) => None,
             _ => panic!("Consume newline called on wrong character"),
         }
     }
@@ -941,7 +940,7 @@ impl<'s> Parser<'s> {
     fn consume_comment(&mut self) -> Option<Result<Node<'s>, Error>> {
         trace!("Consumming comment");
         match self.iter.next() {
-            Some(Ok(Token(TokenType::Comment, _))) => return None,
+            Some(Ok(Token(TokenType::Comment, _))) => None,
             _ => panic!("Consume comment called on wrong token"),
         }
     }
@@ -1002,7 +1001,7 @@ impl<'s> ConfigReader<'s> {
         trace!("Creating config reader from string");
         let lexer = Lexer::from(string);
         let parser = Parser::from_lexer(lexer).peekable();
-        return ConfigReader { iter: parser };
+        ConfigReader { iter: parser }
     }
 
     /// Consumes a host, e.g. a complete host declaration with starting line and clauses.
@@ -1073,7 +1072,7 @@ pub fn get_profile(config_path: &PathBuf, name: &str) -> Result<SshProfile, Erro
             res
         }
     })?;
-    return Ok(profile.complete());
+    Ok(profile.complete())
 }
 
 

@@ -23,7 +23,7 @@ use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use futures::sink::SinkExt;
 use futures::lock::Mutex;
-use tracing::{self, error, trace, warn, debug, info, instrument, trace_span};
+use tracing::{self, error, trace, instrument, trace_span};
 use tracing_futures::Instrument;
 
 

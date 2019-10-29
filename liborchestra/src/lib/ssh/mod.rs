@@ -54,7 +54,7 @@ use crate::commons::{
     TerminalContext
 };
 use crate::*;
-use tracing::{self, error, trace, warn, debug, info, instrument, trace_span};
+use tracing::{self, error, trace, warn, instrument, trace_span};
 use tracing_futures::Instrument;
 
 
@@ -429,6 +429,7 @@ impl Drop for Remote{
 impl Remote {
     
     /// Helper to avoid boilerplate.
+    #[inline]
     fn session(&self) -> &'static Session{
         self.session.as_ref().unwrap()
     }
@@ -514,24 +515,13 @@ impl Remote {
     }
 
     /// Asynchronous function used to execute an interactive command on the remote.
+    #[instrument(name="Remote::pty", skip(remote, context, commands, stdout_cb, stderr_cb))]
     async fn pty(remote: Arc<Mutex<Remote>>,
                  context: TerminalContext<PathBuf>, 
                  commands: Vec<RawCommand<String>>,
                  stdout_cb: Box<dyn Fn(Vec<u8>) + Send + 'static>,
                  stderr_cb: Box<dyn Fn(Vec<u8>) + Send + 'static>) 
                  -> Result<(TerminalContext<PathBuf>, Vec<Output>), Error> {
-        let cmds = commands.iter()
-            .fold(String::new(), |mut acc, RawCommand(s)| {
-                acc.push_str(&format!("{}, ", s));
-                acc
-            });
-        let envs = context.envs.iter()
-            .fold(String::new(), |mut acc, (EnvironmentKey(k), EnvironmentValue(v))|{
-                acc.push_str(&format!("{}:{}, ", k, v));
-                acc
-            });
-        let span = trace_span!("Remote::pty", commands=?cmds, cwd=?context.cwd.0, ?envs);
-        let _guard = span.enter();
         trace!("Executing pty commands");
         if commands.is_empty(){
             return Err(Error::ExecutionFailed("No command was provided.".to_string()))
@@ -644,7 +634,7 @@ impl RemoteHandle {
                 }
                 Err(e) =>{
                     start_tx.send(Err(e)).unwrap();
-                    return ();
+                    return ;
                 }
             };
             let stream_span = trace_span!("Handling_Stream", ?remote);
@@ -740,8 +730,6 @@ impl RemoteHandle {
     pub fn async_exec(&self, command:RawCommand<String>) -> impl Future<Output=Result<Output, Error>> {
         let mut chan = self.sender.clone();
         async move {
-            let span = trace_span!("RemoteHandle::async_exec", ?command);
-            let _guard = span.enter();
             let (sender, receiver) = oneshot::channel();
             trace!("Sending exec input");
             chan.send((sender, OperationInput::Exec(command)))
@@ -753,7 +741,7 @@ impl RemoteHandle {
                 Ok(OperationOutput::Exec(res)) => res,
                 Ok(e) => Err(Error::OperationFetch(format!("Expected Exec, found {:?}", e)))
             }
-        }
+        }.instrument(trace_span!("RemoteHandle::async_exec"))
     }
 
     /// A function that returns a future that resolves in a result over an output, after the command
@@ -776,8 +764,6 @@ impl RemoteHandle {
             stderr_cb = Some(Box::new(|_|{}));
         }
         async move {
-            let span = trace_span!("RemoteHandle::async_pty", ?context);
-            let _guard = span.enter();
             let (sender, receiver) = oneshot::channel();
             trace!("Sending pty input");
             chan.send((sender, OperationInput::Pty(context, commands, stdout_cb.unwrap(), stderr_cb.unwrap())))
@@ -789,7 +775,7 @@ impl RemoteHandle {
                 Ok(OperationOutput::Pty(res)) => res,
                 Ok(e) => Err(Error::OperationFetch(format!("Expected Pty, found {:?}", e)))
             }
-        }
+        }.instrument(trace_span!("RemoteHandle::async_pty"))
     }
 
     /// A function that returns a future that resolves in a result over an empty type, after the 
@@ -797,8 +783,6 @@ impl RemoteHandle {
     pub fn async_scp_send(&self, local_path: PathBuf, remote_path: PathBuf) -> impl Future<Output=Result<(), Error>> {
         let mut chan = self.sender.clone();
         async move {
-            let span = trace_span!("RemoteHandle::async_scp_send", ?local_path, ?remote_path);
-            let _guard = span.enter();
             let (sender, receiver) = oneshot::channel();
             trace!("Sending scp send input");
             chan.send((sender, OperationInput::ScpSend(local_path, remote_path)))
@@ -810,7 +794,7 @@ impl RemoteHandle {
                 Ok(OperationOutput::ScpSend(res)) => res,
                 Ok(e) => Err(Error::OperationFetch(format!("Expected ScpSend, found {:?}", e)))
             }
-        }
+        }.instrument(trace_span!("RemoteHandle::async_scp_send"))
     }
     
     /// A function that returns a future that resolves in a result over an empty type, after the 
@@ -818,9 +802,6 @@ impl RemoteHandle {
     pub fn async_scp_fetch(&self, remote_path: PathBuf, local_path: PathBuf) -> impl Future<Output=Result<(), Error>> {
         let mut chan = self.sender.clone();
         async move {
-            let span = trace_span!("RemoteHandle::async_scp_fetch", ?remote_path, ?local_path);
-            let _guard = span.enter();
-
             let (sender, receiver) = oneshot::channel();
             trace!("Sending scp fetch input");
             chan.send((sender, OperationInput::ScpFetch(remote_path, local_path)))
@@ -832,7 +813,7 @@ impl RemoteHandle {
                 Ok(OperationOutput::ScpFetch(res)) => res,
                 Ok(e) => Err(Error::OperationFetch(format!("Expected ScpFetch, found {:?}", e)))
             }
-        }
+        }.instrument(trace_span!("RemoteHandle::async_scp_fetch"))
     }
 }
 
@@ -854,10 +835,8 @@ fn new_session(stream: &TcpStream) -> Result<Session, Error>{
 
 
 // Checks the host identity against our known hosts.
+#[instrument(name="authenticate_host", skip(host, session))]
 fn authenticate_host(host: &str, session: &mut Session) -> Result<(),Error>{
-    let span = trace_span!("authenticate_host", host);
-    let _guard = span.enter();
-
     trace!("Checking host key");
     // We set the session known hosts to the database file
     let mut known_hosts = session.known_hosts().unwrap();
@@ -905,12 +884,9 @@ fn authenticate_host(host: &str, session: &mut Session) -> Result<(),Error>{
 
 
 // Authenticates ourselves on the remote end, using an ssh agent.
+#[instrument(name="authenticate_local", skip(session))]
 fn authenticate_local(user: &str, session: &mut Session) -> Result<(), Error>{
-    let span = trace_span!("authenticate_local", user);
-    let _guard = span.enter();
-
     trace!("Authenticating ourselves");
-
     // We retrieve the agent. 
     let mut agent = session.agent().unwrap();
     agent.connect()
@@ -938,7 +914,7 @@ fn authenticate_local(user: &str, session: &mut Session) -> Result<(), Error>{
 
 
 // Acquires an exec channel on the remote
-#[instrument]
+#[instrument(skip(remote))]
 async fn acquire_exec_channel(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Channel<'_>, Error>{
     trace!("Acquiring exec channel.");
     // We query a channel session. Error -21 corresponds to missing available channels. It 
@@ -961,10 +937,8 @@ async fn acquire_exec_channel(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Chann
 
 
 // Performs exec command.
+#[instrument(skip(channel))]
 async fn setup_exec(cmd: String, channel: &mut ssh2::Channel<'_>) -> Result<(), Error>{
-    let span = trace_span!("setup_exec", cmd=?cmd);
-    let _guard = span.enter();
-
     trace!("Perform exec command `{}`", cmd);
     // We execute the command in the cwd.
     await_wouldblock_ssh!(channel.exec(&format!("{}\n", cmd)))
@@ -978,10 +952,8 @@ async fn setup_exec(cmd: String, channel: &mut ssh2::Channel<'_>) -> Result<(), 
 
 
 // Reads the output of an exec command, and returns the output.
+#[instrument(skip(channel))]
 async fn read_exec_out_err(channel: &mut ssh2::Channel<'_>) -> Result<Output, Error>{
-    let span = trace_span!("read_exec_out_err");
-    let _guard = span.enter();
-
     trace!("Reading exec output");
     // We generate a new output
     let mut output = Output {
@@ -1026,10 +998,8 @@ async fn read_exec_out_err(channel: &mut ssh2::Channel<'_>) -> Result<Output, Er
 
 
 // Closes the exec channel retrieving tyhe exit status 
+#[instrument(skip(channel))]
 async fn close_exec(channel: &mut ssh2::Channel<'_>) -> Result<ExitStatus, Error>{
-    let span = trace_span!("close_exec");
-    let _guard = span.enter();
-
     trace!("Closing exec channel");
     // We close the channel and retrieve the execution code
     let ecode: Result<i32, ssh2::Error> = try {
@@ -1044,7 +1014,7 @@ async fn close_exec(channel: &mut ssh2::Channel<'_>) -> Result<ExitStatus, Error
 
 
 // Starts a pty channel
-#[instrument]
+#[instrument(skip(remote))]
 async fn acquire_pty_channel<'a>(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Channel<'_>, ssh2::Error>{
     trace!("Acquiring pty channel");
     let mut channel = await_wouldblock_ssh!(await_retry_ssh!({remote.lock().await.session().channel_session()},-21))?;
@@ -1055,11 +1025,8 @@ async fn acquire_pty_channel<'a>(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Ch
 
 
 // Setups the pty 
+#[instrument(skip(channel))]
 async fn setup_pty(channel: &mut ssh2::Channel<'_>, cwd: &PathBuf, envs: &EnvironmentStore) -> Result<(), Error>{
-
-    let span = trace_span!("setup_pty", ?cwd, ?envs);
-    let _guard = span.enter();
-
     trace!("Setting up a pty channel");
     // We make sure we run on bash
     await_wouldblock_io!(channel.write_all("export HISTFILE=/dev/null\nbash\n".as_bytes()))
@@ -1084,17 +1051,13 @@ async fn setup_pty(channel: &mut ssh2::Channel<'_>, cwd: &PathBuf, envs: &Enviro
 
 
 // Performs a set of pty commands
+#[instrument(skip(channel, stdout_cb, stderr_cb))]
 async fn perform_pty(channel: &mut ssh2::Channel<'_>, 
                      cmds: Vec<RawCommand<String>>, 
                      stdout_cb: Box<dyn Fn(Vec<u8>) + Send + 'static>,
                      stderr_cb: Box<dyn Fn(Vec<u8>) + Send + 'static> ) 
                      -> Result<(TerminalContext<PathBuf>, Vec<Output>), Error>{
-    
-    let span = trace_span!("perform_pty");
-    let _guard = span.enter();
-
     trace!("Performs pty commands");
-
     // We prepare necessary variables
     let mut outputs = vec!();
     let mut cmds = cmds.into_iter()
@@ -1199,10 +1162,8 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
 
 
 // Closes a pty channel.
+#[instrument(skip(channel))]
 async fn close_pty(channel: &mut ssh2::Channel<'_>) -> Result<(), Error>{
-    let span = trace_span!("close_pty");
-    let _guard = span.enter();
-
     trace!("Closing pty channel");
     // We make sure to leave bash and the landing shell
     await_wouldblock_io!(channel.write_all("history -c \nexit\n history -c \nexit\n".as_bytes()))
@@ -1223,7 +1184,7 @@ async fn close_pty(channel: &mut ssh2::Channel<'_>) -> Result<(), Error>{
 
 
 // Sets scp send up
-#[instrument]
+#[instrument(skip(remote))]
 async fn setup_scp_send<'a>(remote: &'a Arc<Mutex<Remote>>, 
                         local_path: &PathBuf,
                         remote_path: &PathBuf) 
@@ -1258,13 +1219,10 @@ async fn setup_scp_send<'a>(remote: &'a Arc<Mutex<Remote>>,
 
 
 // Performs the scp send
+#[instrument(skip(channel, local_file, bytes))]
 async fn perform_scp_send(channel: &mut ssh2::Channel<'_>, 
                           local_file: &mut BufReader<File>, 
                           bytes: i64) -> Result<(), Error>{
-    
-    let span = trace_span!("perform_send_send", ?bytes);
-    let _guard = span.enter();
-
     trace!("Performing scp send copy");
     let mut stream = channel.stream(0);
     let mut remaining_bytes = bytes as i64;
@@ -1299,10 +1257,8 @@ async fn perform_scp_send(channel: &mut ssh2::Channel<'_>,
 
 
 // Closes scp channel
+#[instrument(skip(channel))]
 async fn close_scp_channel(channel: ssh2::Channel<'_>) -> Result<(), ssh2::Error>{
-    let span = trace_span!("close_scp_channel");
-    let _guard = span.enter();
-
     trace!("Closing scp channel");
     let mut channel = channel;
     await_wouldblock_ssh!(channel.send_eof())?;
@@ -1314,13 +1270,12 @@ async fn close_scp_channel(channel: ssh2::Channel<'_>) -> Result<(), ssh2::Error
 
 
 // Sets up scp fetch
-#[instrument]
+#[instrument(skip(remote))]
 async fn setup_scp_fetch<'a>(remote: &'a Arc<Mutex<Remote>>, 
                              remote_path: &PathBuf, 
                              local_path: &PathBuf ) 
                              -> Result<(File, ssh2::Channel<'a>, i64), Error>{
     trace!("Setting up scp fetch");
-
     let local_file = match OpenOptions::new().write(true).create_new(true).open(local_path) {
         Ok(f) => f,
         Err(e) => return Err(Error::ScpFetchFailed(format!("Failed to open local file: {}", e)))
@@ -1346,16 +1301,12 @@ async fn setup_scp_fetch<'a>(remote: &'a Arc<Mutex<Remote>>,
 
 
 // Processes scp fetch
+#[instrument(skip(channel))]
 async fn process_scp_fetch(channel: &mut ssh2::Channel<'_>, 
                            local_file: File, 
                            remaining_bytes: i64) 
                            -> Result<(), Error>{
-
-    let span = trace_span!("process_scp_fetch", ?local_file, ?remaining_bytes);
-    let _guard = span.enter();
-
     trace!("Processing scp fetch");
-
     let mut remaining_bytes = remaining_bytes;
     let mut local_file = local_file;
     let mut stream = channel.stream(0);
