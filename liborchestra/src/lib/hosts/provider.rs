@@ -24,6 +24,7 @@ use futures::sink::SinkExt;
 use super::NodeHandle;
 use std::sync::Arc;
 use futures::lock::Mutex;
+use tracing::{self, error, trace, warn, debug, info, instrument};
 
 //------------------------------------------------------------------------------------------- ERRORS
 
@@ -230,7 +231,6 @@ mod tests {
     fn init() {
         
         std::env::set_var("RUST_LOG", "liborchestra::hosts=trace");
-        let _ = env_logger::builder().is_test(true).try_init();
     }
 
     #[test]

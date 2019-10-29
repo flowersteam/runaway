@@ -32,6 +32,7 @@ use crate::*;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::os::unix::process::ExitStatusExt;
+use tracing::{self, error, trace, warn, debug, info, instrument};
 
 
 //----------------------------------------------------------------------------------------- MESSAGES
@@ -552,13 +553,6 @@ where
 mod test {
 
     use super::*;
-    use env_logger;
-
-    fn init() {
-        
-        std::env::set_var("RUST_LOG", "liborchestra::scheduler=trace,liborchestra::primitives=trace");
-        let _ = env_logger::builder().is_test(true).try_init();
-    }
 
     fn write_python_scheduler() {
         let program = "#!/usr/bin/env python
@@ -627,7 +621,6 @@ if __name__ == \"__main__\":
     fn test_scheduler_resource() {
         use futures::executor::block_on;
 
-        init();
         
         write_python_scheduler();
 

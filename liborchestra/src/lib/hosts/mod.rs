@@ -36,6 +36,7 @@ use crate::SSH_CONFIG_RPATH;
 use std::sync::Arc;
 use futures::lock::Mutex;
 use futures::SinkExt;
+use tracing::{self, error, trace, warn, debug, info, instrument};
 
 
 
@@ -834,13 +835,6 @@ async fn cancel_allocation(frontend: &Frontend,
 mod test {
 
     use super::*;
-    use env_logger;
-
-    fn init() {
-        
-        std::env::set_var("RUST_LOG", "liborchestra::host=trace,liborchestra::ssh=debug");
-        let _ = env_logger::builder().is_test(true).try_init();
-    }
 
     #[test]
     fn test_host_conf() {
@@ -861,7 +855,6 @@ mod test {
 
     #[test]
     fn test_host_conf_from_file() {
-        init();
         let config = HostConf::from_file(&path::PathBuf::from("/tmp/test_host.yml"));
         eprintln!("config = {:#?}", config);
     }
@@ -975,7 +968,6 @@ mod test {
         use std::time::Duration;
         use std::ops::Deref;
 
-        init();
 
         std::fs::remove_file("/tmp/alloc_test");
         std::fs::remove_file("/tmp/cancel_test");

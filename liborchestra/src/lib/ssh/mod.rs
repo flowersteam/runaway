@@ -16,7 +16,7 @@ use ssh2::{
     MethodType,
     KnownHostKeyFormat};
 use std::{
-    net::{TcpStream, SocketAddr, ToSocketAddrs},
+    net::{TcpStream, SocketAddr, ToSocketAddrs, Shutdown},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -54,6 +54,8 @@ use crate::commons::{
     TerminalContext
 };
 use crate::*;
+use tracing::{self, error, trace, warn, debug, info, instrument, trace_span};
+
 
 
 //------------------------------------------------------------------------------------------  MODULE
@@ -263,29 +265,31 @@ impl From<Error> for crate::commons::Error{
 //------------------------------------------------------------------------------------ PROXY-COMMAND
 
 
-// This type represents the handle to the proxycommand forwarding process. 
-type ProxyCommandHandle = Option<thread::JoinHandle<(thread::JoinHandle<()>,
-                                                     thread::JoinHandle<()>,
-                                                     thread::JoinHandle<()>)>>;
-
 /// This structure starts a proxy command which is forwarded on a tcp socket. This allows
 /// a libssh2 session to get connected through a proxy command. On the first connection to the
 /// socket, the proxycommand will be started in a subprocess, and the reads from the socket will be
 /// copied to the process stdin, and the stdout from the process will be written to the socket. The 
 /// forthcoming connections are rejected. The messages get forwarded as long as the forwarder stays 
 /// in scope. The forwarding is explicitly stopped when the forwarder is dropped. 
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct ProxyCommandForwarder {
+    #[derivative(Debug="ignore")]
     keep_alive: Arc<AtomicBool>,
-    handle: ProxyCommandHandle ,
-    repr: String,
+    #[derivative(Debug="ignore")]
+    handle: Option<thread::JoinHandle<(thread::JoinHandle<()>,
+                                       thread::JoinHandle<()>)>>,
+    command: String,
 }
 
 impl ProxyCommandForwarder {
     /// Creates a new `ProxyCommandForwarder` from a command. An available port is automatically
     /// given by the OS, and is returned along with the forwarder. 
+    #[instrument(name="ProxyCommandForwarder::from_command")]
     pub fn from_command(command: &str) -> Result<(ProxyCommandForwarder, SocketAddr), Error> {
-        debug!("ProxyCommandForwarder: Starting proxy command: {}", command);
-        trace!("ProxyCommandForwarder: Starting tcp listener");
+
+
+        trace!("Starting tcp listener");
         let stream = match std::net::TcpListener::bind("127.0.0.1:0") {
             Ok(s) => s,
             Err(e) => return Err(Error::ProxyCommandStartup(
@@ -293,30 +297,43 @@ impl ProxyCommandForwarder {
             )
         };
         let command_string = command.to_owned();
+        let c1 = command.to_owned();
+        let c2 = command.to_owned();
+        let c3 = command.to_owned();
         let address = stream.local_addr().unwrap();
         let keep_forwarding = Arc::new(AtomicBool::new(true));
         let kf = keep_forwarding.clone();
         let mut cmd = command.split_whitespace().collect::<Vec<_>>();
         let args = cmd.split_off(1);
         let cmd = cmd.pop().unwrap();
-        trace!("ProxyCommandForwarder: Spawning proxy command");
+
+
+        trace!("Spawning proxy command");
         let mut command = Command::new(cmd)
             .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
-            .unwrap();
-        trace!("ProxyCommandForwarder: Spawning proxy command forwarding thread");
+            .map_err(|e| Error::ProxyCommandStartup(format!("failed to start command: {}", e)))?;
+
+
+        trace!("Spawning proxy command forwarding thread");
         let handle = std::thread::spawn(move || {
+            
+            let span = trace_span!("ProxyCommandForwarder::InitThread", command=c1.as_str());
+            let _guard = span.enter();
             let (socket, _) = stream.accept().unwrap();
             let mut socket1 = socket.try_clone().unwrap();
             let mut socket2 = socket.try_clone().unwrap();
             let kf1 = kf.clone();
             let kf2 = kf.clone();
-            let kf3 = kf.clone();
             let mut command_stdin = command.stdin.take().unwrap();
             let mut command_stdout = command.stdout.take().unwrap();
+            
+            trace!("Creating stdout forwarding thread");
             let h1 = std::thread::spawn(move || {
+                let span = trace_span!("ProxyCommandForwarder::StdoutThread", command=c2.as_str());
+                let _guard = span.enter();  
                 while kf1.load(Ordering::Relaxed) {
                     if std::io::copy(&mut command_stdout, &mut socket1).is_err(){
                         break
@@ -324,9 +341,16 @@ impl ProxyCommandForwarder {
                         socket1.flush().unwrap()
                     }
                 }
-                trace!("ProxyCommandForwarder: Exiting command -> socket thread");
+                match socket1.shutdown(Shutdown::Write){
+                    Ok(_) => trace!("Forwarding shutdown"),
+                    Err(e) => warn!("Failed to shutdown forwarding: {}", e),
+                };
             });
+
+            trace!("Creating stderr forwarding thread");
             let h2 = std::thread::spawn(move || {
+                let span = trace_span!( "ProxyCommandForwarder::StderrThread", command=c3.as_str());
+                let _guard = span.enter();  
                 while kf2.load(Ordering::Relaxed) {
                     if std::io::copy(&mut socket2, &mut command_stdin).is_err(){
                         break
@@ -334,45 +358,37 @@ impl ProxyCommandForwarder {
                         command_stdin.flush().unwrap();
                     }
                 }
-                trace!("ProxyCommandForwarder: Exiting socket -> command thread");
+                match socket2.shutdown(Shutdown::Read){
+                    Ok(_) => trace!("Forwarding shutdown"),
+                    Err(e) => warn!("Failed to shutdown forwarding: {}", e),
+                };
             });
-            let h3 = std::thread::spawn(move || {
-                while kf3.load(Ordering::Relaxed) {
-                    if let Ok(Some(_)) = command.try_wait() {
-                        trace!("ProxyCommandForwarder: Proxy Command has stopped. Exiting");
-                        kf3.store(false, Ordering::Relaxed);
-                    }
-                }
-                trace!("ProxyCommandForwarder: Exiting watch thread");
-            });
-            (h1, h2, h3)
+            (h1, h2)
         });
-        trace!("ProxyCommandForwarder: Returning proxy command");
+
+        trace!("Returning proxy command");
         Ok((ProxyCommandForwarder {
             keep_alive: keep_forwarding,
             handle: Some(handle),
-            repr: command_string
+            command: command_string
         },
                    address))
-    }
-}
-
-impl fmt::Debug for ProxyCommandForwarder{
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "ProxyCommandForwarder{}", self.repr)
     }
 }
 
 // Care must be taken to join the threads at drop, to appropriately close the connection and the
 // process.
 impl Drop for ProxyCommandForwarder { 
+    #[instrument(name="ProxyCommandForwarder::drop")]
     fn drop(&mut self) {
+        trace!("Stop keeping alive");
         self.keep_alive.store(false, Ordering::Relaxed);
+        trace!("Joining init thread handle.");
         let handle = self.handle.take().unwrap();
-        let (h1, h2, h3) = handle.join().unwrap();
+        trace!("Joining each thread handle.");
+        let (h1, h2) = handle.join().unwrap();
         h1.join().unwrap();
         h2.join().unwrap();
-        h3.join().unwrap();
     }
 }
 
@@ -381,13 +397,20 @@ impl Drop for ProxyCommandForwarder {
 
 
 // A synchronous wrapper over a non-blocking Remote.
+#[derive(Derivative)]
+#[derivative(Debug)]
 struct Remote{
+    #[derivative(Debug="ignore")]
     session: Option<&'static Session>,
-    _stream: TcpStream,
+    #[derivative(Debug="ignore")]
+    stream: TcpStream,
+    #[derivative(Debug="ignore")]
     proxycommand: Option<ProxyCommandForwarder>,
+    repr: String,
 }
 
 impl Drop for Remote{
+    #[instrument(name="Remote::drop")]
     fn drop(&mut self){
         // Unsafe trick to avoid memory leaks. Since we know that all our references to the
         // session were dropped we transmute the session to a Box and drop it.
@@ -395,8 +418,8 @@ impl Drop for Remote{
             let sess: Box<Session> = transmute(self.session.take().unwrap() as *const Session);
             // We disconnect the session
             match sess.disconnect(None, "Over", None){
-                Ok(_) => info!("Remote: Successfully disconnected."),
-                Err(e) => error!("Remote: Failed to disconnect from remote: {}", e)
+                Ok(_) => trace!("Successfully disconnected."),
+                Err(e) => error!("Failed to disconnect from remote: {}", e)
             }
             drop(sess);
         }
@@ -404,14 +427,16 @@ impl Drop for Remote{
 }
 
 impl Remote {
+    
     /// Helper to avoid boilerplate.
     fn session(&self) -> &'static Session{
         self.session.as_ref().unwrap()
     }
 
     /// Build a Remote from a profile.
+    #[instrument(name="Remote::from_profile")]
     fn from_profile(profile: config::SshProfile) -> Result<Remote, Error>{
-        debug!("Remote: Creating remote connection from profile: {:?}", profile);
+        trace!("Creating remote connection.");
         match profile{
             config::SshProfile{
                 hostname:Some(host),
@@ -436,34 +461,38 @@ impl Remote {
     }
 
     /// Build, authenticate and starts an ssh session from an adress.
-    fn from_addr(addr: impl ToSocketAddrs+fmt::Display,
-                     host: &str,
-                     user: &str) -> Result<Remote, Error> {
-        debug!("Remote: Creating remote connection from address");
-        trace!("Remote: Connection tcp stream");
+    #[instrument(name="Remote::from_addr")]
+    fn from_addr(addr: impl ToSocketAddrs+fmt::Display+fmt::Debug,
+                 host: &str,
+                 user: &str) -> Result<Remote, Error> {
+        trace!("Creating connection from address");
         let stream = TcpStream::connect(&addr)
             .map_err(|_| Error::ConnectionFailed(format!("Failed to connect to address {}", addr)))?;
         let session = Remote::start_session(&stream, host, user)?;
         let session: &'static Session = Box::leak(Box::new(session));
         Ok(Remote {
             session: Some(session),
-            _stream: stream,
+            stream,
             proxycommand: None,
+            repr: format!("{}", addr),
         })
     }
 
     /// Build, authenticate and starts an ssh session from a proxycommand.
+    #[instrument(name="Remote::from_proxy_command")]
     fn from_proxy_command(command: &str, host: &str, user: &str) -> Result<Remote, Error> {
-        debug!("Remote: Creating remote connection from proxycommand {}", command);
+        trace!("Creating remote connection from proxycommand");
         let (proxy_command, addr) = ProxyCommandForwarder::from_command(command)?;
         let mut remote = Remote::from_addr(addr, host, user)?;
         remote.proxycommand.replace(proxy_command);
+        remote.repr = format!("{}", command);
         Ok(remote)
     }
 
     /// Starts the ssh session.
+    #[instrument(name="Remote::start_session")]
     fn start_session(stream: &TcpStream, host: &str, user: &str) -> Result<Session, Error> {
-        debug!("Remote: Opening remote connection to host {} as user {}", host, user);
+        trace!("Opening remote connection to host");
         let mut session = new_session(stream)?;
         authenticate_host(host, &mut session)?;
         authenticate_local(user, &mut session) ?;
@@ -473,8 +502,9 @@ impl Remote {
 
 
     /// Asynchronous function used to execute a command on the remote.
+    #[instrument(name="Remote::exec")]
     async fn exec(remote: Arc<Mutex<Remote>>, command: RawCommand<String>) -> Result<Output, Error>{
-        debug!("Remote: Executing command `{}`", command.0);
+        trace!("Executing command");
         let RawCommand(cmd) = command; 
         let mut channel = acquire_exec_channel(&remote).await?;
         setup_exec(cmd, &mut channel).await?;
@@ -490,8 +520,19 @@ impl Remote {
                  stdout_cb: Box<dyn Fn(Vec<u8>) + Send + 'static>,
                  stderr_cb: Box<dyn Fn(Vec<u8>) + Send + 'static>) 
                  -> Result<(TerminalContext<PathBuf>, Vec<Output>), Error> {
-        debug!("Remote: Executing pty commands");
-        
+        let cmds = commands.iter()
+            .fold(String::new(), |mut acc, RawCommand(s)| {
+                acc.push_str(&format!("{}, ", s));
+                acc
+            });
+        let envs = context.envs.iter()
+            .fold(String::new(), |mut acc, (EnvironmentKey(k), EnvironmentValue(v))|{
+                acc.push_str(&format!("{}:{}, ", k, v));
+                acc
+            });
+        let span = trace_span!("Remote::pty", commands=?cmds, cwd=?context.cwd.0, ?envs);
+        let _guard = span.enter();
+        trace!("Executing pty commands");
         if commands.is_empty(){
             return Err(Error::ExecutionFailed("No command was provided.".to_string()))
         }
@@ -508,11 +549,9 @@ impl Remote {
     
 
     /// Asynchronous function used to send a file to a remote.
+    #[instrument(name="Remote::scp_send")]
     async fn scp_send(remote: Arc<Mutex<Remote>>, local_path: PathBuf, remote_path: PathBuf) -> Result<(), Error>{
-        debug!("Remote: Starting transfert of local {} to remote {}", 
-            local_path.to_str().unwrap(), 
-            remote_path.to_str().unwrap());
-
+        trace!("Starting transfer");
         let (mut local_file, bytes, mut channel) = setup_scp_send(&remote, &local_path, &remote_path).await?;
         perform_scp_send(&mut channel, &mut local_file, bytes).await?;
         close_scp_channel(channel).await
@@ -521,11 +560,9 @@ impl Remote {
     }
 
     /// Asynchronous method used to fetch a file from remote.
+    #[instrument(name="Remote::scp_fetch")]
     async fn scp_fetch(remote: Arc<Mutex<Remote>>, remote_path: PathBuf, local_path: PathBuf) -> Result<(), Error>{
-        debug!("Remote: Starting transfert of remote {} to local {}", 
-            remote_path.to_str().unwrap(), 
-            local_path.to_str().unwrap());
-
+        trace!("Starting transfer");
         std::fs::remove_file(&local_path).unwrap_or(());
         let (file, mut channel, bytes) = setup_scp_fetch(&remote, &remote_path, &local_path).await?;
         process_scp_fetch(&mut channel, file, bytes).await?;
@@ -565,19 +602,16 @@ enum OperationOutput {
 
 
 /// A handle to an inner application. Offer a future interface to the inner application.
-#[derive(Clone)]
+#[derive(Clone, Derivative)]
+#[derivative(Debug)]
 pub struct RemoteHandle {
+    repr: String,
+    #[derivative(Debug="ignore")]
     sender: mpsc::UnboundedSender<(oneshot::Sender<OperationOutput>, OperationInput)>,
+    #[derivative(Debug="ignore")]
     profile: config::SshProfile,
+    #[derivative(Debug="ignore")]
     dropper: Dropper,
-}
-
-impl fmt::Debug for RemoteHandle{
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result{
-        write!(f, "RemoteHandle<{}>", self.profile.hostname
-            .as_ref()
-            .unwrap_or(self.profile.proxycommand.as_ref().unwrap_or(&"Unknown".to_string())))
-    }
 }
 
 impl PartialEq for RemoteHandle {
@@ -587,9 +621,11 @@ impl PartialEq for RemoteHandle {
 }
 
 impl RemoteHandle {
+
     /// Spawns the application and returns a handle to it. 
+    #[instrument(name="RemoteHandle::spawn")]
     pub fn spawn(profile: config::SshProfile) -> Result<RemoteHandle, Error> {
-        debug!("RemoteHandle: Start remote thread.");
+        trace!("Start remote thread.");
         let (sender, receiver) = mpsc::unbounded();
         let (start_tx, start_rx) = crossbeam::channel::unbounded();
         let repr = match &profile.proxycommand{
@@ -598,7 +634,9 @@ impl RemoteHandle {
         };
         let moving_profile = profile.clone();
         let handle = std::thread::Builder::new().name("remote".to_owned()).spawn(move || {
-            trace!("Remote Thread: Creating resource in thread");
+            let span = trace_span!("Remote::Thread");
+            let _guard = span.enter();
+            trace!("Creating resource in thread");
             let remote = match Remote::from_profile(moving_profile){
                 Ok(r) =>{
                     start_tx.send(Ok(())).unwrap();
@@ -610,19 +648,21 @@ impl RemoteHandle {
                 }
             };
             let remote = Arc::new(Mutex::new(remote));
-            trace!("Remote Thread: Starting handling stream");
+            trace!("Starting handling stream");
             let mut pool = executor::LocalPool::new();
             let mut spawner = pool.spawner();
             let handling_stream = receiver.for_each(
                 move |(sender, operation): (oneshot::Sender<OperationOutput>, OperationInput)| {
-                    trace!("Remote Thread: received operation {:?}", operation);
+                    let span = trace_span!("Remote::Thread::Handling_Stream");
+                    let _guard = span.enter();
+                    trace!(?operation, "Received operation");
                     match operation {
                         OperationInput::Exec(command) => {
                             spawner.spawn_local(
                                 Remote::exec(remote.clone(), command)
                                     .map(|a| {
                                         sender.send(OperationOutput::Exec(a))
-                                            .map_err(|e| error!("Remote Thread: Failed to \\
+                                            .map_err(|e| error!("Failed to \\
                                             send an operation output: \n{:?}", e))
                                             .unwrap();
                                     })
@@ -633,7 +673,7 @@ impl RemoteHandle {
                                 Remote::pty(remote.clone(), context, commands, stdout_cb, stderr_cb)
                                     .map(|a| {
                                         sender.send(OperationOutput::Pty(a))
-                                            .map_err(|e| error!("Remote Thread: Failed to \\
+                                            .map_err(|e| error!("Failed to \\
                                             send an operation output: \n{:?}", e))
                                             .unwrap();
                                     })
@@ -644,7 +684,7 @@ impl RemoteHandle {
                                 Remote::scp_send(remote.clone(), local_path, remote_path)
                                     .map(|a| {
                                         sender.send(OperationOutput::ScpSend(a))
-                                            .map_err(|e| error!("Remote Thread: Failed to \\
+                                            .map_err(|e| error!("Failed to \\
                                             send an operation output: \n{:?}", e))
                                             .unwrap();
                                     })
@@ -655,29 +695,30 @@ impl RemoteHandle {
                                 Remote::scp_fetch(remote.clone(), remote_path, local_path)
                                     .map(|a| {
                                         sender.send(OperationOutput::ScpFetch(a))
-                                            .map_err(|e| error!("Remote Thread: Failed to \\
+                                            .map_err(|e| error!("Failed to \\
                                             send an operation output: \n{:?}", e))
                                             .unwrap();
                                     })
                             )
                         }
                     }
-                    .map_err(|e| error!("Remote Thread: Failed to spawn the operation: \n{:?}", e))
+                    .map_err(|e| error!(error=?e, "Failed to spawn operation"))
                     .unwrap();
                     future::ready(())
                 }
             );
             let mut spawner = pool.spawner();
             spawner.spawn_local(handling_stream)
-                .map_err(|_| error!("Remote Thread: Failed to spawn handling stream"))
+                .map_err(|e| error!(error=?e, "Failed to spawn handling stream"))
                 .unwrap();
-            trace!("Remote Thread: Starting local executor.");
+            trace!("Starting local executor.");
             pool.run();
-            trace!("Remote Thread: All futures executed. Leaving...");
+            trace!("All futures executed. Leaving...");
         }).expect("Failed to spawn application thread.");
         start_rx.recv().unwrap()?;
         let drop_sender = sender.clone();
         Ok(RemoteHandle {
+            repr,
             sender,
             profile,
             dropper: Dropper::from_closure(
@@ -692,15 +733,16 @@ impl RemoteHandle {
     /// A function that returns a future that resolves in a result over an output, after the command
     /// was executed.
     pub fn async_exec(&self, command:RawCommand<String>) -> impl Future<Output=Result<Output, Error>> {
-        debug!("RemoteHandle: Building async_exec future to command: {:?}", command);
         let mut chan = self.sender.clone();
         async move {
+            let span = trace_span!("RemoteHandle::async_exec", ?command);
+            let _guard = span.enter();
             let (sender, receiver) = oneshot::channel();
-            trace!("RemoteHandle::async_exec_future: Sending exec input");
+            trace!("Sending exec input");
             chan.send((sender, OperationInput::Exec(command)))
                 .await
                 .map_err(|e| Error::Channel(e.to_string()))?;
-            trace!("RemoteHandle::async_exec_future: Awaiting exec output");
+            trace!("Awaiting exec output");
             match receiver.await {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::Exec(res)) => res,
@@ -718,7 +760,7 @@ impl RemoteHandle {
         stdout_cb: Option<Box<dyn Fn(Vec<u8>)+Send+'static>>,
         stderr_cb: Option<Box<dyn Fn(Vec<u8>)+Send+'static>>) 
         -> impl Future<Output=Result<(TerminalContext<PathBuf>, Vec<Output>), Error>> {
-        debug!("RemoteHandle: Building async_pty future to commands: {:?}", commands);
+
         let mut chan = self.sender.clone();
         let mut stdout_cb = stdout_cb;
         if stdout_cb.is_none(){
@@ -729,12 +771,14 @@ impl RemoteHandle {
             stderr_cb = Some(Box::new(|_|{}));
         }
         async move {
+            let span = trace_span!("RemoteHandle::async_pty", ?context);
+            let _guard = span.enter();
             let (sender, receiver) = oneshot::channel();
-            trace!("RemoteHandle::async_pty_future: Sending pty input");
+            trace!("Sending pty input");
             chan.send((sender, OperationInput::Pty(context, commands, stdout_cb.unwrap(), stderr_cb.unwrap())))
                 .await
                 .map_err(|e| Error::Channel(e.to_string()))?;
-            trace!("RemoteHandle::async_pty_future: Awaiting pty output");
+            trace!("Awaiting pty output");
             match receiver.await {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::Pty(res)) => res,
@@ -746,17 +790,16 @@ impl RemoteHandle {
     /// A function that returns a future that resolves in a result over an empty type, after the 
     /// file was sent.
     pub fn async_scp_send(&self, local_path: PathBuf, remote_path: PathBuf) -> impl Future<Output=Result<(), Error>> {
-        debug!("RemoteHandle: Building async_scp_send future from local {} to remote {}", 
-            local_path.to_str().unwrap(),
-            remote_path.to_str().unwrap());
         let mut chan = self.sender.clone();
         async move {
+            let span = trace_span!("RemoteHandle::async_scp_send", ?local_path, ?remote_path);
+            let _guard = span.enter();
             let (sender, receiver) = oneshot::channel();
-            trace!("RemoteHandle::async_scp_send_future: Sending scp send input");
+            trace!("Sending scp send input");
             chan.send((sender, OperationInput::ScpSend(local_path, remote_path)))
                 .await
                 .map_err(|e| Error::Channel(e.to_string()))?;
-            trace!("RemoteHandle::async_scp_send_future: Awaiting scp send output");
+            trace!("Awaiting scp send output");
             match receiver.await {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::ScpSend(res)) => res,
@@ -768,17 +811,17 @@ impl RemoteHandle {
     /// A function that returns a future that resolves in a result over an empty type, after the 
     /// file was fetch
     pub fn async_scp_fetch(&self, remote_path: PathBuf, local_path: PathBuf) -> impl Future<Output=Result<(), Error>> {
-        debug!("RemoteHandle: Building async_scp_fetch future from remote {} to local {}", 
-            remote_path.to_str().unwrap(),
-            local_path.to_str().unwrap());
         let mut chan = self.sender.clone();
         async move {
+            let span = trace_span!("RemoteHandle::async_scp_fetch", ?remote_path, ?local_path);
+            let _guard = span.enter();
+
             let (sender, receiver) = oneshot::channel();
-            trace!("RemoteHandle::async_scp_fetch_future: Sending scp fetch input");
+            trace!("Sending scp fetch input");
             chan.send((sender, OperationInput::ScpFetch(remote_path, local_path)))
                 .await
                 .map_err(|e| Error::Channel(e.to_string()))?;
-            trace!("RemoteHandle::async_scp_fetch_future: Awaiting scp fetch output");
+            trace!("Awaiting scp fetch output");
             match receiver.await {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::ScpFetch(res)) => res,
@@ -793,9 +836,9 @@ impl RemoteHandle {
 
 
 // Generates a new session following our preferences
+#[instrument]
 fn new_session(stream: &TcpStream) -> Result<Session, Error>{
-    trace!("Remote: Creates a new session");
-
+    trace!("Creates a new session");
     let mut session = Session::new().unwrap();
     session.method_pref(MethodType::HostKey, "ssh-rsa")
         .map_err(|_| Error::ConnectionFailed("Failed to set preferences".to_string()))?;
@@ -807,8 +850,10 @@ fn new_session(stream: &TcpStream) -> Result<Session, Error>{
 
 // Checks the host identity against our known hosts.
 fn authenticate_host(host: &str, session: &mut Session) -> Result<(),Error>{
-    trace!("Remote: Checking host key");
+    let span = trace_span!("authenticate_host", host);
+    let _guard = span.enter();
 
+    trace!("Checking host key");
     // We set the session known hosts to the database file
     let mut known_hosts = session.known_hosts().unwrap();
     let mut known_hosts_path = dirs::home_dir()
@@ -833,12 +878,12 @@ fn authenticate_host(host: &str, session: &mut Session) -> Result<(),Error>{
         }
         // Host is different
         CheckResult::Mismatch => {
-            trace!("Remote: Host key mismatch....");
+            trace!("Host key mismatch....");
             Err(Error::ConnectionFailed("The key presented by the host mismatches the one we know. ".to_string()))
         }
         // Host not in database
         CheckResult::NotFound => {
-            trace!("Remote: Host not known. Writing the key in the registry.");
+            trace!("Host not known. Writing the key in the registry.");
             known_hosts.add(host, key, "", KnownHostKeyFormat::SshRsa)
                 .map_err(|_| Error::ConnectionFailed("Failed to add the host key in the registry".to_string()))?;
             known_hosts.write_file(known_hosts_path.as_path(), KnownHostFileKind::OpenSSH)
@@ -847,7 +892,7 @@ fn authenticate_host(host: &str, session: &mut Session) -> Result<(),Error>{
         }
         // Unknown error
         CheckResult::Failure => {
-            trace!("Remote: Failed to check the host");
+            trace!("Failed to check the host");
             Err(Error::ConnectionFailed("Failed to check the host.".to_string()))
         }
     } 
@@ -856,8 +901,11 @@ fn authenticate_host(host: &str, session: &mut Session) -> Result<(),Error>{
 
 // Authenticates ourselves on the remote end, using an ssh agent.
 fn authenticate_local(user: &str, session: &mut Session) -> Result<(), Error>{
-    trace!("Remote: Authenticating ourselves");
-    
+    let span = trace_span!("authenticate_local", user);
+    let _guard = span.enter();
+
+    trace!("Authenticating ourselves");
+
     // We retrieve the agent. 
     let mut agent = session.agent().unwrap();
     agent.connect()
@@ -874,9 +922,10 @@ fn authenticate_local(user: &str, session: &mut Session) -> Result<(), Error>{
         .map(|id| { id.unwrap().comment().to_owned() })
         .collect::<HashSet<_>>();
     if ids == failed_ids {
-        trace!("RemoteResource: No identities registered in the agent allowed to authenticate.");
+        warn!("No identities registered in the agent allowed to authenticate.");
         Err(Error::ConnectionFailed("No identities registered in the ssh agent allowed to connect.".into()))
     } else {
+        trace!("Authenticated.");
         Ok(())
     }
     
@@ -884,9 +933,9 @@ fn authenticate_local(user: &str, session: &mut Session) -> Result<(), Error>{
 
 
 // Acquires an exec channel on the remote
+#[instrument]
 async fn acquire_exec_channel(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Channel<'_>, Error>{
-    trace!("Remote: Acquiring exec channel.");
-
+    trace!("Acquiring exec channel.");
     // We query a channel session. Error -21 corresponds to missing available channels. It 
     // must be retried until an other execution comes to an end, and makes a channel available. 
     let ret = await_wouldblock_ssh!(await_retry_ssh!(
@@ -908,8 +957,10 @@ async fn acquire_exec_channel(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Chann
 
 // Performs exec command.
 async fn setup_exec(cmd: String, channel: &mut ssh2::Channel<'_>) -> Result<(), Error>{
-    trace!("Remote: Perform exec command `{}`", cmd);
+    let span = trace_span!("setup_exec", cmd=?cmd);
+    let _guard = span.enter();
 
+    trace!("Perform exec command `{}`", cmd);
     // We execute the command in the cwd.
     await_wouldblock_ssh!(channel.exec(&format!("{}\n", cmd)))
         .map_err(|e| Error::ExecutionFailed(format!("Failed to exec command {}: {}", cmd, e)))?;
@@ -923,8 +974,10 @@ async fn setup_exec(cmd: String, channel: &mut ssh2::Channel<'_>) -> Result<(), 
 
 // Reads the output of an exec command, and returns the output.
 async fn read_exec_out_err(channel: &mut ssh2::Channel<'_>) -> Result<Output, Error>{
-    trace!("Remote: Reading exec output");
+    let span = trace_span!("read_exec_out_err");
+    let _guard = span.enter();
 
+    trace!("Reading exec output");
     // We generate a new output
     let mut output = Output {
         status: ExitStatusExt::from_raw(911),
@@ -938,6 +991,7 @@ async fn read_exec_out_err(channel: &mut ssh2::Channel<'_>) -> Result<Output, Er
         // We check for eof before-hand
         let eof = channel.eof();
         {   // extra scope allows to drop borrowed stream
+            trace!("Reading stdout");
             let mut stream = channel.stream(0); // stream 0 is stdout
             match await_wouldblock_io!(stream.read(&mut buf)){
                 Err(e) => return Err(Error::ExecutionFailed(format!("Failed to read stdout: {:?}", e))),
@@ -945,6 +999,7 @@ async fn read_exec_out_err(channel: &mut ssh2::Channel<'_>) -> Result<Output, Er
             }
         }
         {  
+            trace!("Reading stderr");
             let mut stream = channel.stream(1); // stream 1 is stderr
             match await_wouldblock_io!(stream.read(&mut buf)){
                 Err(e) => return Err(Error::ExecutionFailed(format!("Failed to read stderr: {:?}", e))),
@@ -954,8 +1009,10 @@ async fn read_exec_out_err(channel: &mut ssh2::Channel<'_>) -> Result<Output, Er
             }
         }
         if eof{  // enf of field reached, everything was read.
+            trace!("Eof reached.");
             break
         } else { // if not, we wait for a while
+            trace!("Eof not yet reached");
             async_sleep!(std::time::Duration::from_millis(1));
         }
     }
@@ -965,8 +1022,10 @@ async fn read_exec_out_err(channel: &mut ssh2::Channel<'_>) -> Result<Output, Er
 
 // Closes the exec channel retrieving tyhe exit status 
 async fn close_exec(channel: &mut ssh2::Channel<'_>) -> Result<ExitStatus, Error>{
-    trace!("Remote: Closing exec channel");
+    let span = trace_span!("close_exec");
+    let _guard = span.enter();
 
+    trace!("Closing exec channel");
     // We close the channel and retrieve the execution code
     let ecode: Result<i32, ssh2::Error> = try {
         await_wouldblock_ssh!(channel.wait_eof())?;
@@ -980,9 +1039,9 @@ async fn close_exec(channel: &mut ssh2::Channel<'_>) -> Result<ExitStatus, Error
 
 
 // Starts a pty channel
+#[instrument]
 async fn acquire_pty_channel<'a>(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Channel<'_>, ssh2::Error>{
-    trace!("Remote: Acquiring pty channel ");
-
+    trace!("Acquiring pty channel");
     let mut channel = await_wouldblock_ssh!(await_retry_ssh!({remote.lock().await.session().channel_session()},-21))?;
     await_wouldblock_ssh!(await_retry_n_ssh!(channel.request_pty("xterm", None, Some((0,0,0,0))), 10, -14))?;
     await_wouldblock_ssh!(channel.shell())?;
@@ -992,8 +1051,11 @@ async fn acquire_pty_channel<'a>(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Ch
 
 // Setups the pty 
 async fn setup_pty(channel: &mut ssh2::Channel<'_>, cwd: &PathBuf, envs: &EnvironmentStore) -> Result<(), Error>{
-    trace!("Remote: Setting up a pty channel");
 
+    let span = trace_span!("setup_pty", ?cwd, ?envs);
+    let _guard = span.enter();
+
+    trace!("Setting up a pty channel");
     // We make sure we run on bash
     await_wouldblock_io!(channel.write_all("export HISTFILE=/dev/null\nbash\n".as_bytes()))
         .map_err(|e| Error::ExecutionFailed(format!("Failed to start bash: {}", e)))?;
@@ -1022,7 +1084,11 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
                      stdout_cb: Box<dyn Fn(Vec<u8>) + Send + 'static>,
                      stderr_cb: Box<dyn Fn(Vec<u8>) + Send + 'static> ) 
                      -> Result<(TerminalContext<PathBuf>, Vec<Output>), Error>{
-    trace!("Remote: Performs pty commands");
+    
+    let span = trace_span!("perform_pty");
+    let _guard = span.enter();
+
+    trace!("Performs pty commands");
 
     // We prepare necessary variables
     let mut outputs = vec!();
@@ -1040,6 +1106,7 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
     'commands: loop{ // We need named loops here
         // We write next command
         let cmd = cmds.remove(0);
+        trace!(?cmd, "Writing next command");
         await_wouldblock_io!(stream.get_mut().write_all(format!("rw_run \"{}\"\n", cmd).as_bytes()))
             .map_err(|e| Error::ExecutionFailed(format!("Failed to exec command '{}': {}", cmd, e)))?;
         let output = Output {
@@ -1055,8 +1122,10 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
             await_wouldblock_io!(stream.read_line(&mut buffer))
                 .map_err(|e| Error::ExecutionFailed(format!("Failed to read outputs: {}", e)))?;
             buffer = buffer.replace("\r\n", "\n");
+            trace!(?buffer, "Reading command output");
             // We receive an exit code
             if buffer.starts_with("RUNAWAY_ECODE: "){
+                trace!("Ecode message detected");
                 let ecode = buffer.replace("RUNAWAY_ECODE: ", "")
                     .replace("\n", "")
                     .parse::<i32>()
@@ -1065,33 +1134,40 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
                 output.status = ExitStatusExt::from_raw(ecode);
                 // If non zero, we stop the execution now. 
                 if ecode != 0{
+                    trace!("Non zero ecode.");
                     cmds.clear();
                 }
                 // We write a new command if any
                 if cmds.is_empty(){
+                    trace!("No more commands");
                     await_wouldblock_io!(stream.get_mut().write_all("rw_close \n".as_bytes()))
                         .map_err(|e| Error::ExecutionFailed(format!("Failed to finish exec : {}", e)))?;
                     await_wouldblock_io!(stream.get_mut().flush()).unwrap();
                 } else {
+                    trace!("To the next command");
                     break 'messages
                 }
             // We receive stdout message
             } else if buffer.starts_with("RUNAWAY_STDOUT: "){
+                trace!("Stdout message detected");
                 // We write the stdout message in the output command.
                 let out = buffer.replace("RUNAWAY_STDOUT: ", "");
                 outputs.last_mut().unwrap().stdout.write_all(out.as_bytes()).unwrap();
                 stdout_cb(out.as_bytes().to_vec());
             // We receive an stderr message
             } else if buffer.starts_with("RUNAWAY_STDERR: "){
+                trace!("Stderr message detected");
                 // We write the stderr message in the output command.
                 let err = buffer.replace("RUNAWAY_STDERR: ", "");
                 outputs.last_mut().unwrap().stderr.write_all(err.as_bytes()).unwrap();
                 stderr_cb(err.as_bytes().to_vec());
             // We receive a CWD message.
             } else if buffer.starts_with("RUNAWAY_CWD:"){
+                trace!("Cwd message detected");
                 out_ctx.cwd = Cwd(PathBuf::from(buffer.replace("RUNAWAY_CWD: ", "")));
             // We receive a env message.
             } else if buffer.starts_with("RUNAWAY_ENV:"){
+                trace!("Env message detected");
                 let env = buffer.replace("RUNAWAY_ENV: ", "")
                     .replace("\n", "")
                     .split('=')
@@ -1101,6 +1177,7 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
                                 EnvironmentValue(env.get(1).unwrap_or(&format!("")).to_owned()));
             // We receive an EOF message.
             } else if buffer.starts_with("RUNAWAY_EOF:"){
+                trace!("Eof message detected. Commands are over.");
                 break 'commands
             }
 
@@ -1118,14 +1195,16 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
 
 // Closes a pty channel.
 async fn close_pty(channel: &mut ssh2::Channel<'_>) -> Result<(), Error>{
-    trace!("Remote: Closing pty channel");
+    let span = trace_span!("close_pty");
+    let _guard = span.enter();
 
+    trace!("Closing pty channel");
     // We make sure to leave bash and the landing shell
     await_wouldblock_io!(channel.write_all("history -c \nexit\n history -c \nexit\n".as_bytes()))
         .map_err(|e| Error::ExecutionFailed(format!("Failed to start bash: {}", e)))?;
 
     // We close the channel
-    trace!("Remote: Waiting to stop.");
+    trace!("Waiting to stop.");
     let out: Result<(), ssh2::Error> = try {
         await_wouldblock_ssh!(channel.wait_eof())?;
         await_wouldblock_ssh!(channel.close())?;
@@ -1139,12 +1218,12 @@ async fn close_pty(channel: &mut ssh2::Channel<'_>) -> Result<(), Error>{
 
 
 // Sets scp send up
+#[instrument]
 async fn setup_scp_send<'a>(remote: &'a Arc<Mutex<Remote>>, 
                         local_path: &PathBuf,
                         remote_path: &PathBuf) 
                         -> Result<(BufReader<File>, i64, ssh2::Channel<'a>), Error>{
-    trace!("Remote: Setting up scp send");
-
+    trace!("Setting up scp send");
     // Open local file and compute statistics
     let local_file = match File::open(local_path) {
         Ok(f) => BufReader::new(f),
@@ -1164,7 +1243,7 @@ async fn setup_scp_send<'a>(remote: &'a Arc<Mutex<Remote>>,
     let channel = match ret{
         Ok(chan) => chan,
         Err(ref e) if e.code() == -21 => {
-            error!("Remote: Failed to obtain channel");
+            error!("Failed to obtain channel");
             return Err(Error::ChannelNotAvailable)
         },
         Err(e) => return Err(Error::ScpSendFailed(format!("Failed to open scp send channel: {}", e))),
@@ -1177,7 +1256,11 @@ async fn setup_scp_send<'a>(remote: &'a Arc<Mutex<Remote>>,
 async fn perform_scp_send(channel: &mut ssh2::Channel<'_>, 
                           local_file: &mut BufReader<File>, 
                           bytes: i64) -> Result<(), Error>{
-    trace!("Remote: Performs scp send copy");
+    
+    let span = trace_span!("perform_send_send", ?bytes);
+    let _guard = span.enter();
+
+    trace!("Performing scp send copy");
     let mut stream = channel.stream(0);
     let mut remaining_bytes = bytes as i64;
     loop{
@@ -1212,8 +1295,10 @@ async fn perform_scp_send(channel: &mut ssh2::Channel<'_>,
 
 // Closes scp channel
 async fn close_scp_channel(channel: ssh2::Channel<'_>) -> Result<(), ssh2::Error>{
-    trace!("Remote: Closing scp channel");
+    let span = trace_span!("close_scp_channel");
+    let _guard = span.enter();
 
+    trace!("Closing scp channel");
     let mut channel = channel;
     await_wouldblock_ssh!(channel.send_eof())?;
     await_wouldblock_ssh!(channel.wait_eof())?;
@@ -1224,11 +1309,12 @@ async fn close_scp_channel(channel: ssh2::Channel<'_>) -> Result<(), ssh2::Error
 
 
 // Sets up scp fetch
+#[instrument]
 async fn setup_scp_fetch<'a>(remote: &'a Arc<Mutex<Remote>>, 
                              remote_path: &PathBuf, 
                              local_path: &PathBuf ) 
                              -> Result<(File, ssh2::Channel<'a>, i64), Error>{
-    trace!("Remote: Setting up scp fetch");
+    trace!("Setting up scp fetch");
 
     let local_file = match OpenOptions::new().write(true).create_new(true).open(local_path) {
         Ok(f) => f,
@@ -1245,7 +1331,7 @@ async fn setup_scp_fetch<'a>(remote: &'a Arc<Mutex<Remote>>,
     let (channel, stats) = match ret {
         Ok(c) => c,
         Err(ref e) if e.code() == -21 => {
-            error!("Remote: Failed to open channel...");
+            error!("Failed to open channel...");
             return Err(Error::ChannelNotAvailable)
         }
         Err(e) => return Err(Error::ScpFetchFailed(format!("Failed to open scp recv channel: {}", e))),
@@ -1259,12 +1345,16 @@ async fn process_scp_fetch(channel: &mut ssh2::Channel<'_>,
                            local_file: File, 
                            remaining_bytes: i64) 
                            -> Result<(), Error>{
-    trace!("Remote: Processing scp fetch");
+
+    let span = trace_span!("process_scp_fetch", ?local_file, ?remaining_bytes);
+    let _guard = span.enter();
+
+    trace!("Processing scp fetch");
 
     let mut remaining_bytes = remaining_bytes;
     let mut local_file = local_file;
     let mut stream = channel.stream(0);
-    trace!("Remote: Starting scp send copy");
+    trace!("Starting scp send copy");
     let mut buf = [0; 8192];
     loop{
         match await_wouldblock_io!(stream.read(&mut buf)){
@@ -1302,27 +1392,37 @@ mod test {
 
     use super::*;
     use crate::ssh::config::SshProfile;
+    use futures::executor::block_on;
     use crate::misc;
+    use tracing_subscriber::fmt::Subscriber;
+    use tracing::Level;
 
-    fn init_logger() {
-        std::env::set_var("RUST_LOG", "liborchestra=trace");
-        let _ = env_logger::builder().is_test(true).try_init();
+    fn init(){
+        let subscriber = Subscriber::builder()
+            //.compact()
+            .with_max_level(Level::TRACE)
+            .without_time()
+            .with_target(false)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).unwrap();
     }
+
 
     #[test]
     fn test_proxy_command_forwarder() {
+        init();
         let (proxy_command, address) = ProxyCommandForwarder::from_command("echo kikou").unwrap();
         let mut stream = TcpStream::connect(address).unwrap();
-        let mut buf = [0 as u8; 5];
-        stream.read_exact(&mut buf).unwrap();
-        assert_eq!(buf, "kikou".as_bytes());
+        std::thread::sleep_ms(1000);
         assert!(TcpStream::connect(address).is_err());
+        let mut buf = [0 as u8; 6];
+        stream.read_exact(&mut buf).unwrap();
+        assert_eq!(buf, "kikou\n".as_bytes());
     }
 
     #[test]
     fn test_async_exec() {
-        use futures::executor::block_on;
-        init_logger();
+        init();
         async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
@@ -1344,8 +1444,7 @@ mod test {
 
     #[test]
     fn test_async_pty_order() {
-        use futures::executor::block_on;
-        init_logger();
+        init();
         async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
@@ -1379,7 +1478,7 @@ mod test {
 
     #[test]
     fn test_async_pty_cds() {
-        use futures::executor::block_on;
+        init();
         async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
@@ -1403,7 +1502,7 @@ mod test {
 
     #[test]
     fn test_async_pty_envs() {
-        use futures::executor::block_on;
+        init();
         async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
@@ -1427,7 +1526,7 @@ mod test {
 
     #[test]
     fn test_async_pty_stderr() {
-        use futures::executor::block_on;
+        init();
         async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
@@ -1454,7 +1553,7 @@ mod test {
 
     #[test]
     fn test_async_pty_program_stdout() {
-        use futures::executor::block_on;
+        init();
         async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
@@ -1480,8 +1579,7 @@ mod test {
 
     #[test]
     fn test_async_pty_context() {
-        use futures::executor::block_on;
-        init_logger();
+        init();
         async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
@@ -1511,8 +1609,7 @@ mod test {
 
     #[test]
     fn test_async_scp_send() {
-        use futures::executor::block_on;
-        init_logger();
+        init();
         async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
@@ -1549,8 +1646,7 @@ mod test {
 
     #[test]
     fn test_async_scp_fetch(){
-        use futures::executor::block_on;
-        init_logger();
+        init();
         async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
@@ -1587,9 +1683,7 @@ mod test {
 
     #[test]
     fn test_async_concurrent_exec(){
-
-        //init_logger();
-
+        init();
         let profile = SshProfile{
             name: "test".to_owned(),
             hostname: Some("localhost".to_owned()),
@@ -1622,8 +1716,7 @@ mod test {
     #[test]
     fn test_async_concurrent_pty(){
 
-        //init_logger();
-
+        init();
         let profile = SshProfile{
             name: "test".to_owned(),
             hostname: Some("localhost".to_owned()),

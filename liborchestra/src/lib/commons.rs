@@ -20,6 +20,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::os::unix::process::ExitStatusExt;
 use std::ffi::OsStr;
+use tracing::{self, error, trace, warn, debug, info, instrument};
 
 //------------------------------------------------------------------------------------------- ERRORS
 

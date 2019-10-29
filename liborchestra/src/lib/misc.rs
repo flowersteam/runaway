@@ -10,6 +10,7 @@
 use std::{process, path, fs, error, fmt};
 use regex;
 use super::CMPCONF_RPATH;
+use tracing::{self, error, trace, warn, debug, info, instrument};
 
 
 //------------------------------------------------------------------------------------------- ERRORS

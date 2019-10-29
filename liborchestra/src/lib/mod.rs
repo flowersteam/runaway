@@ -266,7 +266,6 @@
 
 extern crate regex;
 extern crate yaml_rust;
-extern crate env_logger;
 extern crate uuid;
 extern crate serde;
 extern crate serde_yaml;
@@ -281,7 +280,7 @@ extern crate chrono;
 #[macro_use]
 extern crate serde_derive;
 #[macro_use]
-extern crate log;
+extern crate derivative;
 
 
 //------------------------------------------------------------------------------------------ MODULES

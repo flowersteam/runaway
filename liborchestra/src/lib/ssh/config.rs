@@ -13,6 +13,7 @@ use std::io::prelude::*;
 use std::iter::Peekable;
 use std::path::PathBuf;
 use std::str::CharIndices;
+use tracing::{self, error, trace, warn, debug, info, instrument};
 
 
 //------------------------------------------------------------------------------------------- ERRORS
@@ -80,43 +81,35 @@ impl SshProfile {
     }
 
     fn set_hostname(mut self, hostname: String) -> SshProfile {
-        debug!("Setting profile hostname");
         self.hostname.replace(hostname);
         self
     }
 
     fn set_user(mut self, user: String) -> SshProfile {
-        debug!("Setting profile user");
         self.user.replace(user);
         self
     }
 
     fn set_port(mut self, port: usize) -> SshProfile {
-        debug!("Setting profile port");
         self.port.replace(port);
         self
     }
 
     fn set_proxycommand(mut self, proxycommand: String) -> SshProfile {
-        debug!("Setting profile proxycommand");
         self.proxycommand.replace(proxycommand);
         self
     }
 
     fn complete(mut self) -> SshProfile {
-        debug!("Completing profile");
         if self.hostname.is_none() {
-            trace!("Setting hostname to name {}", self.name);
             self.hostname = Some(self.name.clone());
         }
         if self.port.is_none() {
-            trace!("Setting port to 22");
             self.port = Some(22);
         }
         if self.user.is_none() {
             let user =
                 std::env::var_os("USER").map_or("user".to_owned(), |s| s.into_string().unwrap());
-            trace!("Setting user to current username {:?}", user);
             self.user = Some(user);
         }
         return self;
@@ -161,7 +154,6 @@ impl<'s> IndexedSlice<'s> {
         match idx {
             i if i < 0 => self.2 = self._before(self.2, -i as usize),
             i if i > 0 => {
-                println!("{}", i as usize);
                 self.2 = self._after(self.2, i as usize + 1)
             }
             _ => {}
@@ -298,19 +290,27 @@ struct Token<'s>(TokenType, IndexedSlice<'s>);
 //  An iterator that streams tokens out of a string. The `consume_*` methods returns Option<Token>.
 //  If the output is None, than no token should be emitted. If the output is Some, then a token
 //  should be emitted.
+#[derive(Derivative)]
+#[derivative(Debug)]
 struct Lexer<'s> {
+    #[derivative(Debug="ignore")]
     string: &'s str,
+    #[derivative(Debug="ignore")]
     iter: Peekable<CharIndices<'s>>,
+    #[derivative(Debug="ignore")]
     exhausted: bool,
 }
 
 impl<'s> Iterator for Lexer<'s> {
+
     type Item = Result<Token<'s>, Error>;
 
+    #[instrument(name="Lexer::next")]
     fn next(&mut self) -> Option<Result<Token<'s>, Error>> {
+        trace!("Getting next token");
         // We loop to keep consuming when no token was emitted.
         loop {
-            trace!("Lexer: Consuming new character: {:?}", self.iter.peek());
+            trace!(next_char=?self.iter.peek(), "Next character");
             // We perform a 1-lookahead to decide which consumer to use.
             let ret = match self.iter.peek() {
                 Some((_, '\n')) => self.consume_newline(),
@@ -322,7 +322,7 @@ impl<'s> Iterator for Lexer<'s> {
             };
             // If a token was emitted by the consumer then we return it
             if let Some(t) = ret {
-                trace!("Lexer: Token emitted: {:?}", t);
+                trace!(token=?t, "Token emitted");
                 return Some(t);
             }
         }
@@ -331,7 +331,9 @@ impl<'s> Iterator for Lexer<'s> {
 
 impl<'s> Lexer<'s> {
     /// Creates a lexer from a string.
+    #[instrument(name="Lexer::from")]
     fn from(string: &str) -> Lexer {
+        trace!("Creating Lexer instance");
         let iter = string.char_indices().peekable();
         Lexer {
             string,
@@ -341,8 +343,9 @@ impl<'s> Lexer<'s> {
     }
 
     /// Consumes a newline token
+    #[instrument(name="Lexer::consume_newline")]
     fn consume_newline(&mut self) -> Option<Result<Token<'s>, Error>> {
-        debug!("Lexer: Consuming newline");
+        trace!("Consuming newline");
         let mut ret = Token(TokenType::NewLine, IndexedSlice::beginning(self.string));
         // We consume the first character which should match our expectations if the dispatch is
         // working
@@ -366,8 +369,9 @@ impl<'s> Lexer<'s> {
     }
 
     /// Consumes an indent token
+    #[instrument(name="Lexer::consume_indent")]
     fn consume_indent(&mut self) -> Option<Result<Token<'s>, Error>> {
-        debug!("Lexer: Consuming Indent");
+        trace!("Consuming indent");
         let mut ret = Token(TokenType::Indent, IndexedSlice::beginning(self.string));
         // We consume the first character which should match our expectations if the dispatch is
         // working
@@ -400,8 +404,9 @@ impl<'s> Lexer<'s> {
     }
 
     /// Consumes a comment token
+    #[instrument(name="Lexer::consume_comment")]
     fn consume_comment(&mut self) -> Option<Result<Token<'s>, Error>> {
-        debug!("Lexer: Consuming Comment");
+        trace!("Consuming comment");
         let mut ret = Token(TokenType::Comment, IndexedSlice::beginning(self.string));
         // We consume the first character which should match our expectations if the dispatch is
         // working
@@ -431,8 +436,9 @@ impl<'s> Lexer<'s> {
     }
 
     /// Consumes a word token
+    #[instrument(name="Lexer::consume_word")]
     fn consume_word(&mut self) -> Option<Result<Token<'s>, Error>> {
-        debug!("Lexer: Consuming word");
+        trace!("Consuming word");
         let mut ret = Token(TokenType::Word, IndexedSlice::beginning(self.string));
         // We consume the first character which should match our expectations if the dispatch is
         // working
@@ -462,7 +468,6 @@ impl<'s> Lexer<'s> {
                 Some((e, chr)) if !chr.is_ascii() => {
                     (ret.1).move_both(*e);
                     (ret.1).move_end_by(1);
-                    println!("{:?}", ret.1);
                     return Some(Err(Error::Lexer(
                         ret.1.to_owned(),
                         "Character is not ascii.".to_owned(),
@@ -489,8 +494,9 @@ impl<'s> Lexer<'s> {
     }
 
     /// Consume whitespaces
+    #[instrument(name="Lexer::consume_whitespace")]
     fn consume_whitespace(&mut self) -> Option<Result<Token<'s>, Error>> {
-        debug!("Lexer: Consuming whitespace.");
+        trace!("Consuming whitespace");
         // We consume the first whitespace
         match self.iter.next() {
             Some((_, ' ')) => {}
@@ -527,18 +533,26 @@ enum NodeType {
 struct Node<'s>(NodeType, IndexedSlice<'s>);
 
 /// An iterator that yields a stream of nodes out of a lexer iterator.
+#[derive(Derivative)]
+#[derivative(Debug)]
 struct Parser<'s> {
+    #[derivative(Debug="ignore")]
     string: &'s str,
+    #[derivative(Debug="ignore")]
     iter: Peekable<Lexer<'s>>,
+    #[derivative(Debug="ignore")]
     exhausted: bool,
 }
 
 impl<'s> Iterator for Parser<'s> {
     type Item = Result<Node<'s>, Error>;
+
+    #[instrument(name="Parser::next")]
     fn next(&mut self) -> Option<Result<Node<'s>, Error>> {
+        trace!("Getting next node");
         if !self.exhausted {
             loop {
-                trace!("Parser: Consuming a new token: {:?}", self.iter.peek());
+                trace!(next_token=?self.iter.peek(), "Consuming a new token");
                 let ret = match self.iter.peek() {
                     Some(Ok(Token(TokenType::Word, _))) => self.consume_host(),
                     Some(Ok(Token(TokenType::Indent, _))) => self.consume_clause(),
@@ -548,7 +562,7 @@ impl<'s> Iterator for Parser<'s> {
                     None => return None,
                 };
                 if let Some(n) = ret {
-                    trace!("Parser: Node emitted: {:?}", n);
+                    trace!(node=?n, "Node emitted");
                     return Some(n);
                 }
             }
@@ -562,7 +576,9 @@ impl<'s> Iterator for Parser<'s> {
 impl<'s> Parser<'s> {
 
     /// Creates a parser out of a lexer.
+    #[instrument(name="Parser::from_lexer")]
     fn from_lexer(lexer: Lexer) -> Parser {
+        trace!("Creating parser from lexer");
         let string = lexer.string;
         let iter = lexer.peekable();
         Parser {
@@ -573,8 +589,9 @@ impl<'s> Parser<'s> {
     }
 
     /// Consumes a host line, e.g. "Host myhost\n"
+    #[instrument(name="Parser::consume_host")]
     fn consume_host(&mut self) -> Option<Result<Node<'s>, Error>> {
-        debug!("Parser: Consuming host");
+        trace!("Consuming host");
         let mut ret = Node(NodeType::Host, IndexedSlice::beginning(self.string));
         // We consume the first keyword word token
         match self.iter.next() {
@@ -633,8 +650,9 @@ impl<'s> Parser<'s> {
     }
 
     /// Consume a clause, e.g. "\tClauseKeyword ClauseValue\n"
+    #[instrument(name="Parser::consume_clause")]
     fn consume_clause(&mut self) -> Option<Result<Node<'s>, Error>> {
-        debug!("Parser: Consuming clause");
+        trace!("Consuming clause");
         // We consume indent token
         match self.iter.next() {
             Some(Ok(Token(TokenType::Indent, _))) => {}
@@ -685,8 +703,9 @@ impl<'s> Parser<'s> {
     }
 
     /// Consumes a hostname clause, e.g. "\tHostName locahost"
+    #[instrument(name="Parser::consume_hostname_clause")]
     fn consume_hostname_clause(&mut self) -> Option<Result<Node<'s>, Error>> {
-        debug!("Parser: Consuming hostname clause");
+        trace!("Consuming hostname clause");
         let mut ret = Node(
             NodeType::HostNameClause,
             IndexedSlice::beginning(self.string),
@@ -740,8 +759,9 @@ impl<'s> Parser<'s> {
     }
 
     /// Consumes a user clause, e.g. "\tUser me\n"
+    #[instrument(name="Parser::consume_user_clause")]
     fn consume_user_clause(&mut self) -> Option<Result<Node<'s>, Error>> {
-        debug!("Parser: Consuming user clause");
+        trace!("Consuming user clause");
         let mut ret = Node(NodeType::UserClause, IndexedSlice::beginning(self.string));
         // We consume the keyword token
         match self.iter.next() {
@@ -791,8 +811,9 @@ impl<'s> Parser<'s> {
     }
 
     /// Consumes a port clause, e.g. "\tPort 22\n"
+    #[instrument(name="Parser::consume_port_clause")]
     fn consume_port_clause(&mut self) -> Option<Result<Node<'s>, Error>> {
-        debug!("Parser: Consuming port clause");
+        trace!("Consuming port clause");
         let mut ret = Node(NodeType::PortClause, IndexedSlice::beginning(self.string));
         // We consume the keyword token
         match self.iter.next() {
@@ -842,8 +863,9 @@ impl<'s> Parser<'s> {
     }
 
     /// Cosumes a proxycommand clause e.g. "\t\ProxyCommand ssh...\n"
+    #[instrument(name="Parser::consume_proxycommand_clause")]
     fn consume_proxycommand_clause(&mut self) -> Option<Result<Node<'s>, Error>> {
-        debug!("Parser: Consuming proxycommand clause");
+        trace!("Consuming proxycommand clause");
         let mut ret = Node(
             NodeType::ProxyCommandClause,
             IndexedSlice(self.string, 0, 0),
@@ -905,17 +927,19 @@ impl<'s> Parser<'s> {
     }
 
     /// Consumes unnecessary newlines
+    #[instrument(name="Parser::consume_newline")]
     fn consume_newline(&mut self) -> Option<Result<Node<'s>, Error>> {
-        debug!("Parser: Consuming newline");
+        trace!("Consuming newline");
         match self.iter.next() {
             Some(Ok(Token(TokenType::NewLine, _))) => return None,
             _ => panic!("Consume newline called on wrong character"),
         }
     }
 
-    /// Consumes unnecessary comments
+    /// Consumes unnecessary commentsS
+    #[instrument(name="Parser::consume_comment")]
     fn consume_comment(&mut self) -> Option<Result<Node<'s>, Error>> {
-        debug!("Parser: Consuming comment");
+        trace!("Consumming comment");
         match self.iter.next() {
             Some(Ok(Token(TokenType::Comment, _))) => return None,
             _ => panic!("Consume comment called on wrong token"),
@@ -936,16 +960,22 @@ impl<'s> Parser<'s> {
 /// + ProxyCommand
 ///
 /// The string may contain comments.
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct ConfigReader<'s> {
+    #[derivative(Debug="ignore")]
     iter: Peekable<Parser<'s>>,
 }
 
 impl<'s> Iterator for ConfigReader<'s> {
+
     type Item = Result<SshProfile, Error>;
 
+    #[instrument(name="ConfigReader::next")]
     fn next(&mut self) -> Option<Result<SshProfile, Error>> {
+        trace!("Getting next configuration");
         loop {
-            trace!("Reader: Consuming a new node: {:?}", self.iter.peek());
+            trace!(next_node=?self.iter.peek(), "Consuming a new node");
             let ret = match self.iter.peek() {
                 Some(Ok(Node(NodeType::Host, _))) => self._consume_host(),
                 Some(Ok(Node(_, ib))) => {
@@ -958,7 +988,7 @@ impl<'s> Iterator for ConfigReader<'s> {
                 None => return None,
             };
             if let Some(n) = ret {
-                trace!("Reader: Profile emitted: {:?}", n);
+                trace!(profile=?n, "Profile emitted");
                 return Some(n);
             }
         }
@@ -967,15 +997,18 @@ impl<'s> Iterator for ConfigReader<'s> {
 
 impl<'s> ConfigReader<'s> {
     /// Instantiates a new configuration reader out of a string.
+    #[instrument(name="ConfigReader::from_str")]
     pub fn from_str(string: &'s str) -> ConfigReader<'s> {
+        trace!("Creating config reader from string");
         let lexer = Lexer::from(string);
         let parser = Parser::from_lexer(lexer).peekable();
         return ConfigReader { iter: parser };
     }
 
     /// Consumes a host, e.g. a complete host declaration with starting line and clauses.
+    #[instrument(name="ConfigReader::_consume_host")]
     fn _consume_host(&mut self) -> Option<Result<SshProfile, Error>> {
-        debug!("Reader: Consuming host");
+        trace!("Consuming host");
         // We consume the name
         let mut profile = match self.iter.next() {
             Some(Ok(Node(NodeType::Host, ib))) => SshProfile::from(ib.as_str().to_owned()),
@@ -1010,7 +1043,9 @@ impl<'s> ConfigReader<'s> {
 }
 
 /// This convenient function allows to parse a config file and retrieve a profile if it exists.
+#[instrument(name="ConfigReader::get_profile")]
 pub fn get_profile(config_path: &PathBuf, name: &str) -> Result<SshProfile, Error> {
+    trace!("Getting profile");
     let mut profiles = File::open(config_path).map_err(|_| {
         Error::GettingProfile(format!(
             "Failed to open the file {}",
@@ -1048,16 +1083,24 @@ pub fn get_profile(config_path: &PathBuf, name: &str) -> Result<SshProfile, Erro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_subscriber::fmt::Subscriber;
+    use tracing::Level;
 
-    fn init() {
-        
-        std::env::set_var("RUST_LOG", "liborchestra::ssh=trace");
-        let _ = env_logger::builder().is_test(true).try_init();
+    fn init(){
+        let subscriber = Subscriber::builder()
+            //.compact()
+            .with_max_level(Level::TRACE)
+            .without_time()
+            .with_target(false)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).unwrap();
     }
 
     #[test]
     fn test_lexer() {
-        //setup();
+
+        init();
+
         let a = "\tHost \t plafrim   #kalbfezjk \t jjja -p  \n\n\n   ".to_owned();
         let mut lexer = Lexer::from(&a);
         let n = lexer.next().unwrap().unwrap();
@@ -1093,6 +1136,7 @@ mod tests {
 
     #[test]
     fn test_lexing_error() {
+        init();
         let a = "Höst pla\n\tHostName plafrim".to_owned();
         let mut lexer = Lexer::from(&a);
         let n = lexer.next().unwrap().unwrap_err();
@@ -1116,7 +1160,6 @@ mod tests {
         println!("n1: {:?}", n);
         assert_eq!(n.0, NodeType::Host);
         assert_eq!(n.1.as_str(), "localhost");
-        println!("now");
         let n = parser.next().unwrap().unwrap();
         println!("n2: {:?}", n);
         assert_eq!(n.0, NodeType::HostNameClause);
