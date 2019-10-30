@@ -29,7 +29,7 @@ use url::Url;
 use uuid;
 use uuid::Uuid;
 use walkdir::WalkDir;
-use tracing::{error, warn, debug, info, trace};
+use tracing::{error};
 
 
 //------------------------------------------------------------------------------------------- MODULE
@@ -104,19 +104,19 @@ impl fmt::Display for Error {
 
 impl From<io::Error> for Error {
     fn from(other: io::Error) -> Error {
-        return Error::Io(format!("{}", other));
+        Error::Io(format!("{}", other))
     }
 }
 
 impl From<git2::Error> for Error {
     fn from(other: git2::Error) -> Error {
-        return Error::Git(format!("{}", other));
+        Error::Git(format!("{}", other))
     }
 }
 
 impl From<Error> for crate::commons::Error {
     fn from(other: Error) -> crate::commons::Error {
-        return crate::commons::Error::Operation(format!("{}", other));
+        crate::commons::Error::Operation(format!("{}", other))
     }
 }
 
@@ -138,7 +138,7 @@ impl CampaignConf {
         let file = fs::File::open(conf_path).map_err(|e| crate::Error::Io(e))?;
         let mut config: CampaignConf = serde_yaml::from_reader(file)?;
         config.path = Some(conf_path.parent().unwrap().to_path_buf().clone());
-        return Ok(config);
+        Ok(config)
     }
 
     /// Writes campaign to file.
@@ -288,7 +288,7 @@ impl ExecutionConf {
         let mut config: ExecutionConf =
             serde_yaml::from_reader(file).map_err(|_| Error::ReadExecution)?;
         config.path = Some(exc_path.parent().unwrap().to_path_buf().clone());
-        return Ok(config);
+        Ok(config)
     }
 
     /// Returns the root path of the execution
@@ -353,7 +353,7 @@ impl ExecutionUpdate {
         if let Some(s) = self.execution_ending_date {
             conf.execution_ending_date = Some(s)
         }
-        return conf;
+        conf
     }
 }
 
@@ -379,59 +379,59 @@ impl ExecutionUpdateBuilder {
     /// Sets the state
     pub fn state(mut self, e: ExecutionState) -> Self {
         self.0.state = Some(e);
-        return self;
+        self
     }
     /// Sets the executor
     pub fn executor(mut self, e: String) -> Self {
         self.0.executor = Some(e);
-        return self;
+        self
     }
 
     /// Sets the execution stdout
     pub fn stdout(mut self, d: String) -> Self {
         self.0.execution_stdout = Some(d);
-        return self;
+        self
     }
 
     /// Sets the execution stderr
     pub fn stderr(mut self, d: String) -> Self {
         self.0.execution_stderr = Some(d);
-        return self;
+        self
     }
 
     /// Sets the execution message
     pub fn message(mut self, m: String) -> Self {
         self.0.execution_message = Some(m);
-        return self;
+        self
     }
 
     /// Sets the execution exit code
     pub fn exit_code(mut self, m: i32) -> Self {
         self.0.execution_exit_code = Some(m);
-        return self;
+        self
     }
 
     /// Sets the execution features
     pub fn features(mut self, m: Vec<f64>) -> Self {
         self.0.execution_features = Some(m);
-        return self;
+        self
     }
 
     /// Sets the beginning time
     pub fn beginning_date(mut self, m: DateTime<Utc>) -> Self {
         self.0.execution_beginning_date = Some(m);
-        return self;
+        self
     }
 
     /// Sets the end time
     pub fn ending_date(mut self, m: DateTime<Utc>) -> Self {
         self.0.execution_ending_date = Some(m);
-        return self;
+        self
     }
 
     /// Returns the execution update
     pub fn build(self) -> ExecutionUpdate {
-        return self.0;
+        self.0
     }
 }
 
@@ -475,7 +475,7 @@ impl Campaign {
         };
         fs::create_dir(campaign.get_executions_path())?;
         campaign.to_file(&local_path.join(CMPCONF_RPATH)).unwrap();
-        return Campaign::from(campaign);
+        Campaign::from(campaign)
     }
 
     /// Fetches the last experiment from its remote repository.
@@ -529,10 +529,10 @@ impl Campaign {
             {
                 let cmp = cmp.lock().await;
                 cmp.synchro.fetch_experiment_hook(&cmp.conf)?;
-                return Ok(cmp.conf.clone());
-            };
+                Ok(cmp.conf.clone())
+            }
         } else {
-            return Err(Error::NoFFPossible);
+            Err(Error::NoFFPossible)
         }
     }
 
@@ -612,7 +612,7 @@ impl Campaign {
                 .cache
                 .insert(exc_conf.identifier.clone(), exc_conf.clone())
         };
-        return Ok(exc_conf);
+        Ok(exc_conf)
     }
 
     /// Updates an execution.

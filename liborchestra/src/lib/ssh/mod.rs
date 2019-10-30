@@ -1650,7 +1650,7 @@ mod test {
         let remote = RemoteHandle::spawn(profile).unwrap();
         async fn test(remote: RemoteHandle) -> Output{
             let command  = RawCommand("echo 1 && sleep 1 && echo 2".into());
-            return remote.async_exec(command).await.unwrap()
+            remote.async_exec(command).await.unwrap()
         }
         use futures::executor;
         use futures::task::SpawnExt;
@@ -1686,7 +1686,7 @@ mod test {
                           RawCommand("sleep 1".into()),
                           RawCommand("echo 2".into())];
             let context = TerminalContext::default();
-            return remote.async_pty(context, commands, None, None)
+            remote.async_pty(context, commands, None, None)
                 .await.unwrap()
         }
         use futures::executor;

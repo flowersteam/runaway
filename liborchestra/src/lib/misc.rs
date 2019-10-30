@@ -10,7 +10,8 @@
 use std::{process, path, fs, error, fmt};
 use regex;
 use super::CMPCONF_RPATH;
-use tracing::{self, error, trace, warn, debug, info, instrument};
+use tracing::{self, warn, debug, instrument, trace_span};
+use tracing_futures::Instrument;
 
 
 //------------------------------------------------------------------------------------------- ERRORS
@@ -49,7 +50,9 @@ macro_rules! async_sleep {
                 thread::sleep($dur);
                 tx.send(()).unwrap();
             });
-            rx.await.unwrap();
+            rx.instrument(tracing::trace_span!("async_sleep!"))
+                .await
+                .unwrap();
 
         }
     };
