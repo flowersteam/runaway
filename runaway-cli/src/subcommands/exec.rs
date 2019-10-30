@@ -23,6 +23,7 @@ use crate::misc;
 use crate::exit::Exit;
 use liborchestra::primitives;
 use std::path::{PathBuf, Path};
+use tracing::{self, info, error};
 
 
 //-------------------------------------------------------------------------------------- SUBCOMMANDS
@@ -79,9 +80,9 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
                                                                    &send_include_globs),
                                      Exit::ReadLocalFolder)?;
         if matches.is_present("print-files"){
-            eprintln!("runaway: files to be send to remote :");
+            info!("Files to be send to remote :");
             files_to_send.iter()
-                .for_each(|e| eprintln!("runaway:     {}", e.to_str().unwrap()))
+                .for_each(|e| info!("     {}", e.to_str().unwrap()))
         }
 
 
@@ -121,7 +122,7 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
             let remote_send_hash = to_exit!(primitives::compute_remote_sha1(&remote_send_archive, &node).await,
                                             Exit::ComputeRemoteHash)?;
             if remote_send_hash != local_send_hash{
-                eprintln!("runaway: differing local and remote hashs for send archive: local is {} and \\
+                error!("Differing local and remote hashs for send archive: local is {} and \\
                            remote is {}", local_send_hash, remote_send_hash); 
                 return Err(Exit::Send)
             }
@@ -161,9 +162,9 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
                                                                      &node).await,
                                     Exit::UnpackRemoteArchive)?;
         if matches.is_present("print-files"){
-            eprintln!("runaway: files received on remote :");
+            info!("Files received on remote :");
             remote_files.iter()
-                .for_each(|e| eprintln!("runaway:     {}", e.to_str().unwrap()))
+                .for_each(|e| info!("     {}", e.to_str().unwrap()))
         }
 
 
@@ -201,9 +202,9 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
                                                                      &node).await,
                                     Exit::ReadRemoteFolder)?;
         if matches.is_present("print-files"){
-            eprintln!("runaway: files to be fetched from remote :");
+            info!("Files to be fetched from remote :");
             files_to_fetch.iter()
-                .for_each(|e| eprintln!("runaway:     {}", e.to_str().unwrap()))
+                .for_each(|e| info!("     {}", e.to_str().unwrap()))
         }
 
 
@@ -230,7 +231,7 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
         let local_fetch_hash = to_exit!(primitives::compute_local_sha1(&local_fetch_archive),
                                         Exit::ComputeLocalHash)?;
         if remote_fetch_hash != local_fetch_hash{
-            eprintln!("runaway: differing local and remote hashs for fetch archive: local is {} and \\
+            error!("Differing local and remote hashs for fetch archive: local is {} and \\
                        remote is {}", local_fetch_hash, remote_fetch_hash);
             return Err(Exit::Fetch)
         }
@@ -243,9 +244,9 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
                  Exit::UnpackRemoteArchive)?;
         to_exit!(std::fs::remove_file(local_fetch_archive), Exit::RemoveArchive)?;
         if matches.is_present("print-files"){
-            eprintln!("runaway: files fetched on local :");
+            info!("Files fetched on local :");
             local_files.iter()
-                .for_each(|e| eprintln!("runaway:     {}", e.to_str().unwrap()))
+                .for_each(|e| info!("     {}", e.to_str().unwrap()))
         }
 
 
@@ -281,11 +282,11 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
             Ok(Exit::AllGood)
         } else {
             if !outs.last().unwrap().success(){
-                eprintln!("runaway: failed to execute command: {}", 
+                error!("Failed to execute command: {}", 
                     host.get_execution_procedure().get(outs.len() - 1).unwrap().0);
-                eprintln!("runaway:     stdout: {}", outs.last().unwrap().stdout);
-                eprintln!("runaway:     stderr: {}", outs.last().unwrap().stderr);
-                eprintln!("runaway:     ecode: {}", outs.last().unwrap().ecode);
+                error!("     stdout: {}", outs.last().unwrap().stdout);
+                error!("     stderr: {}", outs.last().unwrap().stderr);
+                error!("     ecode: {}", outs.last().unwrap().ecode);
                 Ok(Exit::ScriptFailedWithCode(outs.last().unwrap().ecode))
             } else {
                 Ok(Exit::AllGood)

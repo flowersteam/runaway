@@ -225,7 +225,7 @@ impl fmt::Display for Error {
             Error::WouldBlock =>
                 write!(f, "Blocking operation."),
             Error::ConnectionFailed(ref s) =>
-                write!(f, "An error occurred while trying to connect to connect to a remote \
+                write!(f, "An error occurred while trying to connect to a remote \
                 host: \n{}", s),
             Error::ProxyCommandStartup(ref s) =>
                 write!(f, "An error occurred when starting a proxycommand: \n{}", s),

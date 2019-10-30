@@ -30,6 +30,8 @@ use std::convert::TryInto;
 use rand::{self, Rng};
 use std::io::Write;
 use termcolor::{BufferWriter, Color, ColorChoice, ColorSpec, WriteColor};
+use tracing::{self, error};
+
 
 
 //--------------------------------------------------------------------------------------- SUBCOMMAND
@@ -286,7 +288,7 @@ async fn send_data_on_front(host: &HostHandle,
             let remote_send_hash = to_exit!(primitives::compute_remote_sha1(&remote_send_archive, &node).await,
                                             Exit::ComputeRemoteHash)?;
             if &remote_send_hash != local_send_hash{
-                eprintln!("runaway: differing local and remote hashs for send archive: local is {} and \\
+                error!("Differing local and remote hashs for send archive: local is {} and \\
                            remote is {}", local_send_hash, remote_send_hash); 
                 return Err(Exit::Send)
             }
@@ -477,7 +479,7 @@ fn unpacks_fetch_post_proc(matches: &clap::ArgMatches<'_>,
     let local_fetch_hash = to_exit!(primitives::compute_local_sha1(&local_fetch_archive),
                                     Exit::ComputeLocalHash)?;
     if remote_fetch_hash != local_fetch_hash{
-        eprintln!("runaway: differing local and remote hashs for fetch archive: local is {} and \\
+        error!("Differing local and remote hashs for fetch archive: local is {} and \\
                    remote is {}", local_fetch_hash, remote_fetch_hash);
         return Err(Exit::Fetch)
     }

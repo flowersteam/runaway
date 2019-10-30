@@ -9,8 +9,6 @@ debug = true
 
 
 [dependencies]
-log = "0.3"
-env_logger = "0.6"
 clap="2.31"
 yaml-rust="0.4"
 chrono="0.4"
@@ -21,4 +19,8 @@ futures-preview = "=0.3.0-alpha.19"
 itertools = "0.8.0"
 rand = "0.7"
 termcolor="1.0"
+tracing = "0.1.10"
+tracing-subscriber = "0.1.5"
+tracing-attributes = "0.1.5"
+tracing-futures = {version = "0.1.0", features=["futures-preview"]}
 liborchestra = { path = "../liborchestra"}

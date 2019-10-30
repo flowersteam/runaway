@@ -11,15 +11,20 @@
 
 use clap;
 use exit::Exit;
+use tracing::{self, error};
 
 
 //------------------------------------------------------------------------------------------ MODULES
 
+
 mod subcommands;
 mod misc;
 mod exit;
+mod logger;
+
 
 //---------------------------------------------------------------------------------------- CONSTANTS
+
 
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -54,14 +59,13 @@ fn main(){
                 .help("File name of the script to be executed")
                 .required(true))
             .arg(clap::Arg::with_name("verbose")
+                .short("V")
                 .long("verbose")
-                .help("Print light logs"))
-            .arg(clap::Arg::with_name("vverbose")
-                .long("vverbose")
-                .help("Print logs"))
-            .arg(clap::Arg::with_name("vvverbose")
-                .long("vvverbose")
-                .help("Print all logs"))
+                .help("Print more messages"))
+            .arg(clap::Arg::with_name("silent")
+                .short("S")
+                .long("silent")
+                .help("Print no messages from runaway"))
             .arg(clap::Arg::with_name("print-files")
                 .short("p")
                 .long("print-files")
@@ -116,14 +120,13 @@ fn main(){
                 .help("File name of the script to be executed")
                 .required(true)) 
             .arg(clap::Arg::with_name("verbose")
+                .short("V")
                 .long("verbose")
-                .help("Print light logs"))
-            .arg(clap::Arg::with_name("vverbose")
-                .long("vverbose")
-                .help("Print logs"))
-            .arg(clap::Arg::with_name("vvverbose")
-                .long("vvverbose")
-                .help("Print all logs"))
+                .help("Print more messages"))
+            .arg(clap::Arg::with_name("silent")
+                .short("S")
+                .long("silent")
+                .help("Print no messages from runaway"))
             .arg(clap::Arg::with_name("repeats")
                 .short("x")
                 .long("repeats")
@@ -212,14 +215,13 @@ fn main(){
             .arg(clap::Arg::with_name("SCHEDULER")
                 .help("Search command to use to schedule experiment parameters."))
             .arg(clap::Arg::with_name("verbose")
+                .short("V")
                 .long("verbose")
-                .help("Print light logs"))
-            .arg(clap::Arg::with_name("vverbose")
-                .long("vverbose")
-                .help("Print logs"))
-            .arg(clap::Arg::with_name("vvverbose")
-                .long("vvverbose")
-                .help("Print all logs"))
+                .help("Print more messages"))
+            .arg(clap::Arg::with_name("silent")
+                .short("S")
+                .long("silent")
+                .help("Print no messages from runaway"))
             .arg(clap::Arg::with_name("leave")
                 .long("leave")
                 .takes_value(true)
@@ -275,14 +277,18 @@ fn main(){
                 .help(""))
         )
         .subcommand(clap::SubCommand::with_name("test")
-             .about("Tests a remote profile")
+            .about("Tests a remote profile")
             .arg(clap::Arg::with_name("verbose")
+                .short("V")
                 .long("verbose")
-                .help("Print light logs"))
-             .arg(clap::Arg::with_name("FILE")
-                 .help("The yaml profile to test.")
-                 .index(1)
-                 .required(true)));
+                .help("Print more messages"))
+            .arg(clap::Arg::with_name("silent")
+                .long("silent")
+                .help("Print no messages from runaway"))
+            .arg(clap::Arg::with_name("FILE")
+                .help("The yaml profile to test.")
+                .index(1)
+                .required(true)));
 
     // If the completion_file already exists, we update it to account for the new available profiles
     match misc::which_shell(){
@@ -302,7 +308,7 @@ fn main(){
 
     // We dispatch to subcommands and exit;
     let output;
-    if let Some(matches) = matches.subcommand_matches("test"){
+    if let Some(_) = matches.subcommand_matches("test"){
         output = Ok(Exit::AllGood);
     } else if let Some(matches) = matches.subcommand_matches("exec"){
         output = subcommands::exec(matches.clone());
@@ -320,20 +326,20 @@ fn main(){
     let exit = match output{
         Ok(Exit::AllGood) => Exit::AllGood.into(),
         Ok(Exit::ScriptFailedWithCode(e)) => {
-            eprintln!("runaway: script execution failed with exit code {}", e);
+            error!("Script execution failed with exit code {}", e);
             e
         }
         Ok(Exit::ScriptFailedWithoutCode) => {
-            eprintln!("runaway: script execution failed without returning exit code");
+            error!("Script execution failed without returning exit code");
             Exit::ScriptFailedWithoutCode.into()
         }
         Ok(Exit::SomeExecutionFailed(nb)) => {
-            eprintln!("runaway: {} executions failed.", nb);
+            error!("{} executions failed.", nb);
             Exit::SomeExecutionFailed(nb).into()
         }
         Ok(_) => unreachable!(),
         Err(e) => {
-            eprintln!("runaway: runaway has experienced an error: {}", e);
+            error!("Runaway experienced an error: {}", e);
             e.into()
         }
     };
