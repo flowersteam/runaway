@@ -32,7 +32,7 @@ use std::convert::TryInto;
 use rand::{self, Rng};
 use std::io::Write;
 use termcolor::{BufferWriter, Color, ColorChoice, ColorSpec, WriteColor};
-use tracing::{self, info, error};
+use tracing::{self, info, error, debug};
 
 
 //--------------------------------------------------------------------------------------- SUBCOMMAND
@@ -47,12 +47,16 @@ pub fn sched(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
     // We create the store that will keep important values
     let mut store = EnvironmentStore::new();
     if !matches.is_present("no-env-read"){
-        misc::read_local_runaway_envs().into_iter()
+        debug!("Reading local environment variables");
+        let vars = misc::read_local_runaway_envs();
+        debug!("Local variables: {:?}", vars);
+        vars.into_iter()
             .for_each(|(k, v)| {store.insert(k, v);});
     }
 
     // We load the host
     let host = misc::get_host(matches.value_of("REMOTE").unwrap())?;
+    info!("Host {} loaded", host);
     push_env(&mut store, "RUNAWAY_REMOTE", host.get_name());
 
     // We setup a few variables that will be used afterward.
