@@ -1363,7 +1363,6 @@ mod test {
         tracing::subscriber::set_global_default(subscriber).unwrap();
     }
 
-
     #[test]
     fn test_proxy_command_forwarder() {
         init();

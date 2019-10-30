@@ -82,7 +82,7 @@ impl Dropper {
 
     /// Downgrade a `Strong` dropper to a `Weak` dropper.
     pub fn downgrade(&mut self){
-        if let Dropper::Strong(r, s) = self{
+        if let Dropper::Strong(_, _) = self{
             *self = Dropper::Weak;
         }
     }
@@ -93,11 +93,11 @@ impl Drop for Dropper{
     fn drop(&mut self) {
         match &self{
             Dropper::Weak => {},
-            Dropper::Strong(r, s) if Arc::strong_count(&r) == 1 => {
+            Dropper::Strong(r, _) if Arc::strong_count(&r) == 1 => {
                 trace!("Counter at 1. Joining...");
                 (r.lock().unwrap().take().unwrap())();
             }
-            Dropper::Strong(r, s) =>{
+            Dropper::Strong(r, _) =>{
                 trace!("Counter at {}. Dropping...", Arc::strong_count(&r))
             }
         }

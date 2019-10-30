@@ -10,8 +10,7 @@
 use std::{process, path, fs, error, fmt};
 use regex;
 use super::CMPCONF_RPATH;
-use tracing::{self, warn, debug, instrument, trace_span};
-use tracing_futures::Instrument;
+use tracing::{self, warn, debug};
 
 
 //------------------------------------------------------------------------------------------- ERRORS
@@ -50,7 +49,9 @@ macro_rules! async_sleep {
                 thread::sleep($dur);
                 tx.send(()).unwrap();
             });
-            rx.instrument(tracing::trace_span!("async_sleep!"))
+            use tracing_futures::Instrument;
+            use tracing::trace_span;
+            rx.instrument(trace_span!("async_sleep!"))
                 .await
                 .unwrap();
 
@@ -64,6 +65,9 @@ macro_rules! async_sleep {
 macro_rules! await_wouldblock_io {
     ($expr:expr) => {
         {
+            use tracing::trace_span;
+            let span = trace_span!("await_wouldblock_io!");
+            let _guard = span.enter();
             loop{
                 match $expr {
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -82,6 +86,9 @@ macro_rules! await_wouldblock_io {
 macro_rules! await_wouldblock_ssh {
     ($expr:expr) => {
         {
+            use tracing::trace_span;
+            let span = trace_span!("await_wouldblock_ssh!");
+            let _guard = span.enter();
             loop{
                 match $expr {
                     Err(ref e) if e.code() == -37 => {
@@ -103,6 +110,9 @@ macro_rules! await_wouldblock_ssh {
 macro_rules! await_retry_n_ssh {
     ($expr:expr, $nb:expr, $($code:expr),*) => {
        {    
+            use tracing::trace_span;
+            let span = trace_span!("await_retry_n_ssh!");
+            let _guard = span.enter();
             let nb = $nb as usize;
             let mut i = 1 as usize;
             loop{
@@ -133,6 +143,9 @@ macro_rules! await_retry_n_ssh {
 macro_rules! await_retry_ssh {
     ($expr:expr, $($code:expr),*) => {
        {    
+            use tracing::trace_span;
+            let span = trace_span!("await_retry_n_ssh!");
+            let _guard = span.enter();
             loop{
                 match $expr {
                     Err(e)  => {
@@ -158,6 +171,9 @@ macro_rules! await_retry_ssh {
 macro_rules! await_retry_n {
     ($expr:expr, $nb:expr) => {
        {    
+            use tracing::trace_span;
+            let span = trace_span!("await_retry_n!");
+            let _guard = span.enter();
             let nb = $nb as usize;
             let mut i = 1 as usize;
             loop{

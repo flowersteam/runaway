@@ -32,7 +32,8 @@ use crate::*;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::os::unix::process::ExitStatusExt;
-use tracing::{self, error, trace, warn, debug, info, instrument};
+use tracing::{self, error, trace, instrument, trace_span};
+use tracing_futures::Instrument;
 
 
 //----------------------------------------------------------------------------------------- MESSAGES
@@ -173,12 +174,19 @@ struct Scheduler {
     status: SchedulerStatus,
 }
 
+impl Debug for Scheduler{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Scheduler{{{}}}", self.child.id())
+    }
+}
+
 impl Scheduler {
 
     /// Generates a scheduler from a child process spawned elswhere. Basically, this makes the stdin 
     /// and stdout file descriptors non blocking.
+    #[instrument(name="Scheduler::from_child")]
     fn from_child(child: Child) -> Result<Scheduler, Error> {
-        debug!("Scheduler: Creating Sheduler from child: {:?}", child);
+        trace!("Creating Sheduler from child");
         let mut child = child;
         let stdin = unblock(child.stdin.take().unwrap())
             .map_err(|e| Error::Spawn(format!("Failed to unblock stdin: \n{}", e)))?;
@@ -193,23 +201,25 @@ impl Scheduler {
     }
 
     /// Transitions scheduler status
+    #[instrument(name="Scheduler::transitions", skip(self))]
     fn transitions(&mut self){
+        trace!("Transitioning");
         match self.status{
             SchedulerStatus::Running => {
                 if let Ok(Some(status)) = self.child.try_wait(){
                     let status = status.code().unwrap_or(status.signal().unwrap());
-                    error!("Scheduler: Transitions to crashed with exit status {}.", status);
+                    error!(exit=?status, "Transition crashed with exit status");
                     self.status = SchedulerStatus::Crashed;
                 }
             }
             SchedulerStatus::Crashed | SchedulerStatus::Shutdown => {} // absorbing states.
         }
-        
     }
 
     /// Inner future containing the logic to request parameters. 
+    #[instrument(name="Scheduler::request_parameters", skip(sched))]
     async fn request_parameters(sched: Arc<Mutex<Scheduler>>) -> Result<String, Error> {
-        debug!("Scheduler: Requesting parameters");
+        trace!("Requesting parameters");
         loop{
             let response = {
                 // Bind sched here.
@@ -240,8 +250,9 @@ impl Scheduler {
     }
 
     /// Inner future containing the logic to record an output. 
+    #[instrument(name="Scheduler::record_output", skip(sched))]
     async fn record_output(sched: Arc<Mutex<Scheduler>>, parameters: String, features: String) -> Result<(), Error>{
-        debug!("Scheduler: Recording output");
+        trace!("Recording output");
         {   
             // We bind the command to this scope. Such that if one of the io blocks, we are sure that 
             // an other task doesn't get woken up before this one, and reads/write the end of the
@@ -267,8 +278,9 @@ impl Scheduler {
     }
 
     /// Inner future containing the logic to shutdown the command.
+    #[instrument(name="Scheduler::shutdown", skip(sched))]
     async fn shutdown(sched: Arc<Mutex<Scheduler>>) -> Result<(), Error>{
-        debug!("Scheduler: Shutting scheduler down");
+        trace!("Shutting scheduler down");
         {   
             // We bind the command to this scope. Such that if one of the io blocks, we are sure that 
             // an other task doesn't get woken up before this one, and reads/write the end of the
@@ -335,10 +347,10 @@ impl SchedulerHandle {
 
     /// Spawns a `Scheduler` from a command. This function contains most of the logic concerning the 
     /// dispatch of the operations to the inner futures. 
+    #[instrument(name="SchedulerHandle::spawn")]
     pub fn spawn(command: Command, name: String) -> Result<SchedulerHandle, Error> {
 
-        debug!("SchedulerHandle: Start scheduler thread");
-
+        trace!("Start scheduler thread");
         // We create the scheduler resource. This one will be transferred into a separate thread.
         let mut command = command;
         let sched = Scheduler::from_child(
@@ -353,29 +365,36 @@ impl SchedulerHandle {
         // futures.
         let handle = thread::Builder::new().name(format!("orch-sched"))
         .spawn(move || {
-            trace!("Scheduler Thread: Creating resource in thread");
+            let span = trace_span!("Scheduler::Thread");
+            let _guard = span.enter();
+            let stream_span = trace_span!("Handling_Stream", ?sched);
+
+            trace!("Creating resource in thread");
             let res = Arc::new(Mutex::new(sched));
             let reres = res.clone();
 
             // We spawn the local executor, in charge of executing the inner tasks
-            trace!("Scheduler Thread: Starting resource loop");
+            trace!("Starting resource loop");
             let mut pool = executor::LocalPool::new();
             let mut spawner = pool.spawner();
 
             // We describe the message dispatching task
             let handling_stream = receiver.for_each(
                 move |(sender, operation): (oneshot::Sender<OperationOutput>, OperationInput)| {
-                    trace!("Scheduler Thread: received operation {:?}", operation);
+                    let span = stream_span.clone();
+                    let _guard = span.enter();
+                    trace!(?operation, "Received operation");
                     match operation {
                         OperationInput::RequestParameters => {
                             spawner.spawn_local(
                                 Scheduler::request_parameters(res.clone())
                                     .map(|a| {
                                         sender.send(OperationOutput::RequestParameters(a))
-                                            .map_err(|e| error!("Scheduler Thread: Failed to \\
+                                            .map_err(|e| error!("Failed to \\
                                             send an operation output: \n{:?}", e))
                                             .unwrap();
                                     })
+                                    .instrument(span.clone())
                             )
                         }
                         OperationInput::RecordOutput(parameters, features) => {
@@ -383,10 +402,11 @@ impl SchedulerHandle {
                                 Scheduler::record_output(res.clone(), parameters, features)
                                     .map(|a| {
                                         sender.send(OperationOutput::RecordOutput(a))
-                                            .map_err(|e| error!("Scheduler Thread: Failed to \\
+                                            .map_err(|e| error!("Failed to \\
                                             send an operation output: \n{:?}", e))
                                             .unwrap();
                                     })
+                                    .instrument(span.clone())
                             )
                         }
                         OperationInput::Shutdown => {
@@ -394,13 +414,14 @@ impl SchedulerHandle {
                                 Scheduler::shutdown(res.clone())
                                     .map(|a| {
                                         sender.send(OperationOutput::Shutdown(a))
-                                            .map_err(|e| error!("Scheduler Thread: Failed to \\
+                                            .map_err(|e| error!("Failed to \\
                                             send an operation output: \n{:?}", e))
                                             .unwrap();
                                     })
+                                    .instrument(span.clone())
                             )
                         }
-                    }.map_err(|e| error!("Scheduler Thread: Failed to spawn the operation: \n{:?}", e))
+                    }.map_err(|e| error!("Failed to spawn the operation: \n{:?}", e))
                     .unwrap();
                     future::ready(())
                 }
@@ -409,19 +430,19 @@ impl SchedulerHandle {
             // We spawn the message dispatching task
             let mut spawner = pool.spawner();
             spawner.spawn_local(handling_stream)
-                .map_err(|_| error!("Scheduler Thread: Failed to spawn handling stream"))
+                .map_err(|_| error!("Failed to spawn handling stream"))
                 .unwrap();
 
             // We wait for every tasks to complete (the last will be the message dispatching task
             // that will return when the channel closes)
-            trace!("Scheduler Thread: Starting local executor.");
+            trace!("Starting local executor.");
             pool.run();
 
             // All the tasks are done, we shutdown the resource.
-            trace!("Scheduler Thread: All futures processed. Shutting command down.");
+            trace!("All futures processed. Shutting command down.");
             executor::block_on(Scheduler::shutdown(reres.clone()))
                 .unwrap_or_else(|e| error!("Scheduler: Failed to shutdown scheduler: \n {}", e));
-            trace!("Scheduler Thread: All good. Leaving...");
+            trace!("All good. Leaving...");
         }).expect("Failed to spawn scheduler thread.");
 
         // We return the handle
@@ -442,62 +463,60 @@ impl SchedulerHandle {
     /// Async method, which request a parameter string from the scheduler, and wait for it if the 
     /// scheduler is not yet ready.
     pub fn async_request_parameters(&self) -> impl Future<Output=Result<String,Error>> {
-        debug!("SchedulerHandle: Building async_request_parameters future");
         let mut chan = self._sender.clone();
         async move {
             let (sender, receiver) = oneshot::channel();
-            trace!("SchedulerHandle::async_request_parameters_future: Sending input");
+            trace!("Sending async request parameters input");
             chan.send((sender, OperationInput::RequestParameters))
                 .await
                 .map_err(|e| Error::Channel(e.to_string()))?;
-            trace!("SchedulerHandle::async_request_parameters_future: Awaiting output");
+            trace!("Awaiting async request parameters output");
             match receiver.await {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::RequestParameters(res)) => res,
                 Ok(e) => Err(Error::OperationFetch(format!("Expected RequestParameters, found {:?}", e)))
             }
-        }
+        }.instrument(trace_span!("SchedulerHandle::async_request_parameters"))
     }
 
     /// Async method, returning a future that ultimately resolves after the output was recorded.
     pub fn async_record_output(&self, parameters: String, output: String) -> impl Future<Output=Result<(),Error>> {
-        debug!("SchedulerHandle: Building async_record_output future");
         let mut chan = self._sender.clone();
         async move {
             let (sender, receiver) = oneshot::channel();
-            trace!("SchedulerHandle::async_record_output_future: Sending input");
+            trace!("Sending async record output input");
             chan.send((sender, OperationInput::RecordOutput(parameters, output)))
                 .await
                 .map_err(|e| Error::Channel(e.to_string()))?;
-            trace!("SchedulerHandle::async_record_output_future: Awaiting output");
+            trace!("Awaiting async record output output");
             match receiver.await {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::RecordOutput(res)) => res,
                 Ok(e) => Err(Error::OperationFetch(format!("Expected RecordOutput, found {:?}", e)))
             }
-        }
+        }.instrument(trace_span!("RemoteHandle::async_record_output"))
     }
 
     /// Async method, returning a future that ultimately resolves after the scheduler was shutdown.
     pub fn async_shutdown(&self) -> impl Future<Output=Result<(),Error>> {
-        debug!("SchedulerHandle: Building shutdown future");
         let mut chan = self._sender.clone();
         async move {
             let (sender, receiver) = oneshot::channel();
-            trace!("SchedulerHandle::async_shutdown_future: Sending input");
+            trace!("Sending async shutdown input");
             chan.send((sender, OperationInput::Shutdown))
                 .await
                 .map_err(|e| Error::Channel(e.to_string()))?;
-            trace!("SchedulerHandle::async_shutdown_future: Awaiting output");
+            trace!("Awaiting async shutdown output");
             match receiver.await {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::Shutdown(res)) => res,
                 Ok(e) => Err(Error::OperationFetch(format!("Expected Shutdown, found {:?}", e)))
             }
-        }
+        }.instrument(trace_span!("RemoteHandle::async_shutdown"))
     }
 
-     /// Downgrades the handle, meaning that the resource could be dropped before this guy.
+    /// Downgrades the handle, meaning that the resource could be dropped before this guy.
+    #[inline]
     pub fn downgrade(&mut self) {
         self._dropper.downgrade();
     }
@@ -553,6 +572,20 @@ where
 mod test {
 
     use super::*;
+    use futures::executor::block_on;
+    use crate::misc;
+    use tracing_subscriber::fmt::Subscriber;
+    use tracing::Level;
+
+    fn init(){
+        let subscriber = Subscriber::builder()
+            .compact()
+            .with_max_level(Level::TRACE)
+            .without_time()
+            .with_target(false)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).unwrap();
+    }
 
     fn write_python_scheduler() {
         let program = "#!/usr/bin/env python
@@ -621,9 +654,10 @@ if __name__ == \"__main__\":
     fn test_scheduler_resource() {
         use futures::executor::block_on;
 
-        
-        write_python_scheduler();
+        init();
 
+        write_python_scheduler();
+        
         let mut command = std::process::Command::new("/tmp/scheduler.py");
         command.stdin(std::process::Stdio::piped());
         command.stdout(std::process::Stdio::piped());
