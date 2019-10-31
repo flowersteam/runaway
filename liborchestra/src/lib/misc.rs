@@ -11,6 +11,7 @@ use std::{process, path, fs, error, fmt};
 use regex;
 use super::CMPCONF_RPATH;
 use tracing::{self, warn, debug};
+use super::commons::OutputBuf;
 
 
 //------------------------------------------------------------------------------------------- ERRORS
@@ -307,6 +308,16 @@ pub fn compact_outputs(outputs: Vec<Output>) -> Output{
                   acc
               })
 } 
+
+/// Formats commands and output properly
+pub fn format_commands_outputs(commands: &Vec<String>, outputs: &Vec<Output>) -> String{
+    commands.iter().zip(outputs.iter().map(|o| OutputBuf::from(o.to_owned())))
+        .fold(String::new(), |mut acc, (c, o)|{
+            acc.push_str(&format!("{:?} :\n    stdout: {:?}\n    stderr: {:?}\n    ecode: {}\n",
+                c, o.stdout, o.stderr, o.ecode));
+            acc
+        })
+}
 
 //-------------------------------------------------------------------------------------------- TESTS
 

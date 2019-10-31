@@ -22,6 +22,7 @@ use liborchestra::hosts::NodeHandle;
 use liborchestra::primitives::{self, Glob, Sha1Hash};
 use liborchestra::ssh::RemoteHandle;
 use liborchestra::scheduler::SchedulerHandle;
+use crate::color;
 use crate::misc;
 use crate::exit::Exit;
 use std::path::{PathBuf, Path};
@@ -31,7 +32,6 @@ use std::mem;
 use std::convert::TryInto;
 use rand::{self, Rng};
 use std::io::Write;
-use termcolor::{BufferWriter, Color, ColorChoice, ColorSpec, WriteColor};
 use tracing::{self, info, error, debug};
 
 
@@ -258,26 +258,6 @@ impl<S> Iterator for OwnedVecIter<S>{
     }
 }
 
-// Creates an iterator that repeats n times the iterator given
-fn repeat_iter(iterator: Box<dyn std::iter::Iterator<Item=String>>, n: usize) -> Box<dyn std::iter::Iterator<Item=String>>{
-    Box::new(iterator.map(move |el| itertools::repeat_n(el, n)).flatten())
-}
-
-// Extracts the remote folders list depending on the cli arguments.
-fn extract_remote_folders_iter(matches: &clap::ArgMatches) -> Result<Box<dyn std::iter::Iterator<Item=String>>, Exit>{
-    // We retrieve the remote folders string
-    let content = matches.value_of("remote-folders").unwrap().to_owned();
-    Ok(Box::new(iter::repeat(content)))
-}
-
-// Extracts the output folders list depending on the cli arguments.
-fn extract_output_folders_iter(matches: &clap::ArgMatches) -> Result<Box<dyn std::iter::Iterator<Item=String>>, Exit>{
-    // We retrieve the output folders string.
-    let content = matches.value_of("output-folders").unwrap().to_owned();
-    Ok(Box::new(iter::repeat(content.lines().nth(0).unwrap().to_owned())))
-}
-
-
 // Sends data to the remote using the frontend.
 async fn send_data_on_front(host: &HostHandle, 
                             remote_send_archive: &PathBuf,
@@ -366,22 +346,16 @@ async fn perform_on_node(store: EnvironmentStore,
     // We perform the job
     let color: u8 = rand::thread_rng().gen();
     let stdout_id = id.clone();
-    let stdout = BufferWriter::stdout(ColorChoice::Always);
     let stdout_callback = Box::new(move |a|{
         let string = String::from_utf8(a).unwrap().replace("\r\n", "");
-        let mut stdout_buffer = stdout.buffer();
-        stdout_buffer.set_color(ColorSpec::new().set_fg(Some(Color::Ansi256(color)))).unwrap();
-        write!(&mut stdout_buffer, "{}: {}", stdout_id, string).unwrap();
-        stdout.print(&stdout_buffer).unwrap();
+        print!("{}", color!(color, "{}: {}", stdout_id, string));
+        std::io::stdout().flush().unwrap();
     });
     let stderr_id = id.clone();
-    let stderr = BufferWriter::stderr(ColorChoice::Always);
     let stderr_callback = Box::new(move |a|{
         let string = String::from_utf8(a).unwrap().replace("\r\n", "");
-        let mut stderr_buffer = stderr.buffer();
-        stderr_buffer.set_color(ColorSpec::new().set_fg(Some(Color::Ansi256(color)))).unwrap();
-        write!(&mut stderr_buffer, "{}: {}", stderr_id, string).unwrap();
-        stderr.print(&stderr_buffer).unwrap();
+        eprint!("{}", color!(color, "{}: {}", stderr_id, string));
+        std::io::stderr().flush().unwrap();
     });
     let mut context = node.context.clone();
     context.envs.extend(store.into_iter());

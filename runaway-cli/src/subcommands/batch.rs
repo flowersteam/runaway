@@ -20,6 +20,7 @@ use liborchestra::commons::{EnvironmentStore,substitute_environment, push_env, O
 use liborchestra::primitives::{self, Glob, Sha1Hash};
 use liborchestra::ssh::RemoteHandle;
 use crate::misc;
+use crate::color;
 use crate::exit::Exit;
 use std::path::{PathBuf, Path};
 use itertools::{EitherOrBoth, Itertools};
@@ -29,9 +30,8 @@ use std::mem;
 use std::convert::TryInto;
 use rand::{self, Rng};
 use std::io::Write;
-use termcolor::{BufferWriter, Color, ColorChoice, ColorSpec, WriteColor};
-use tracing::{self, error};
-
+use tracing::{self, error, debug, info, warn};
+use liborchestra::commons::format_env;
 
 
 //--------------------------------------------------------------------------------------- SUBCOMMAND
@@ -43,28 +43,39 @@ pub fn batch(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
     // We initialize the logger
     misc::init_logger(&matches);
 
-    // We create the store that will keep important values
+    // We create the store that will keep env vars
     let mut store = EnvironmentStore::new();
+
+    // We read the envs to the store.
     if !matches.is_present("no-env-read"){
-        misc::read_local_runaway_envs().into_iter()
-            .for_each(|(k, v)| {store.insert(k, v);});
+        let envs = misc::read_local_runaway_envs();
+        debug!("Local environment variables captured: {}", envs.iter()
+            .fold(String::new(), |mut acc, (k, v)| {acc.push_str(&format!("\n{:?}={:?}", k, v)); acc}));
+        envs.into_iter()
+            .for_each(|(k, v)| {push_env(&mut store, k.0, v.0);});
     }
 
     // We load the host
+    info!("Loading host");
     let host = misc::get_host(matches.value_of("REMOTE").unwrap())?;
     push_env(&mut store, "RUNAWAY_REMOTE", host.get_name());
+    debug!("Host {:?} loaded", host);
 
     // We install ctrl-c handler
     misc::install_ctrlc_handler(Some(host.clone()), None);
 
     // We setup a few variables that will be used afterward.
+    info!("Reading arguments");
     let leave = LeaveConfig::from(matches.value_of("leave").unwrap());
     push_env(&mut store, "RUNAWAY_LEAVE", format!("{}", leave));
+    debug!("Leave option set to {}", leave);
     let script = PathBuf::from(matches.value_of("SCRIPT").unwrap());
     push_env(&mut store, "RUNAWAY_SCRIPT_PATH", script.to_str().unwrap());
+    debug!("Script path set to {}", script.to_str().unwrap());
 
     // We generate the iterator over things that will vary from executions to executions
     let repeats: usize = matches.value_of("repeats").unwrap().parse().unwrap();
+    debug!("Number of repeats set to {}", repeats);
     let arguments_iter = repeat_iter(extract_args_iter(&matches)?, repeats);
     let remotes_iter = repeat_iter(extract_remote_folders_iter(&matches)?, repeats);
     let outputs_iter = repeat_iter(extract_output_folders_iter(&matches)?, repeats);
@@ -72,12 +83,14 @@ pub fn batch(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
     // We compute some paths
     let local_folder = to_exit!(std::env::current_dir(), Exit::ScriptFolder)?;
     push_env(&mut store, "RUNAWAY_LOCAL_FOLDER", local_folder.to_str().unwrap());
+    debug!("Local folder is {}", local_folder.to_str().unwrap());
     let local_send_archive = local_folder.join(SEND_ARCH_RPATH);
     if !script.exists() {
         return Err(Exit::ScriptPath)
     }
 
     // We generate globs for file sending and fetching
+    info!("Reading ignore files");
     let (mut send_ignore_globs, fetch_ignore_globs) = misc::get_send_fetch_ignores_globs(
         &local_folder,
         matches.value_of("send-ignore").unwrap(),
@@ -86,6 +99,10 @@ pub fn batch(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
     send_ignore_globs.push(primitives::Glob(format!("**/{}", SEND_ARCH_RPATH)));
     send_ignore_globs.push(primitives::Glob(matches.value_of("send-ignore").unwrap().into()));
     send_ignore_globs.push(primitives::Glob(matches.value_of("fetch-ignore").unwrap().into()));
+    debug!("Sendignore globs set to {}", send_ignore_globs.iter()
+        .fold(String::new(), |mut acc, s| {acc.push_str(&format!("\n{}", s.0)); acc}));
+    debug!("Fetchignore globs set to {}", fetch_ignore_globs.iter()
+        .fold(String::new(), |mut acc, s| {acc.push_str(&format!("\n{}", s.0)); acc}));
     let send_include_globs = vec!();
     let fetch_include_globs = vec!(); 
 
@@ -95,13 +112,18 @@ pub fn batch(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
             &send_ignore_globs, 
             &send_include_globs),
         Exit::ReadLocalFolder)?;
+    debug!("Files to be send to remote: {}", files_to_send.iter()
+            .fold(String::new(), |mut acc, s| {acc.push_str(&format!("\n{}", s.to_str().unwrap())); acc}));
+
 
     // We create the archive
+    info!("Compress files");
     let local_send_hash = to_exit!(primitives::tar_local_files(&local_folder, 
                                                 &files_to_send,
                                                 &local_send_archive),
                     Exit::PackLocalArchive)?;
     push_env(&mut store, "RUNAWAY_SEND_HASH", format!("{}", local_send_hash));
+    debug!("Archive hash is {}", local_send_hash);
 
     // We set the archive name
     let remote_send_archive = host.get_host_directory().join(format!("{}.tar",local_send_hash));
@@ -125,9 +147,18 @@ pub fn batch(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
         use EitherOrBoth::{Both, Left, Right};
         let (arguments, remote_folder, output_folder) = match generated{
             Both(arguments, Both(remote_folder, output_folder)) => (arguments, remote_folder, output_folder),
-            Both(_, Left(_)) => return Err(Exit::OutputsExhausted),
-            Both(_, Right(_)) => return Err(Exit::RemotesExhausted),
-            Left(_) => return Err(Exit::ArgumentsExhausted),
+            Both(_, Left(_)) => {
+                warn!("The output folders were exhausted before arguments and remote folders.");
+                return Err(Exit::OutputsExhausted)
+            },
+            Both(_, Right(_)) => {
+                warn!("The remote folders were exhausted before arguments and output folders.");
+                return Err(Exit::RemotesExhausted)
+            },
+            Left(_) => {
+                warn!("The arguments were exhausted before remote and output folders");
+                return Err(Exit::ArgumentsExhausted)
+            },
             Right(_) => break
         };
 
@@ -142,6 +173,7 @@ pub fn batch(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
 
         // We spawn the execution
         let fut = async move {
+            info!("Starting execution with arguments\"{}\" in {}", arguments, remote_folder);
             let (local_fetch_archive, store, remote_fetch_hash, execution_code) = perform_on_node(
                 fut_store,
                 &fut_host,
@@ -166,6 +198,7 @@ pub fn batch(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
     let exits = executor.run(fut);
 
     // Depending on the leave options, we remove the send archive on the remote
+    info!("Cleaning data on remote");
     if let LeaveConfig::Nothing = leave{
         let res = executor.run(primitives::remove_remote_files(
             vec!(remote_send_archive), 
@@ -181,6 +214,7 @@ pub fn batch(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
     if exit.iter().all(|e| mem::discriminant(e) == mem::discriminant(&Exit::AllGood)){
         return Ok(Exit::AllGood)
     } else {
+        error!("Some executions failed.");
         let nb = exit.iter()
             .filter(|e| mem::discriminant(*e) != mem::discriminant(&Exit::AllGood))
             .count();
@@ -212,13 +246,17 @@ fn repeat_iter(iterator: Box<dyn std::iter::Iterator<Item=String>>, n: usize) ->
 // Extracts the arguments list depending on the given cli arguments.
 fn extract_args_iter(matches: &clap::ArgMatches) -> Result<Box<dyn std::iter::Iterator<Item=String>>, Exit>{
     if matches.is_present("arguments-file"){
+        debug!("Encountered arguments file option");
         let content = to_exit!(std::fs::read_to_string(matches.value_of("arguments-file").unwrap()), Exit::LoadArgumentsFile)?;
         let content: Vec<String> = content.lines().map(ToOwned::to_owned).collect();
+        debug!("Argument templates found: {}", content.iter()
+                        .fold(String::new(), |mut acc, s| {acc.push_str(&format!("\n{}", s)); acc}));
         Ok(Box::new(OwnedVecIter(content)
             .map(|l| misc::expand_template_string(&l).into_iter())
             .flatten()))
     } else {
         let content = matches.value_of("ARGUMENTS").unwrap();
+        debug!("Arguments tempolate found: {}", content);
         Ok(Box::new(misc::expand_template_string(content).into_iter()))
     }
 }
@@ -229,9 +267,14 @@ fn extract_remote_folders_iter(matches: &clap::ArgMatches) -> Result<Box<dyn std
     // We retrieve the remote folders string.
     let content;
     if matches.is_present("remotes-file"){
+        debug!("Encountered remotes folder file option");
         content = to_exit!(std::fs::read_to_string(matches.value_of("remotes-file").unwrap()), Exit::LoadRemotesFile)?;
+        debug!("Remote folder found: {}", content.lines()
+                        .fold(String::new(), |mut acc, s| {acc.push_str(&format!("\n{}", s)); acc}));
     } else if matches.is_present("remote-folders"){
+        debug!("Encountered remote folders option");
         content = matches.value_of("remote-folders").unwrap().to_owned();
+        debug!("Remote folder found: {}", content);
     } else {
         panic!("no remote folder settings was set.")
     };
@@ -240,10 +283,12 @@ fn extract_remote_folders_iter(matches: &clap::ArgMatches) -> Result<Box<dyn std
     let is_template_string = !content.lines().count() == 1 ||
                              !misc::expand_template_string(content.lines().nth(0).unwrap()).len() == 1 ;
     if is_template_string { // template => expand
+        debug!("Remoter folder recognized as template string(s). Will expand.");
         Ok(Box::new(OwnedVecIter(content.lines().map(ToOwned::to_owned).collect())
            .map(|l| misc::expand_template_string(&l).into_iter())
            .flatten()))   
     } else { // pattern => repeat
+        debug!("Remote folder recognized as pattern string. Will repeat.");
         Ok(Box::new(iter::repeat(content.lines().nth(0).unwrap().to_owned())))
     }
 }
@@ -254,9 +299,14 @@ fn extract_output_folders_iter(matches: &clap::ArgMatches) -> Result<Box<dyn std
     // We retrieve the output folders string.
     let content;
     if matches.is_present("outputs-file"){
+        debug!("Encountered outputs folder file option");
         content = to_exit!(std::fs::read_to_string(matches.value_of("outputs-file").unwrap()), Exit::LoadOutputsFile)?;
+        debug!("Outputs folder found: {}", content.lines()
+                        .fold(String::new(), |mut acc, s| {acc.push_str(&format!("\n{}", s)); acc}));
     } else if matches.is_present("output-folders"){
+        debug!("Encountered output folders option");
         content = matches.value_of("output-folders").unwrap().to_owned();
+        debug!("Outputs folder found: {}", content);
     } else {
         panic!("no output folder settings was set.")
     };
@@ -265,10 +315,12 @@ fn extract_output_folders_iter(matches: &clap::ArgMatches) -> Result<Box<dyn std
     let is_template_string = !content.lines().count() == 1 ||
                              !misc::expand_template_string(content.lines().nth(0).unwrap()).len() == 1 ;
     if is_template_string { // template => expand
+        debug!("Outputs folder recognized as template string(s). Will expand.");
         Ok(Box::new(OwnedVecIter(content.lines().map(ToOwned::to_owned).collect())
            .map(|l| misc::expand_template_string(&l).into_iter())
            .flatten()))   
     } else { // pattern => repeat
+        debug!("Outputs folder recognized as pattern string. Will repeat.");
         Ok(Box::new(iter::repeat(content.lines().nth(0).unwrap().to_owned())))
     }
 }
@@ -279,10 +331,13 @@ async fn send_data_on_front(host: &HostHandle,
                             remote_send_archive: &PathBuf,
                             local_send_archive: &PathBuf,
                             local_send_hash: &primitives::Sha1Hash) -> Result<(), Exit>{
+
+        info!("Transferring data");
         let node = host.get_frontend();
         let remote_send_exists = to_exit!(primitives::remote_file_exists(&remote_send_archive, &node).await,
                                           Exit::CheckPresence)?;
         if !remote_send_exists{
+            debug!("Archive does not exist on host. Sending data...");
             to_exit!(primitives::send_local_file(&local_send_archive, &remote_send_archive, &node).await,
                      Exit::SendArchive)?;
             let remote_send_hash = to_exit!(primitives::compute_remote_sha1(&remote_send_archive, &node).await,
@@ -307,21 +362,28 @@ async fn unpacks_send_on_node(remote_folder: &PathBuf,
                                         Exit::CheckRemotePresence)?;
     let remote_files_before;
     if remote_folder_exists{
+        debug!("Remote folder already exist. Listing files.");
         let globs = vec!();
         remote_files_before = to_exit!(primitives::list_remote_folder(&remote_folder,
                                                                       &globs,
                                                                       &globs,
                                                                       &node).await,
                                        Exit::ReadRemoteFolder)?;
+        debug!("Files encountered: {}", remote_files_before.iter()
+                .fold(String::new(), |mut acc, s| {acc.push_str(&format!("\n{}", s.to_str().unwrap())); acc}));
     } else {
+        debug!("Creating remote folder.");
         to_exit!(primitives::create_remote_folder(&remote_folder, &node).await,
                  Exit::CreateRemoteFolder)?;
         remote_files_before = vec!();
     }
+    debug!("Extracting data in remote folder");
     let remote_files = to_exit!(primitives::untar_remote_archive(&remote_send_archive,
                                                                  &remote_folder,
                                                                  &node).await,
                                 Exit::UnpackRemoteArchive)?;
+    debug!("Files extracted from remote: {}", remote_files.iter()
+            .fold(String::new(), |mut acc, s| {acc.push_str(&format!("\n{}", s.to_str().unwrap())); acc}));
     Ok((remote_files_before, remote_files))
 }
 
@@ -346,12 +408,17 @@ async fn perform_on_node(store: EnvironmentStore,
     // We generate an uuid
     let id = uuid::Uuid::new_v4().hyphenated().to_string();
     push_env(&mut store, "RUNAWAY_UUID", id.clone());
+    debug!("Execution id set to {}", format!("{}", id));
 
 
     // We acquire the node
     let node = to_exit!(host.clone().async_acquire().await,
                             Exit::NodeAcquisition)?;
     store.extend(node.context.envs.clone().into_iter());
+    debug!("Acquired node with context: \nCwd: {}\nEnvs:\n    {}", 
+        node.context.cwd.0.to_str().unwrap(), 
+        format_env(&node.context.envs).replace("\n", "\n    ")
+    );
 
     // We generate the remote folder and unpack data into it
     let remote_folder= PathBuf::from(substitute_environment(&store, remote_folder_pattern.as_str()));
@@ -364,24 +431,19 @@ async fn perform_on_node(store: EnvironmentStore,
 
 
     // We perform the job
+    debug!("Executing script");
     let color: u8 = rand::thread_rng().gen();
     let stdout_id = id.clone();
-    let stdout = BufferWriter::stdout(ColorChoice::Always);
     let stdout_callback = Box::new(move |a|{
         let string = String::from_utf8(a).unwrap().replace("\r\n", "");
-        let mut stdout_buffer = stdout.buffer();
-        stdout_buffer.set_color(ColorSpec::new().set_fg(Some(Color::Ansi256(color)))).unwrap();
-        write!(&mut stdout_buffer, "{}: {}", stdout_id, string).unwrap();
-        stdout.print(&stdout_buffer).unwrap();
+        print!("{}", color!(color, "{}: {}", stdout_id, string));
+        std::io::stdout().flush().unwrap();
     });
     let stderr_id = id.clone();
-    let stderr = BufferWriter::stderr(ColorChoice::Always);
     let stderr_callback = Box::new(move |a|{
         let string = String::from_utf8(a).unwrap().replace("\r\n", "");
-        let mut stderr_buffer = stderr.buffer();
-        stderr_buffer.set_color(ColorSpec::new().set_fg(Some(Color::Ansi256(color)))).unwrap();
-        write!(&mut stderr_buffer, "{}: {}", stderr_id, string).unwrap();
-        stderr.print(&stderr_buffer).unwrap();
+        eprint!("{}", color!(color, "{}: {}", stderr_id, string));
+        std::io::stderr().flush().unwrap();
     });
     let mut context = node.context.clone();
     context.envs.extend(store.into_iter());
@@ -403,21 +465,28 @@ async fn perform_on_node(store: EnvironmentStore,
                                                                  &fetch_include_globs,
                                                                  &node).await,
                                 Exit::ReadRemoteFolder)?;
+    debug!("Files to be fetched from remote: {}", files_to_fetch.iter()
+            .fold(String::new(), |mut acc, s| {acc.push_str(&format!("\n{}", s.to_str().unwrap())); acc}));
+
 
 
     // We pack data to fetch
+    debug!("Compressing data to be fetched");
     let remote_fetch_archive = remote_folder.join(FETCH_ARCH_RPATH);
     let remote_fetch_hash = to_exit!(primitives::tar_remote_files(&remote_folder,
                                                                  &files_to_fetch,
                                                                  &remote_fetch_archive,
                                                                  &node).await,
                                      Exit::PackRemoteArchive)?;
+    debug!("Archive hash is {}", remote_fetch_hash);
 
 
     // We generate output folder
     let local_output_string = substitute_environment(&execution_context.envs, output_folder_pattern.as_str());
     let local_output_folder = PathBuf::from(local_output_string);
+    debug!("Local output folder set to: {}", local_output_folder.to_str().unwrap());
     if !local_output_folder.exists(){
+        debug!("Creating output folder");
         to_exit!(std::fs::create_dir_all(&local_output_folder), Exit::OutputFolder)?;
     }
     push_env(&mut execution_context.envs, "RUNAWAY_OUTPUT_FOLDER", local_output_folder.to_str().unwrap());
@@ -425,6 +494,7 @@ async fn perform_on_node(store: EnvironmentStore,
 
     
     // We fetch data back in  
+    debug!("Transferring data");
     to_exit!(primitives::fetch_remote_file(&remote_fetch_archive,
                                            &local_fetch_archive,
                                            &node).await,
@@ -434,6 +504,7 @@ async fn perform_on_node(store: EnvironmentStore,
 
 
     // Depending on the leave config, we clean the remote execution folder
+    debug!("Cleaning data on remote");
     match leave {
         LeaveConfig::Code | LeaveConfig::Nothing => {
             if remote_files_before.is_empty(){
@@ -486,14 +557,18 @@ fn unpacks_fetch_post_proc(matches: &clap::ArgMatches<'_>,
     
 
     // We unpack the data
-    to_exit!(primitives::untar_local_archive(
+    debug!("Extracting archive");
+    let local_files = to_exit!(primitives::untar_local_archive(
             &local_fetch_archive, 
             &local_fetch_archive.parent().unwrap().to_path_buf()),
         Exit::UnpackRemoteArchive)?;
     to_exit!(std::fs::remove_file(local_fetch_archive), Exit::RemoveArchive)?;
+    debug!("Files fetched from remote: {}", local_files.iter()
+            .fold(String::new(), |mut acc, s| {acc.push_str(&format!("\n{}", s.to_str().unwrap())); acc}));
 
 
     // We execute the post processing
+    debug!("Executing post script");
     let command_string = if matches.is_present("post-script"){
         let path_str = PathBuf::from(matches.value_of("post-script").unwrap())
             .canonicalize()
@@ -520,5 +595,4 @@ fn unpacks_fetch_post_proc(matches: &clap::ArgMatches<'_>,
     } else {
         Ok(Exit::ScriptFailedWithCode(execution_ecode))
     }
-
 }

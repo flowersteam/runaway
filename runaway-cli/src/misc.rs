@@ -22,9 +22,31 @@ use liborchestra::commons::{EnvironmentStore, EnvironmentKey, EnvironmentValue};
 use liborchestra::scheduler::SchedulerHandle;
 use itertools::Itertools;
 use tracing::{self, info, error};
+use std::env;
+
+
+//------------------------------------------------------------------------------------------ STATICS
+
+
+lazy_static!{
+    pub static ref NO_COLORS: bool = env::var("NO_COLOR").is_ok();
+}
+
 
 //-------------------------------------------------------------------------------------------- MACRO
 
+
+/// This macro allows to format a text with ansi color sequence added to color the text.
+#[macro_export]
+macro_rules! color{
+    ($color:tt, $($arg:tt)*) => {
+        if *$crate::misc::NO_COLORS{
+            format!($($arg)*)
+        } else{
+            format!("\x1B[38;5;{}m{}\x1B[0m", $color, format_args!($($arg)*))
+        }
+    }
+}
 
 /// This macro allows to execute a `Result` expression. On error, it prints an error message to the 
 /// user, and returns an error code. On ok, it unwraps the value.

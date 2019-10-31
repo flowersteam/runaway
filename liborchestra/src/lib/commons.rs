@@ -285,6 +285,13 @@ pub fn substitute_environment(store: &EnvironmentStore, string: &str) -> String{
 pub fn push_env<K: AsRef<str>, V: AsRef<str>>(store: &mut EnvironmentStore, key: K, value: V){
     store.insert(EnvironmentKey(key.as_ref().to_owned()), EnvironmentValue(value.as_ref().to_owned()));
 }
+pub fn format_env(store: &EnvironmentStore) -> String {
+    store.iter()
+        .fold(String::new(), |mut acc, (EnvironmentKey(k), EnvironmentValue(v))| {
+            acc.push_str(&format!("{} = {}\n", k, v));
+            acc
+        })
+}
 
 /// Represents a Current Working Directory
 #[derive(Clone, Derivative)]

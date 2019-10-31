@@ -18,7 +18,8 @@ use clap;
 use uuid;
 use futures::executor::block_on;
 use crate::{to_exit};
-use liborchestra::commons::{EnvironmentKey, EnvironmentValue, substitute_environment, OutputBuf};
+use liborchestra::commons::{EnvironmentValue, EnvironmentStore, 
+    substitute_environment, OutputBuf, push_env};
 use crate::misc;
 use crate::exit::Exit;
 use liborchestra::primitives;
@@ -36,10 +37,13 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
     // We initialize the logger
     misc::init_logger(&matches);
 
+    // We create the store that will keep env vars
+    let mut store = EnvironmentStore::new();
 
     // We load the host
     info!("Loading host");
     let host = misc::get_host(matches.value_of("REMOTE").unwrap())?;
+    push_env(&mut store, "RUNAWAY_REMOTE", host.get_name());
     debug!("Host {:?} loaded", host);
 
 
@@ -50,12 +54,16 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
     // We setup some parameters
     info!("Reading arguments");
     let leave = LeaveConfig::from(matches.value_of("leave").unwrap());
+    push_env(&mut store, "RUNAWAY_LEAVE", format!("{}", leave));
     debug!("Leave option set to {}", leave);
     let parameters = matches.value_of("ARGUMENTS").unwrap_or("").to_owned();
+    push_env(&mut store, "RUNAWAY_ARGUMENTS", parameters.clone());
     debug!("Arguments set to {}", parameters);
     let script = PathBuf::from(matches.value_of("SCRIPT").unwrap());
+    push_env(&mut store, "RUNAWAY_SCRIPT_PATH", script.to_str().unwrap());
     debug!("Script set to {}", script.to_str().unwrap());
     let local_folder = to_exit!(std::env::current_dir(), Exit::ScriptFolder)?;
+    push_env(&mut store, "RUNAWAY_LOCAL_FOLDER", host.get_name());
     debug!("Local folder is {}", local_folder.to_str().unwrap());
     if !script.exists() {
         return Err(Exit::ScriptPath)
@@ -68,6 +76,8 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
         matches.value_of("send-ignore").unwrap(),
         matches.value_of("fetch-ignore").unwrap())?;
     send_ignore_globs.push(primitives::Glob(format!("**/{}", SEND_ARCH_RPATH)));
+    send_ignore_globs.push(primitives::Glob(matches.value_of("send-ignore").unwrap().into()));
+    send_ignore_globs.push(primitives::Glob(matches.value_of("fetch-ignore").unwrap().into()));
     debug!("Sendignore globs set to {}", send_ignore_globs.iter()
         .fold(String::new(), |mut acc, s| {acc.push_str(&format!("\n{}", s.0)); acc}));
     debug!("Fetchignore globs set to {}", fetch_ignore_globs.iter()
@@ -85,6 +95,7 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
         
         // We generate an uuid
         let id = uuid::Uuid::new_v4().hyphenated().to_string();
+        push_env(&mut store, "RUNAWAY_UUID", id.clone());
         debug!("Execution id set to {}", id);
 
         
@@ -104,13 +115,15 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
                                                         &files_to_send,
                                                         &local_send_archive),
                             Exit::PackLocalArchive)?;
+        push_env(&mut store, "RUNAWAY_SEND_HASH", format!("{}", local_send_hash));
         debug!("Archive hash is {}", local_send_hash);
 
 
         // We acquire the node
         info!("Acquiring node on the host");
-        let mut node = to_exit!(host.clone().async_acquire().await,
+        let node = to_exit!(host.clone().async_acquire().await,
                                 Exit::NodeAcquisition)?;
+        store.extend(node.context.envs.clone().into_iter());
         debug!("Node {:#?} acquired", node);
 
         // We update the context to append some values of interest
@@ -119,20 +132,13 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
             debug!("Local environment variables captured: {}", envs.iter()
                 .fold(String::new(), |mut acc, (k, v)| {acc.push_str(&format!("\n{:?}={:?}", k, v)); acc}));
             envs.into_iter()
-                .for_each(|(k, v)| {node.context.envs.insert(k, v);});
+                .for_each(|(k, v)| {push_env(&mut store, k.0, v.0);});
         }
-        node.context.envs.insert(EnvironmentKey("RUNAWAY_UUID".into()), EnvironmentValue(id.clone()));
-        node.context.envs.insert(EnvironmentKey("RUNAWAY_SEND_HASH".into()), EnvironmentValue(local_send_hash.clone().into()));
-        node.context.envs.insert(EnvironmentKey("RUNAWAY_ARGUMENTS".into()), EnvironmentValue(parameters.into()));
-        node.context.envs.insert(EnvironmentKey("RUNAWAY_SCRIPT_PATH".into()), EnvironmentValue(script.to_str().unwrap().into()));
-        node.context.envs.insert(EnvironmentKey("RUNAWAY_LOCAL_FOLDER".into()), EnvironmentValue(local_folder.to_str().unwrap().into()));
-
 
         // We send the data, if needed.
         info!("Transferring data");
         let remote_send_archive = host.get_host_directory().join(format!("{}.tar",local_send_hash));
-        node.context.envs.insert(EnvironmentKey("RUNAWAY_SEND_ARCH_PATH".into()),  
-                                 EnvironmentValue(remote_send_archive.to_str().unwrap().to_owned()));
+        push_env(&mut store, "RUNAWAY_SEND_ARCH_PATH", remote_send_archive.to_str().unwrap());
         let remote_send_exists = to_exit!(primitives::remote_file_exists(&remote_send_archive, &node).await,
                                           Exit::CheckPresence)?;
         if !remote_send_exists{
@@ -153,7 +159,7 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
 
         // We substitute the remote folder and create it if needed
         let remote_folder= PathBuf::from(
-            substitute_environment(&node.context.envs, 
+            substitute_environment(&store, 
                                    matches.value_of("remote-folder").unwrap())
             );
         debug!("Remote folder set to {}", remote_folder.to_str().unwrap());
@@ -177,8 +183,7 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
                      Exit::CreateRemoteFolder)?;
             remote_files_before = vec!();
         }
-        node.context.envs.insert(EnvironmentKey("RUNAWAY_PWD".into()),
-                                 EnvironmentValue(remote_folder.to_str().unwrap().to_owned()));
+        push_env(&mut store, "RUNAWAY_PWD", remote_folder.to_str().unwrap());
 
 
         // We unpack the data in the remote folder
@@ -187,7 +192,7 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
                                                                      &remote_folder,
                                                                      &node).await,
                                     Exit::UnpackRemoteArchive)?;
-        debug!("Files deflated in remote folder: {}", remote_files.iter()
+        debug!("Files extracted in remote folder: {}", remote_files.iter()
             .fold(String::new(), |mut acc, s| {acc.push_str(&format!("\n{}", s.to_str().unwrap())); acc}));
 
 
@@ -209,17 +214,20 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
             let string = String::from_utf8(a).unwrap().replace("\r\n", "");
             eprint!("{}", string);
         });
-        let (context, outs) = to_exit!(node.async_pty(
-                node.context.clone(),
+        let mut context = node.context.clone();
+        context.envs.extend(store.into_iter());
+        let (mut execution_context, outs) = to_exit!(node.async_pty(
+                context,
                 host.get_execution_procedure(),
                 Some(stdout_callback), 
                 Some(stderr_callback)).await,
             Exit::Execute)?;
-        let outs: Vec<OutputBuf> = outs.into_iter()
-            .map(Into::into)
-            .collect();
+        let out: OutputBuf = liborchestra::misc::compact_outputs(outs.clone()).into();
+        push_env(&mut execution_context.envs, "RUNAWAY_ECODE", format!("{}", out.ecode));
+        push_env(&mut execution_context.envs, "RUNAWAY_STDOUT", &out.stdout);
+        push_env(&mut execution_context.envs, "RUNAWAY_STDERR", &out.stderr);
 
-
+        
         // We list the files to fetch
         let files_to_fetch = to_exit!(primitives::list_remote_folder(&remote_folder,
                                                                      &fetch_ignore_globs,
@@ -242,13 +250,14 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
 
 
         // We fetch data back
-        let local_output_string = substitute_environment(&context.envs, matches.value_of("output-folder").unwrap());
+        let local_output_string = substitute_environment(&execution_context.envs, matches.value_of("output-folder").unwrap());
         let local_output_folder = to_exit!(PathBuf::from(local_output_string).canonicalize(), Exit::OutputFolder)?;
         debug!("Local output folder set to: {}", local_output_folder.to_str().unwrap());
         if !local_output_folder.exists(){
             debug!("Creating output folder");
             to_exit!(std::fs::create_dir_all(&local_output_folder), Exit::OutputFolder)?;
         }
+        push_env(&mut execution_context.envs, "RUNAWAY_OUTPUT_FOLDER", local_output_folder.to_str().unwrap());
         let local_fetch_archive = local_output_folder.join(FETCH_ARCH_RPATH);
         info!("Transferring data");
         to_exit!(primitives::fetch_remote_file(&remote_fetch_archive,
@@ -276,7 +285,7 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
 
 
         // Depending on the leave config, we clean the remote execution folder
-        info!("Clearing data on remote");
+        info!("Cleaning data on remote");
         match leave {
             LeaveConfig::Code | LeaveConfig::Nothing => {
                 if remote_files_before.is_empty(){
@@ -311,12 +320,15 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
         if matches.is_present("no-ecode"){
             Ok(Exit::AllGood)
         } else {
-            if !outs.last().unwrap().success(){
-                error!("Failed to execute command: {}", 
+            if out.ecode!=0{
+                let outs:Vec<OutputBuf> = outs.into_iter()
+                    .map(Into::into)
+                    .collect();
+                error!("Failed to execute command: {}",
                     host.get_execution_procedure().get(outs.len() - 1).unwrap().0);
                 error!("     stdout: {}", outs.last().unwrap().stdout);
                 error!("     stderr: {}", outs.last().unwrap().stderr);
-                error!("     ecode: {}", outs.last().unwrap().ecode);
+                error!("     ecode: {}",  outs.last().unwrap().ecode);
                 Ok(Exit::ScriptFailedWithCode(outs.last().unwrap().ecode))
             } else {
                 Ok(Exit::AllGood)

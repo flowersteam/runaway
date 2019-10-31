@@ -31,12 +31,13 @@ use std::path::{PathBuf};
 use crate::misc;
 use crate::*;
 use std::ops::Deref;
-use crate::commons::{EnvironmentKey, EnvironmentValue, RawCommand, TerminalContext};
+use crate::commons::{EnvironmentKey, EnvironmentValue, RawCommand, TerminalContext, format_env};
+use crate::misc::{format_commands_outputs};
 use crate::SSH_CONFIG_RPATH;
 use std::sync::Arc;
 use futures::lock::Mutex;
 use futures::SinkExt;
-use tracing::{self, error, trace, instrument, trace_span};
+use tracing::{self, error, trace, instrument, trace_span, debug};
 use tracing_futures::Instrument;
 
 
@@ -457,7 +458,7 @@ impl Host {
     // Acquire a node 
     #[instrument(name="Host::acquire_node", skip(host))]
     async fn acquire_node(host: Arc<Mutex<Host>>) -> Result<DropBack<Expire<NodeHandle>>, Error>{
-        trace!("Acquiring node");
+        debug!("Acquiring node");
         loop{
             let maybe_node = {
                 let provider = &mut host.lock().await.provider;
@@ -480,7 +481,7 @@ impl Host {
 
     #[instrument(name="Host::abort", skip(host))]    // Allows to trigger abort. Every node acquisition will return an error after that.
     async fn abort(host: Arc<Mutex<Host>>) -> Result<(), Error>{
-        trace!("Aborting host");
+        debug!("Aborting host");
         let conf = {host.lock().await.conf.clone()};
         let mut host = host.lock().await;
         host.provider.shutdown().await;
@@ -491,7 +492,7 @@ impl Host {
     // allocation is cancelled right away. 
     #[instrument(name="Host::shutdown", skip(host))]
     async fn shutdown(host: Arc<Mutex<Host>>) -> Result<(), Error>{
-        trace!("Shutting host down");
+        debug!("Shutting host down");
         {
             let mut host = host.lock().await;
             host.provider.shutdown().await;
@@ -738,24 +739,28 @@ async fn allocate_nodes(frontend: &Frontend,
                         context: &FrontendContext, 
                         start_alloc: &StartAllocationProcedure) 
                         -> Result<FrontendContext, Error>{
-    trace!("Allocating nodes");
+    debug!("Allocating nodes");
     // We retrieve the commands
     let StartAllocationProcedure(cmds) = start_alloc;
     let FrontendContext(context) = context;
+    debug!("Context before allocation: \nCwd: {}\nEnvs:\n    {}", 
+        context.cwd.0.to_str().unwrap(), 
+        format_env(&context.envs).replace("\n", "\n    ")
+    );
     // We start the allocation by executing the start alloc command
     let (context, outputs) = frontend.0.async_pty(context.to_owned(), cmds.to_owned(), None, None)
         .await
         .map_err(|e| Error::AllocationFailed(format!("Failed to allocate: {}", e)))?;
-    let output_len = outputs.len();
-    // We eventually print the  
-    trace!("Allocation procedure returned:"); 
-    outputs.iter()
-        .zip(cmds)
-        .for_each(|(o, c)| trace!("   {} => {:?}", c.0, o));
+    let cmds = cmds.into_iter().map(|c| c.0.to_owned()).collect::<Vec<_>>();
+    debug!("Allocation procedure returned: \n{}", format_commands_outputs(&cmds, &outputs));    
+    debug!("Context after allocation: \nCwd: {}\nEnvs:\n    {}", 
+        context.cwd.0.to_str().unwrap(), 
+        format_env(&context.envs).replace("\n", "\n    ")
+    );
     // If the allocation failed we return an error
     misc::compact_outputs(outputs)
         .result()
-        .map_err(|e| Error::AllocationFailed(format!("Failed to allocate on command {:?}: {}", cmds.get(output_len-1).unwrap().0, e)))?;
+        .map_err(|e| Error::AllocationFailed(format!("Failed to allocate on command")))?;
     // We return the Allocation context
     Ok(FrontendContext(context))
 }
@@ -815,15 +820,25 @@ async fn spawn_handles(node: Node,
                        get_handles_proc: GetHandlesProcedure,
                        context: NodeContext) 
                      -> Result<Vec<(Handle, HandleContext)>, Error>{
-    trace!("Spawning node handles");
+    debug!("Querying node handles");
     // We retrieve the important bits
     let Node(node) = node;
     let GetHandlesProcedure(cmds) = get_handles_proc;
     let NodeContext(context) = context;
-    // We perform the commands
+    debug!("Context before handles query: \nCwd: {}\nEnvs:\n    {}", 
+        context.cwd.0.to_str().unwrap(), 
+        format_env(&context.envs).replace("\n", "\n    ")
+    );
+    // We query the handles
     let (output_context, outputs) = node.async_pty(context.to_owned(), cmds.to_owned(), None, None)
             .await
             .map_err(|e| Error::AllocationFailed(format!("Failed to get handles: {}", e)))?;
+    let cmds = cmds.into_iter().map(|c| c.0.to_owned()).collect::<Vec<_>>();
+    debug!("Handles query procedure returned: \n{}", format_commands_outputs(&cmds, &outputs));    
+    debug!("Context after handles query: \nCwd: {}\nEnvs:\n    {}", 
+        output_context.cwd.0.to_str().unwrap(), 
+        format_env(&output_context.envs).replace("\n", "\n    ")
+    );
     // If the commands failed we return an error
     misc::compact_outputs(outputs)
         .result()
@@ -869,13 +884,24 @@ async fn cancel_allocation(frontend: &Frontend,
                            context: &FrontendContext,
                            cancel_alloc: &CancelAllocationProcedure) 
                         -> Result<FrontendContext, Error>{
+    debug!("Cancelling allocation");
     // We retrieve the commands
     let CancelAllocationProcedure(cmds) = cancel_alloc;
     let FrontendContext(context) = context;
+    debug!("Context after cancelling allocation: \nCwd: {}\nEnvs:\n    {}", 
+        context.cwd.0.to_str().unwrap(), 
+        format_env(&context.envs).replace("\n", "\n    ")
+    );
     // We cancel the allocation by executing the cancel alloc command
     let (context, outputs) = frontend.0.async_pty(context.to_owned(), cmds.to_owned(), None, None)
         .await
         .map_err(|e| Error::AllocationFailed(format!("Failed to cancel allocation: {}", e)))?;
+    let cmds = cmds.into_iter().map(|c| c.0.to_owned()).collect::<Vec<_>>();
+    debug!("Cancel allocation procedure returned: \n{}", format_commands_outputs(&cmds, &outputs));    
+    debug!("Context after cancelling allocation: \nCwd: {}\nEnvs:\n    {}", 
+        context.cwd.0.to_str().unwrap(), 
+        format_env(&context.envs).replace("\n", "\n    ")
+    );
     // If the command failed we return an error
     misc::compact_outputs(outputs)
         .result()
