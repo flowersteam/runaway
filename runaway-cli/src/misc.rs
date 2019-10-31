@@ -7,7 +7,6 @@
 
 
 use dirs;
-use env_logger;
 use ctrlc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::os::unix::fs::PermissionsExt;
@@ -17,14 +16,37 @@ use liborchestra::{
 use liborchestra::hosts::{HostConf, HostHandle};
 use clap;
 use crate::exit::Exit;
+use crate::logger::EchoSubscriber;
 use liborchestra::primitives::{read_globs_from_file, list_local_folder, Glob};
 use liborchestra::commons::{EnvironmentStore, EnvironmentKey, EnvironmentValue};
 use liborchestra::scheduler::SchedulerHandle;
 use itertools::Itertools;
+use tracing::{self, info, error};
+use std::env;
+
+
+//------------------------------------------------------------------------------------------ STATICS
+
+
+lazy_static!{
+    pub static ref NO_COLORS: bool = env::var("NO_COLOR").is_ok();
+}
 
 
 //-------------------------------------------------------------------------------------------- MACRO
 
+
+/// This macro allows to format a text with ansi color sequence added to color the text.
+#[macro_export]
+macro_rules! color{
+    ($color:tt, $($arg:tt)*) => {
+        if *$crate::misc::NO_COLORS{
+            format!($($arg)*)
+        } else{
+            format!("\x1B[38;5;{}m{}\x1B[0m", $color, format_args!($($arg)*))
+        }
+    }
+}
 
 /// This macro allows to execute a `Result` expression. On error, it prints an error message to the 
 /// user, and returns an error code. On ok, it unwraps the value.
@@ -34,7 +56,7 @@ macro_rules! try_return_code {
         match $result{
             Ok(h) => h,
             Err(e) => {
-                eprintln!("runaway: {}: {}", $text, e);
+                error!("{}: {}", $text, e);
                 return $ecode;
             }
         };
@@ -49,7 +71,7 @@ macro_rules! to_exit {
         match $result{
             Ok(h) => Ok(h),
             Err(e) => {
-                eprintln!("runaway: {}", e);
+                error!("{}", e);
                 Err($exit)
             }
         };
@@ -156,7 +178,7 @@ pub fn install_ctrlc_handler(signal_host: Option<HostHandle>, signal_scheduler: 
     let signal_counter = AtomicUsize::new(0);
 
     ctrlc::set_handler(move || {
-        eprintln!("runaway: received ctrl-c.");
+        info!("Received ctrl-c.");
         let mut host = signal_host.clone();
         let mut sched = signal_scheduler.clone();
         let n_ctrlc = signal_counter.fetch_add(1, Ordering::SeqCst);
@@ -164,24 +186,24 @@ pub fn install_ctrlc_handler(signal_host: Option<HostHandle>, signal_scheduler: 
             0 => {
                 if let Some(sched) = sched.as_mut() {
                     futures::executor::block_on(sched.async_shutdown())
-                        .unwrap_or_else(|e| eprintln!("runaway: failed to shutdown scheduler: {}", e));
-                    eprintln!("runaway: scheduler shutdown.") 
+                        .unwrap_or_else(|e| error!("Failed to shutdown scheduler: {}", e));
+                    info!("Scheduler shutdown.") 
                 }
                 if let Some(host) = host.as_mut(){ 
                     futures::executor::block_on(host.async_abort())
-                        .unwrap_or_else(|e| eprintln!("runaway: failed to abort host: {}", e));
-                    eprintln!("runaway: host aborted. Waiting for running execution ... ");
+                        .unwrap_or_else(|e| error!("Failed to abort host: {}", e));
+                    info!("Host aborted. Waiting for running execution ... ");
                 }
             }
             1 => {
                 if let Some(host) = host.as_mut(){ 
                     futures::executor::block_on(host.async_shutdown())
-                        .unwrap_or_else(|e| eprintln!("Frunaway: failed to shutdown host: {}", e));
-                    eprintln!("runaway: shutting host down. Execution were not awaited. Saving execution data.");
+                        .unwrap_or_else(|e| error!("Failed to shutdown host: {}", e));
+                    info!("Shutting host down. Execution were not awaited. Saving execution data.");
                 }
             }
             2 => {
-                eprintln!("runaway: Data were not saved. Leaving.");
+                info!("Data were not saved. Leaving.");
                 std::process::exit(900);
             }
             _ => {
@@ -261,15 +283,12 @@ pub fn get_available_profiles() -> Vec<String>{
 /// Initializes the logger based on the matches 
 pub fn init_logger(matches: &clap::ArgMatches) {
 
-    if matches.is_present("vvverbose"){
-        std::env::set_var("RUST_LOG", "WARNING,runaway_cli=TRACE,liborchestra=TRACE,liborchestra::ssh=DEBUG");
-    } else if matches.is_present("vverbose"){
-        std::env::set_var("RUST_LOG", "WARNING,runaway_cli=DEBUG,liborchestra=DEBUG,liborchestra::ssh=INFO");
+    if matches.is_present("silent"){
     } else if matches.is_present("verbose"){
-        std::env::set_var("RUST_LOG", "WARNING,runaway_cli=INFO,liborchestra=INFO,liborchestra::ssh=INFO");
+        EchoSubscriber::setup_verbose();
+    } else {
+        EchoSubscriber::setup_normal();
     }
-
-    env_logger::init();
 }
 
 /// Returns the path to the host config file.

@@ -29,6 +29,7 @@ use url::Url;
 use uuid;
 use uuid::Uuid;
 use walkdir::WalkDir;
+use tracing::{error};
 
 
 //------------------------------------------------------------------------------------------- MODULE
@@ -103,19 +104,19 @@ impl fmt::Display for Error {
 
 impl From<io::Error> for Error {
     fn from(other: io::Error) -> Error {
-        return Error::Io(format!("{}", other));
+        Error::Io(format!("{}", other))
     }
 }
 
 impl From<git2::Error> for Error {
     fn from(other: git2::Error) -> Error {
-        return Error::Git(format!("{}", other));
+        Error::Git(format!("{}", other))
     }
 }
 
 impl From<Error> for crate::commons::Error {
     fn from(other: Error) -> crate::commons::Error {
-        return crate::commons::Error::Operation(format!("{}", other));
+        crate::commons::Error::Operation(format!("{}", other))
     }
 }
 
@@ -134,19 +135,14 @@ pub struct CampaignConf {
 impl CampaignConf {
     /// Reads campaign from file.
     pub fn from_file(conf_path: &path::PathBuf) -> Result<CampaignConf, crate::Error> {
-        debug!(
-            "Reading campaign configuration from file {}",
-            conf_path.to_str().unwrap()
-        );
         let file = fs::File::open(conf_path).map_err(|e| crate::Error::Io(e))?;
         let mut config: CampaignConf = serde_yaml::from_reader(file)?;
         config.path = Some(conf_path.parent().unwrap().to_path_buf().clone());
-        return Ok(config);
+        Ok(config)
     }
 
     /// Writes campaign to file.
     pub fn to_file(&self, path: &path::PathBuf) -> Result<(), crate::Error> {
-        debug!("Writing campaign configuration {} to file", self);
         let file = fs::File::create(path).map_err(|e| crate::Error::Io(e))?;
         let mut cmp = self.clone();
         cmp.path = None;
@@ -279,7 +275,6 @@ pub struct ExecutionConf {
 impl ExecutionConf {
     /// Writes execution to file.
     pub fn to_file(&self, conf_path: &path::PathBuf) -> Result<(), Error> {
-        debug!("Writing execution configuration {} to file", self);
         let file = fs::File::create(conf_path).map_err(|_| Error::WriteExecution)?;
         let mut conf = self.clone();
         conf.path = None;
@@ -289,12 +284,11 @@ impl ExecutionConf {
 
     /// Reads execution from file
     pub fn from_file(exc_path: &path::PathBuf) -> Result<ExecutionConf, Error> {
-        trace!("Loading Execution from {}", exc_path.to_str().unwrap());
         let file = fs::File::open(exc_path).map_err(|_| Error::ReadExecution)?;
         let mut config: ExecutionConf =
             serde_yaml::from_reader(file).map_err(|_| Error::ReadExecution)?;
         config.path = Some(exc_path.parent().unwrap().to_path_buf().clone());
-        return Ok(config);
+        Ok(config)
     }
 
     /// Returns the root path of the execution
@@ -359,7 +353,7 @@ impl ExecutionUpdate {
         if let Some(s) = self.execution_ending_date {
             conf.execution_ending_date = Some(s)
         }
-        return conf;
+        conf
     }
 }
 
@@ -385,59 +379,59 @@ impl ExecutionUpdateBuilder {
     /// Sets the state
     pub fn state(mut self, e: ExecutionState) -> Self {
         self.0.state = Some(e);
-        return self;
+        self
     }
     /// Sets the executor
     pub fn executor(mut self, e: String) -> Self {
         self.0.executor = Some(e);
-        return self;
+        self
     }
 
     /// Sets the execution stdout
     pub fn stdout(mut self, d: String) -> Self {
         self.0.execution_stdout = Some(d);
-        return self;
+        self
     }
 
     /// Sets the execution stderr
     pub fn stderr(mut self, d: String) -> Self {
         self.0.execution_stderr = Some(d);
-        return self;
+        self
     }
 
     /// Sets the execution message
     pub fn message(mut self, m: String) -> Self {
         self.0.execution_message = Some(m);
-        return self;
+        self
     }
 
     /// Sets the execution exit code
     pub fn exit_code(mut self, m: i32) -> Self {
         self.0.execution_exit_code = Some(m);
-        return self;
+        self
     }
 
     /// Sets the execution features
     pub fn features(mut self, m: Vec<f64>) -> Self {
         self.0.execution_features = Some(m);
-        return self;
+        self
     }
 
     /// Sets the beginning time
     pub fn beginning_date(mut self, m: DateTime<Utc>) -> Self {
         self.0.execution_beginning_date = Some(m);
-        return self;
+        self
     }
 
     /// Sets the end time
     pub fn ending_date(mut self, m: DateTime<Utc>) -> Self {
         self.0.execution_ending_date = Some(m);
-        return self;
+        self
     }
 
     /// Returns the execution update
     pub fn build(self) -> ExecutionUpdate {
-        return self.0;
+        self.0
     }
 }
 
@@ -455,7 +449,6 @@ impl Campaign {
     
     /// Opens a Campaign from a local path.
     fn from(conf: CampaignConf) -> Result<Campaign, Error> {
-        debug!("Campaign: Open campaign from conf {}", conf);
         let cache: HashMap<ExecutionId, ExecutionConf> = conf
             .get_executions_from_files()
             .iter()
@@ -473,11 +466,6 @@ impl Campaign {
 
     /// Opens a new repository at the local path, using the experiment repository url.
     pub fn new(local_path: &path::PathBuf, experiment_url: Url) -> Result<Campaign, Error> {
-        debug!(
-            "Campaign: Initializing campaign on experiment {} in {}",
-            experiment_url,
-            local_path.to_str().unwrap()
-        );
         fs::create_dir_all(local_path)?;
         git2::Repository::clone(experiment_url.as_str(), local_path.join(XPRP_RPATH))?;
         let campaign = CampaignConf {
@@ -487,12 +475,11 @@ impl Campaign {
         };
         fs::create_dir(campaign.get_executions_path())?;
         campaign.to_file(&local_path.join(CMPCONF_RPATH)).unwrap();
-        return Campaign::from(campaign);
+        Campaign::from(campaign)
     }
 
     /// Fetches the last experiment from its remote repository.
     async fn fetch_experiment(cmp: Arc<Mutex<Campaign>>) -> Result<CampaignConf, Error> {
-        debug!("Campaign: Fetch experiment");
         let experiment_repo = git2::Repository::open({cmp.lock().await.conf.get_experiment_path()}).unwrap();
         let mut remote = experiment_repo
             .find_remote("origin")
@@ -542,10 +529,10 @@ impl Campaign {
             {
                 let cmp = cmp.lock().await;
                 cmp.synchro.fetch_experiment_hook(&cmp.conf)?;
-                return Ok(cmp.conf.clone());
-            };
+                Ok(cmp.conf.clone())
+            }
         } else {
-            return Err(Error::NoFFPossible);
+            Err(Error::NoFFPossible)
         }
     }
 
@@ -556,7 +543,6 @@ impl Campaign {
         param: ExecutionParameters,
         tags: Vec<ExecutionTag>,
     ) -> Result<ExecutionConf, Error> {
-        debug!("Campaign: Creating Execution");
         let mut exc_conf = ExecutionConf {
             commit,
             execution_message: None,
@@ -626,7 +612,7 @@ impl Campaign {
                 .cache
                 .insert(exc_conf.identifier.clone(), exc_conf.clone())
         };
-        return Ok(exc_conf);
+        Ok(exc_conf)
     }
 
     /// Updates an execution.
@@ -635,7 +621,6 @@ impl Campaign {
         id: ExecutionId,
         upd: ExecutionUpdate,
     ) -> Result<ExecutionConf, Error> {
-        debug!("Campaign: Updating execution {}", id.0);
         let conf_path = 
         {
             cmp.lock()
@@ -665,7 +650,6 @@ impl Campaign {
 
     /// Finishes an execution.
     async fn finish_execution(cmp: Arc<Mutex<Campaign>>, id: ExecutionId) -> Result<ExecutionConf, Error> {
-        debug!("Campaign: Finishing Execution {}", id.0);
         let conf_path = 
         {
             cmp.lock()
@@ -712,7 +696,6 @@ impl Campaign {
 
     /// Deletes an execution.
     async fn delete_execution(cmp: Arc<Mutex<Campaign>>, id: ExecutionId) -> Result<(), Error> {
-        debug!("Campaign: Delete Execution {}", id.0);
         let conf_path = 
         {
             cmp.lock()
@@ -739,7 +722,6 @@ impl Campaign {
 
     /// Fetches possibly distant executions. Fetches executions or not depending on the synchronizer.
     async fn fetch_executions(cmp: Arc<Mutex<Campaign>>) -> Result<Vec<ExecutionConf>, Error> {
-        debug!("Campaign: Fetching Executions");
         let exc_path = {cmp.lock().await.conf.get_executions_path()};
         let before: HashSet<path::PathBuf> = fs::read_dir(exc_path.clone())
             .unwrap()
@@ -769,7 +751,6 @@ impl Campaign {
 
     /// Returns a list of the executions.
     async fn get_executions(cmp: Arc<Mutex<Campaign>>) -> Result<Vec<ExecutionConf>, Error> {
-        debug!("Campaign: Getting executions");
         let cmp = cmp.lock().await;
         Ok(cmp.cache.iter().map(|(_, conf)| conf.clone()).collect())
     }
@@ -813,19 +794,15 @@ impl CampaignHandle {
     /// This function spawns the thread that will handle all the repository operations using the
     /// CampaignResource, and returns a handle to it.
     pub fn spawn(camp_conf: CampaignConf) -> Result<CampaignHandle, Error> {
-        debug!("CampaignHandle: Start campaign thread");
         let campaign = Campaign::from(camp_conf)?;
         let (sender, receiver) = mpsc::unbounded();
         let handle = thread::Builder::new().name(format!("orch-campaign"))
         .spawn(move || {
-            trace!("Campaign Thread: Creating resource in thread");
             let res = Arc::new(Mutex::new(campaign));
-            trace!("Campaign Thread: Starting resource loop");
             let mut pool = executor::LocalPool::new();
             let mut spawner = pool.spawner();
             let handling_stream = receiver.for_each(
                 move |(sender, operation): (oneshot::Sender<OperationOutput>, OperationInput)| {
-                    trace!("Campaign Thread: received operation {:?}", operation);
                     match operation {
                         OperationInput::FetchExperiment => {
                             spawner.spawn_local(
@@ -913,9 +890,7 @@ impl CampaignHandle {
             spawner.spawn_local(handling_stream)
                 .map_err(|_| error!("Campaign Thread: Failed to spawn handling stream"))
                 .unwrap();
-            trace!("Campaign Thread: Starting local executor.");
             pool.run();
-            trace!("Campaign Thread: All futures executed. Leaving...");
         }).expect("Failed to spawn campaign thread.");
         let drop_sender = sender.clone();
         Ok(CampaignHandle {
@@ -932,15 +907,12 @@ impl CampaignHandle {
     /// Async method, returning a future that ultimately resolves in a campaign, after having
     /// fetched the origin changes on the experiment repository.
     pub fn async_fetch_experiment(&self) -> impl Future<Output=Result<CampaignConf,Error>> {
-        debug!("CampaignHandle: Building async_fetch_experiment future");
         let mut chan = self._sender.clone();
         async move {
             let (sender, receiver) = oneshot::channel();
-            trace!("CampaignHandle::async_fetch_experiment_future: Sending input");
             chan.send((sender, OperationInput::FetchExperiment))
                 .await
                 .map_err(|e| Error::Channel(e.to_string()))?;
-            trace!("CampaignHandle::async_fetch_experiement_future: Awaiting output");
             match receiver.await {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::FetchExperiment(res)) => res,
@@ -957,18 +929,15 @@ impl CampaignHandle {
         parameters: &ExecutionParameters,
         tags: Vec<&ExecutionTag>,
     ) -> impl Future<Output=Result<ExecutionConf, Error>> {
-        debug!("CampaignHandle: Building async_create_execution future");
         let mut chan = self._sender.clone();
         let commit = commit.to_owned();
         let parameters = parameters.to_owned();
         let tags = tags.into_iter().map(|a| a.to_owned()).collect::<Vec<ExecutionTag>>();
         async move {
             let (sender, receiver) = oneshot::channel();
-            trace!("CampaignHandle::async_create_execution_future: Sending input");
             chan.send((sender, OperationInput::CreateExecution(commit, parameters, tags)))
                 .await
                 .map_err(|e| Error::Channel(e.to_string()))?;
-            trace!("CampaignHandle::async_create_execution_future: Awaiting output");
             match receiver.await {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::CreateExecution(res)) => res,
@@ -984,17 +953,14 @@ impl CampaignHandle {
         id: &ExecutionId,
         upd: &ExecutionUpdate,
     ) -> impl Future<Output=Result<ExecutionConf, Error>>{
-        debug!("CampaignHandle: Building async_update_execution future");
         let mut chan = self._sender.clone();
         let id = id.to_owned();
         let upd = upd.to_owned();
         async move {
             let (sender, receiver) = oneshot::channel();
-            trace!("CampaignHandle::async_update_executio_future: Sending input");
             chan.send((sender, OperationInput::UpdateExecution(id, upd)))
                 .await
                 .map_err(|e| Error::Channel(e.to_string()))?;
-            trace!("CampaignHandle::async_update_execution_future: Awaiting output");
             match receiver.await {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::UpdateExecution(res)) => res,
@@ -1006,16 +972,13 @@ impl CampaignHandle {
     /// Async method, returning a future that ultimately resolves in an execution configuration
     /// after it was finished.
     pub fn async_finish_execution(&self, id: &ExecutionId) -> impl Future<Output=Result<ExecutionConf, Error>>{
-        debug!("CampaignHandle: Building async_finish_execution future");
         let mut chan = self._sender.clone();
         let id = id.to_owned();
         async move {
             let (sender, receiver) = oneshot::channel();
-            trace!("CampaignHandle::async_finish_execution_future: Sending input");
             chan.send((sender, OperationInput::FinishExecution(id)))
                 .await
                 .map_err(|e| Error::Channel(e.to_string()))?;
-            trace!("CampaignHandle::async_finish_execution_future: Awaiting output");
             match receiver.await {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::FinishExecution(res)) => res,
@@ -1027,16 +990,13 @@ impl CampaignHandle {
     /// Async method, returning a future that ultimately resolves in an empty type after it was
     /// finished.
     pub fn async_delete_execution(&self, id: &ExecutionId) -> impl Future<Output=Result<(), Error>> {
-        debug!("CampaignHandle: Building async_delete_execution future");
         let mut chan = self._sender.clone();
         let id = id.to_owned();
         async move {
             let (sender, receiver) = oneshot::channel();
-            trace!("CampaignHandle::async_delete_execution_future: Sending input");
             chan.send((sender, OperationInput::DeleteExecution(id)))
                 .await
                 .map_err(|e| Error::Channel(e.to_string()))?;
-            trace!("CampaignHandle::async_delete_execution_future: Awaiting output");
             match receiver.await {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::DeleteExecution(res)) => res,
@@ -1048,15 +1008,12 @@ impl CampaignHandle {
     /// Async method, returning a future that ultimately resolves in an execution configuration
     /// after it was finished.
     pub fn async_fetch_executions(&self) -> impl Future<Output=Result<Vec<ExecutionConf>, Error>> {
-        debug!("CampaignHandle: Building async_fetch_executions future");
         let mut chan = self._sender.clone();
         async move {
             let (sender, receiver) = oneshot::channel();
-            trace!("CampaignHandle::async_fetch_executions_future: Sending input");
             chan.send((sender, OperationInput::FetchExecutions))
                 .await
                 .map_err(|e| Error::Channel(e.to_string()))?;
-            trace!("CampaignHandle::async_fetch_executions_future: Awaiting output");
             match receiver.await {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::FetchExecutions(res)) => res,
@@ -1067,15 +1024,12 @@ impl CampaignHandle {
  
     /// Async method, returning a future that ultimately resolves in a vector of execution conf.
     pub fn async_get_executions(&self) -> impl Future<Output=Result<Vec<ExecutionConf>, Error>> {
-        debug!("CampaignHandle: Building async_get_executions future");
         let mut chan = self._sender.clone();
         async move {
             let (sender, receiver) = oneshot::channel();
-            trace!("CampaignHandle::async_get_executions_future: Sending input");
             chan.send((sender, OperationInput::GetExecutions))
                 .await
                 .map_err(|e| Error::Channel(e.to_string()))?;
-            trace!("CampaignHandle::async_get_executions_future: Awaiting output");
             match receiver.await {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::GetExecutions(res)) => res,
@@ -1096,11 +1050,6 @@ mod tests {
     use std::io::prelude::*;
     use std::time::Duration;
     use std::{fs, process};
-
-    fn init_logger() {
-        std::env::set_var("RUST_LOG", "liborchestra::repository=trace");
-        let _ = env_logger::builder().is_test(true).try_init();
-    }
 
     fn setup_expe_repo() {
         fs::create_dir_all("/tmp/expe_repo").unwrap();
@@ -1158,7 +1107,6 @@ mod tests {
 
     #[test]
     fn test_new_repository() {
-        init_logger();
         clean_expe_repo();
         clean_cmp_repo();
         setup_expe_repo();
@@ -1180,7 +1128,6 @@ mod tests {
 
     #[test]
     fn test_create_execution() {
-        init_logger();
         clean_expe_repo();
         clean_cmp_repo();
         setup_expe_repo();
@@ -1216,7 +1163,6 @@ mod tests {
 
     #[test]
     fn test_stress_create_execution() {
-        init_logger();
         clean_expe_repo();
         clean_cmp_repo();
         setup_expe_repo();

@@ -10,6 +10,8 @@
 use std::{process, path, fs, error, fmt};
 use regex;
 use super::CMPCONF_RPATH;
+use tracing::{self, warn, debug};
+use super::commons::OutputBuf;
 
 
 //------------------------------------------------------------------------------------------- ERRORS
@@ -48,7 +50,11 @@ macro_rules! async_sleep {
                 thread::sleep($dur);
                 tx.send(()).unwrap();
             });
-            rx.await.unwrap();
+            use tracing_futures::Instrument;
+            use tracing::trace_span;
+            rx.instrument(trace_span!("async_sleep!"))
+                .await
+                .unwrap();
 
         }
     };
@@ -60,6 +66,9 @@ macro_rules! async_sleep {
 macro_rules! await_wouldblock_io {
     ($expr:expr) => {
         {
+            use tracing::trace_span;
+            let span = trace_span!("await_wouldblock_io!");
+            let _guard = span.enter();
             loop{
                 match $expr {
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -78,6 +87,9 @@ macro_rules! await_wouldblock_io {
 macro_rules! await_wouldblock_ssh {
     ($expr:expr) => {
         {
+            use tracing::trace_span;
+            let span = trace_span!("await_wouldblock_ssh!");
+            let _guard = span.enter();
             loop{
                 match $expr {
                     Err(ref e) if e.code() == -37 => {
@@ -99,6 +111,9 @@ macro_rules! await_wouldblock_ssh {
 macro_rules! await_retry_n_ssh {
     ($expr:expr, $nb:expr, $($code:expr),*) => {
        {    
+            use tracing::trace_span;
+            let span = trace_span!("await_retry_n_ssh!");
+            let _guard = span.enter();
             let nb = $nb as usize;
             let mut i = 1 as usize;
             loop{
@@ -129,6 +144,9 @@ macro_rules! await_retry_n_ssh {
 macro_rules! await_retry_ssh {
     ($expr:expr, $($code:expr),*) => {
        {    
+            use tracing::trace_span;
+            let span = trace_span!("await_retry_n_ssh!");
+            let _guard = span.enter();
             loop{
                 match $expr {
                     Err(e)  => {
@@ -154,6 +172,9 @@ macro_rules! await_retry_ssh {
 macro_rules! await_retry_n {
     ($expr:expr, $nb:expr) => {
        {    
+            use tracing::trace_span;
+            let span = trace_span!("await_retry_n!");
+            let _guard = span.enter();
             let nb = $nb as usize;
             let mut i = 1 as usize;
             loop{
@@ -287,6 +308,16 @@ pub fn compact_outputs(outputs: Vec<Output>) -> Output{
                   acc
               })
 } 
+
+/// Formats commands and output properly
+pub fn format_commands_outputs(commands: &Vec<String>, outputs: &Vec<Output>) -> String{
+    commands.iter().zip(outputs.iter().map(|o| OutputBuf::from(o.to_owned())))
+        .fold(String::new(), |mut acc, (c, o)|{
+            acc.push_str(&format!("{:?} :\n    stdout: {:?}\n    stderr: {:?}\n    ecode: {}\n",
+                c, o.stdout, o.stderr, o.ecode));
+            acc
+        })
+}
 
 //-------------------------------------------------------------------------------------------- TESTS
 

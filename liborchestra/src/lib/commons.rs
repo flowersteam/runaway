@@ -17,9 +17,9 @@ use std::process::{Output};
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::marker::PhantomData;
 use std::os::unix::process::ExitStatusExt;
 use std::ffi::OsStr;
+use tracing::{self, trace, error, instrument};
 
 //------------------------------------------------------------------------------------------- ERRORS
 
@@ -82,22 +82,23 @@ impl Dropper {
 
     /// Downgrade a `Strong` dropper to a `Weak` dropper.
     pub fn downgrade(&mut self){
-        if let Dropper::Strong(r, s) = self{
+        if let Dropper::Strong(_, _) = self{
             *self = Dropper::Weak;
         }
     }
 }
 
 impl Drop for Dropper{
+    #[instrument(name="Dropper::drop", skip(self))]
     fn drop(&mut self) {
         match &self{
             Dropper::Weak => {},
-            Dropper::Strong(r, s) if Arc::strong_count(&r) == 1 => {
-                trace!("Dropper<{}>: Counter at 1. Joining...", s);
+            Dropper::Strong(r, _) if Arc::strong_count(&r) == 1 => {
+                trace!("Counter at 1. Joining...");
                 (r.lock().unwrap().take().unwrap())();
             }
-            Dropper::Strong(r, s) =>{
-                trace!("Dropper<{}>: Counter at {}. Dropping...", s, Arc::strong_count(&r))
+            Dropper::Strong(r, _) =>{
+                trace!("Counter at {}. Dropping...", Arc::strong_count(&r))
             }
         }
     }
@@ -177,15 +178,16 @@ impl<T> DropBack<T> where T:Clone+Send+Sync{
 }
 
 impl<T> Drop for DropBack<T> where T:Clone+Send+Sync{
+    #[instrument(name="DropBack::drop", skip(self))]
     fn drop(&mut self) {
-        trace!("DropBack: Dropping.");
+        trace!("Dropping.");
         if self.inner.is_some(){
-            trace!("DropBack: Still some data. Sending back.");
+            trace!("Still some data. Sending back.");
             if self.channel.unbounded_send(self.clone()).is_err(){
-                error!("DropBack: Failed to send the value back.")
+                error!("Failed to send the value back.")
             };
         } else {
-            trace!("DropBack: No more data. Disconnecting");
+            trace!("No more data. Disconnecting");
         }
     }
 }
@@ -243,7 +245,8 @@ impl AsResult for Output {
 //-------------------------------------------------------------------------------------------- TYPES
 
 /// Represents a command
-#[derive(Debug, Clone)]
+#[derive(Clone, Derivative)]
+#[derivative(Debug="transparent")]
 pub struct RawCommand<S: AsRef<str>>(pub S);
 impl<S: AsRef<str>> From<S> for RawCommand<S>{
     fn from(s: S) -> Self{
@@ -252,7 +255,8 @@ impl<S: AsRef<str>> From<S> for RawCommand<S>{
 }
 
 /// Represents an environment variable key
-#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+#[derive(PartialEq, Eq, Hash, Clone, Derivative)]
+#[derivative(Debug="transparent")]
 pub struct EnvironmentKey<S: AsRef<str>>(pub S);
 impl<S: AsRef<str>> AsRef<OsStr> for EnvironmentKey<S>{
     fn as_ref(&self) -> &OsStr {
@@ -261,7 +265,8 @@ impl<S: AsRef<str>> AsRef<OsStr> for EnvironmentKey<S>{
 }
 
 /// Represents an environment variable value
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Derivative, PartialEq, Eq)]
+#[derivative(Debug="transparent")]
 pub struct EnvironmentValue<S: AsRef<str>>(pub S);
 impl<S: AsRef<str>> AsRef<OsStr> for EnvironmentValue<S>{
     fn as_ref(&self) -> &OsStr {
@@ -280,9 +285,17 @@ pub fn substitute_environment(store: &EnvironmentStore, string: &str) -> String{
 pub fn push_env<K: AsRef<str>, V: AsRef<str>>(store: &mut EnvironmentStore, key: K, value: V){
     store.insert(EnvironmentKey(key.as_ref().to_owned()), EnvironmentValue(value.as_ref().to_owned()));
 }
+pub fn format_env(store: &EnvironmentStore) -> String {
+    store.iter()
+        .fold(String::new(), |mut acc, (EnvironmentKey(k), EnvironmentValue(v))| {
+            acc.push_str(&format!("{} = {}\n", k, v));
+            acc
+        })
+}
 
 /// Represents a Current Working Directory
-#[derive(Debug, Clone)]
+#[derive(Clone, Derivative)]
+#[derivative(Debug="transparent")]
 pub struct Cwd<P: AsRef<Path>>(pub P);
 
 /// Represents a classic terminal context made out of a cwd and some enrironment variables

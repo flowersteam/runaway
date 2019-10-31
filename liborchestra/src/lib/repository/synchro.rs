@@ -52,37 +52,30 @@ pub struct NullSynchronizer {}
 
 impl SyncRepository for NullSynchronizer {
     fn init_repository_hook(&self, _cmp: &CampaignConf) -> Result<(), Error> {
-        debug!("NullSynchronizer: Repository initialization hook called.");
         Ok(())
     }
 
     fn fetch_experiment_hook(&self, _cmp: &CampaignConf) -> Result<(), Error> {
-        debug!("NullSynchronizer: Fetch experiment hook called.");
         Ok(())
     }
 
     fn create_execution_hook(&self, _exc: &ExecutionConf) -> Result<(), Error> {
-        debug!("NullSynchronizer: Execution creation hook called.");
         Ok(())
     }
 
     fn update_execution_hook(&self, _exc: &ExecutionConf) -> Result<(), Error> {
-        debug!("NullSynchronizer: Execution update hook called.");
         Ok(())
     }
 
     fn delete_execution_hook(&self, _exc: &ExecutionConf) -> Result<(), Error> {
-        debug!("NullSynchronizer: Execution deletion hook called.");
         Ok(())
     }
 
     fn finish_execution_hook(&self, _exc: &ExecutionConf) -> Result<(), Error> {
-        debug!("NullSynchronizer: Execution finished hook called.");
         Ok(())
     }
 
     fn fetch_executions_hook(&self, _cmp: &CampaignConf) -> Result<(), Error> {
-        debug!("NullSynchronizer: Execution fetched hook called.");
         Ok(())
     }
 }

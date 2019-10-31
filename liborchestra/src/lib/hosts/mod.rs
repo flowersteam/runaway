@@ -31,12 +31,14 @@ use std::path::{PathBuf};
 use crate::misc;
 use crate::*;
 use std::ops::Deref;
-use crate::commons::{EnvironmentKey, EnvironmentValue, RawCommand, TerminalContext};
+use crate::commons::{EnvironmentKey, EnvironmentValue, RawCommand, TerminalContext, format_env};
+use crate::misc::{format_commands_outputs};
 use crate::SSH_CONFIG_RPATH;
 use std::sync::Arc;
 use futures::lock::Mutex;
 use futures::SinkExt;
-
+use tracing::{self, error, trace, instrument, trace_span, debug};
+use tracing_futures::Instrument;
 
 
 //------------------------------------------------------------------------------------------ MODULES
@@ -124,6 +126,8 @@ struct Frontend(ssh::RemoteHandle);
 struct NodeId(String);
 
 /// Represents a node.
+#[derive(Derivative)]
+#[derivative(Debug="transparent")]
 struct Node(ssh::RemoteHandle);
 
 /// Represents a handle id
@@ -146,10 +150,13 @@ struct GetHandlesProcedure(Vec<RawCommand<String>>);
 struct NodeProxycommand(String);
 
 /// Represents a context on the frontend node
-#[derive(Clone)]
+#[derive(Clone, Derivative)]
+#[derivative(Debug="transparent")]
 struct FrontendContext(TerminalContext<PathBuf>);
 
 /// Represents a context on the allocated node
+#[derive(Derivative)]
+#[derivative(Debug="transparent")]
 struct NodeContext(TerminalContext<PathBuf>);
 
 /// Represents a context on the allocated handle to a node
@@ -182,22 +189,33 @@ impl Deref for NodeHandle {
 /// + before_execution: Commands to execute before the execution
 /// + execution: Co,,ands to execute the script
 /// + after_execution: Commands to execute after the execution
-#[derive(Serialize, Deserialize, Debug, Hash, Clone)]
+#[derive(Serialize, Deserialize, Derivative, Hash, Clone)]
+#[derivative(Debug)]
 pub struct HostConf {
     pub name: String,
+    #[derivative(Debug="ignore")]
     pub ssh_configuration: String,
+    #[derivative(Debug="ignore")]
     pub node_proxycommand: String,
+    #[derivative(Debug="ignore")]
     pub start_allocation: Vec<String>,
+    #[derivative(Debug="ignore")]
     pub cancel_allocation: Vec<String>, 
+    #[derivative(Debug="ignore")]
     pub allocation_duration: usize, 
+    #[derivative(Debug="ignore")]
     pub get_node_handles: Vec<String>,
+    #[derivative(Debug="ignore")]
     pub directory: path::PathBuf, 
+    #[derivative(Debug="ignore")]
     pub execution: Vec<String>,
 }
 
 impl HostConf {
     /// Load an host configuration from a file.
+    #[instrument(name="HostConf::from_file")]
     pub fn from_file(host_path: &path::PathBuf) -> Result<HostConf, Error> {
+        trace!("Loading host conf");
         let file = fs::File::open(host_path).map_err(|_| {
             Error::ReadingHost(format!(
                 "Failed to open host configuration file {}",
@@ -214,7 +232,9 @@ impl HostConf {
     }
 
     /// Writes host configuration to a file.
+    #[instrument(name="HostConf::to_file")]
     pub fn to_file(&self, conf_path: &path::PathBuf) -> Result<(), Error> {
+        trace!("Saving host conf");
         let file = fs::File::create(conf_path).map_err(|_| {
             Error::WritingHost(format!(
                 "Failed to open host configuration file {}",
@@ -240,6 +260,8 @@ pub enum LeaveConfig {
 }
 
 impl<'a> From<&'a str> for LeaveConfig {
+
+    #[instrument(name="LeaveConfig::from")]
     fn from(conf: &str) -> LeaveConfig {
         match conf {
             "nothing" => LeaveConfig::Nothing,
@@ -263,17 +285,6 @@ impl Display for LeaveConfig{
 
 //--------------------------------------------------------------------------------------------- HOST
 
-
-// Enumeration for the messages in the channel.
-#[derive(Clone)] 
-enum ChannelMessages{
-    NoAllocationsMade,
-    Node(DropBack<Expire<RemoteHandle>>),
-    NoNodesLeft,
-    WaitForNodes,
-    Abort,
-    Shutdown
-}
 
 // This structure is the executor of an host configuration. It communicates with the host frontend 
 // and allows to perform the necessary operations to provide execution slots, i.e. connections to a 
@@ -310,18 +321,25 @@ enum ChannelMessages{
 //       starts a new one. 
 //     + After reallocation, the `chan` is replaced by a new channel whose nodes slots dropbacks 
 //       points to.
-
+#[derive(Derivative)]
+#[derivative(Debug)]
 struct Host {
     conf: HostConf,
+    #[derivative(Debug="ignore")]
     profile: ssh::config::SshProfile,
+    #[derivative(Debug="ignore")]
     provider:  provider::Provider,
+    #[derivative(Debug="ignore")]
     conn: Frontend,
+    #[derivative(Debug="ignore")]
     context: FrontendContext,
 }
 
 impl Host {
     // Builds a host from a configuration.
+    #[instrument(name="Host::from_conf")]
     fn from_conf(conf: HostConf) -> Result<Host, Error> {
+        trace!("Loading from conf");
         // We retrieve the ssh profile from the configuration
         let profile = ssh::config::get_profile(
             &dirs::home_dir().unwrap().join(SSH_CONFIG_RPATH),
@@ -330,7 +348,7 @@ impl Host {
 
         // We spawn the frontend remote
         let conn = ssh::RemoteHandle::spawn(profile.clone())?;
-        debug!("Host: Connection to frontend acquired: {:?}", conn);
+        trace!(?conn, "Connection to frontend acquired");
 
         // We generate the host
         let mut context = FrontendContext(TerminalContext::default());
@@ -346,7 +364,10 @@ impl Host {
     }
 
     // Starts an allocation
+    #[instrument(name="Host::start_alloc", skip(host))]
     async fn start_alloc(host: Arc<Mutex<Host>>) -> Result<(), Error> {
+
+        trace!("Starting allocation");
         // We lock the host. This prevent other futures to start an allocation in the same time.
         let mut host = host.lock().await;
 
@@ -354,15 +375,17 @@ impl Host {
         let start_alloc_proc = StartAllocationProcedure(
             host.conf.clone().start_allocation.clone().into_iter().map(Into::into).collect());
         let frontend_context = allocate_nodes(&host.conn, &host.context, &start_alloc_proc).await?;
+        trace!(context=?frontend_context, "Allocation returned context");
 
         // We update the host frontend context (needed to cancel allocation)
         host.context = frontend_context.clone();
 
         // We retrieve node ids from the terminal context
         let node_ids = extract_nodes(&frontend_context.0)?;
-        debug!("Host: Retrieved node ids: {:?}", node_ids);
+        trace!(?node_ids, "Retrieved nodes");
 
         // We spawn the nodes
+        trace!("Spawning nodes");
         let nodes = stream::iter(node_ids.clone())
             .then(|nid| spawn_node(nid, host.profile.clone(), NodeProxycommand(host.conf.node_proxycommand.clone())))
             // We can't directly collect as wanted hence the following.
@@ -370,16 +393,19 @@ impl Host {
             .await
             .into_iter()
             .collect::<Result<Vec<_>,Error>>()?;
+        trace!(?nodes, "Nodes received");
         
         // We generate node_contexts
+        trace!("Updating node contexts");
         let node_contexts = node_ids
             .iter()
             .zip(std::iter::repeat_with(||frontend_context.clone()))
             .map(|(id, context)| front_to_node_context(id, context))
             .collect::<Vec<_>>();
-
+        trace!(?node_contexts, "Contexts generated");
 
         // We generate handles
+        trace!("Getting handles");
         let get_handles_proc = GetHandlesProcedure(
             host.conf.get_node_handles.clone().into_iter().map(Into::into).collect());
         let handles = stream::iter(nodes)
@@ -395,9 +421,11 @@ impl Host {
             .flatten()
             .map(|(Handle(remote), HandleContext(context))| NodeHandle{remote, context})
             .collect();
+        trace!(?handles, "Handles generated");
 
         // We push nodes to the provider
         let expiration = Utc::now() + chrono::Duration::minutes(host.conf.allocation_duration as i64);
+        trace!(?expiration, "Setting experiration");
         host.provider.push(handles, expiration).await
             .map_err(|e| Error::AllocationFailed(format!("Failed to push nodes: {}", e)))?;
 
@@ -405,17 +433,21 @@ impl Host {
     }
 
     // Cancel the current allocation
+    #[instrument(name="Host::cancel_alloc", skip(host))]
     async fn cancel_alloc(host: Arc<Mutex<Host>>) -> Result<(), Error> {
+        trace!("Cancelling allocation");
 
         // We lock the host. This prevent another future to cancel the allocation in the same time. 
         let mut host = host.lock().await;
 
         // We cancel allocation
+        trace!("Cancelling allocation");
         let cancel_alloc_procedure = CancelAllocationProcedure(
             host.conf.cancel_allocation.clone().into_iter().map(Into::into).collect());
         let frontend_context = cancel_allocation(&host.conn, 
                                                  &host.context, 
                                                  &cancel_alloc_procedure).await?;
+        trace!(?frontend_context, "Context retrieved");
 
         // We update the host
         host.context = frontend_context;
@@ -424,12 +456,15 @@ impl Host {
     }
 
     // Acquire a node 
+    #[instrument(name="Host::acquire_node", skip(host))]
     async fn acquire_node(host: Arc<Mutex<Host>>) -> Result<DropBack<Expire<NodeHandle>>, Error>{
+        debug!("Acquiring node");
         loop{
             let maybe_node = {
                 let provider = &mut host.lock().await.provider;
                 provider.pull().await
             };
+            trace!(?maybe_node);
             match maybe_node{
                 Ok(node) => return Ok(node),
                 Err(provider::Error::New) => {
@@ -444,10 +479,10 @@ impl Host {
         }
     }
 
-    // Allows to trigger abort. Every node acquisition will return an error after that.
+    #[instrument(name="Host::abort", skip(host))]    // Allows to trigger abort. Every node acquisition will return an error after that.
     async fn abort(host: Arc<Mutex<Host>>) -> Result<(), Error>{
+        debug!("Aborting host");
         let conf = {host.lock().await.conf.clone()};
-        debug!("Host: Aborting on {} ...", conf.name);
         let mut host = host.lock().await;
         host.provider.shutdown().await;
         Ok(())
@@ -455,7 +490,9 @@ impl Host {
 
     // Allows to trigger shutdown. Every node acquisition will return an error after that, and 
     // allocation is cancelled right away. 
+    #[instrument(name="Host::shutdown", skip(host))]
     async fn shutdown(host: Arc<Mutex<Host>>) -> Result<(), Error>{
+        debug!("Shutting host down");
         {
             let mut host = host.lock().await;
             host.provider.shutdown().await;
@@ -465,14 +502,16 @@ impl Host {
     }
 
     /// Allows to drop the remote correctly 
+    #[instrument(name="Host::drop", skip(host))]
     async fn drop(host: Arc<Mutex<Host>>){
+        trace!("Dropping host");
         {
             let mut host = host.lock().await;
             host.provider.shutdown().await;
             host.provider.collect().await;
         }
         if let Err(e) = Host::cancel_alloc(host.clone()).await{
-                error!("Host: Failed to cancel allocation on drop: {}", e);
+                error!("Failed to cancel allocation on drop: {}", e);
         }
     }
 }
@@ -510,13 +549,18 @@ impl HostHandle {
         let (sender, receiver) = mpsc::unbounded();
         let handle = thread::Builder::new().name(format!("orch-host-{}", host_conf.name))
         .spawn(move || {
+            let span = trace_span!("Host::Thread");
+            let _guard = span.enter();
+            let stream_span = trace_span!("Handling_Stream", ?host);
             let res = Arc::new(Mutex::new(host));
             let reres = res.clone();
             let mut pool = executor::LocalPool::new();
             let mut spawner = pool.spawner();
             let handling_stream = receiver.for_each(
                 move |(sender, operation): (oneshot::Sender<OperationOutput>, OperationInput)| {
-                    trace!("Host Thread: received operation {:?}", operation);
+                    let span = stream_span.clone();
+                    let _guard = span.enter();
+                    trace!(?operation, "Received operation");
                     match operation {
                         OperationInput::AcquireNode => {
                             spawner.spawn_local(
@@ -527,6 +571,7 @@ impl HostHandle {
                                             send an operation output: \n{:?}", e))
                                             .unwrap();
                                     })
+                                    .instrument(span.clone())
                             )
                         }
                         OperationInput::Abort => {
@@ -538,6 +583,7 @@ impl HostHandle {
                                             send an operation output: \n{:?}", e))
                                             .unwrap();
                                     })
+                                    .instrument(span.clone())
                             )
                         }
                         OperationInput::Shutdown => {
@@ -549,9 +595,10 @@ impl HostHandle {
                                             send an operation output: \n{:?}", e))
                                             .unwrap();
                                     })
+                                    .instrument(span.clone())
                             )
                         }
-                    }.map_err(|e| error!("Host Thread: Failed to spawn the operation: \n{:?}", e))
+                    }.map_err(|e| error!(error=?e, "Failed to spawn the operation"))
                     .unwrap();
                     future::ready(())
                 }
@@ -560,13 +607,13 @@ impl HostHandle {
             spawner.spawn_local(handling_stream)
                 .map_err(|_| error!("Host Thread: Failed to spawn handling stream"))
                 .unwrap();
-            trace!("Host Thread: Starting local executor.");
+            trace!("Starting local executor.");
             pool.run();
             spawner.spawn_local(Host::drop(reres))
-                .map_err(|_| error!("Host Thread: Failed to spawn cleaning future"))
+                .map_err(|_| error!("Failed to spawn cleaning future"))
                 .unwrap();
             pool.run();
-            trace!("Host Thread: All futures processed. Leaving...");
+            trace!("All futures processed. Leaving...");
         }).expect("Failed to spawn host thread.");
         let drop_sender = sender.clone();
         Ok(HostHandle {
@@ -586,82 +633,84 @@ impl HostHandle {
     /// Async method, returning a future that ultimately resolves in a campaign, after having
     /// fetched the origin changes on the experiment repository.
     pub fn async_acquire(&self) -> impl Future<Output=Result<DropBack<Expire<NodeHandle>>,Error>> {
-        debug!("HostHandle: Building async_acquire_node future");
         let mut chan = self._sender.clone();
         async move {
             let (sender, receiver) = oneshot::channel();
-            trace!("HostHandle::async_acquire_future: Sending input");
+            trace!("Sending acquire node input");
             chan.send((sender, OperationInput::AcquireNode))
                 .await
                 .map_err(|e| Error::Channel(e.to_string()))?;
-            trace!("HostHandle::async_acquire_future: Awaiting output");
+            trace!("Awaiting acquire node output");
             match receiver.await {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::AcquireNode(res)) => res,
                 Ok(e) => Err(Error::OperationFetch(format!("Expected AcquireNode, found {:?}", e)))
             }
-        }
+        }.instrument(trace_span!("Host::async_acquire"))
     }
 
     /// Async method, returning a future that ultimately resolves after the abortion was started.
     pub fn async_abort(&self) -> impl Future<Output=Result<(),Error>> {
-        debug!("HostHandle: Building async_abort future");
         let mut chan = self._sender.clone();
         async move {
             let (sender, receiver) = oneshot::channel();
-            trace!("HostHandle::async_abort_future: Sending input");
+            trace!("Sending async abort input");
             chan.send((sender, OperationInput::Abort))
                 .await
                 .map_err(|e| Error::Channel(e.to_string()))?;
-            trace!("HostHandle::async_abort_future: Awaiting output");
+            trace!("Awaiting async abort output");
             match receiver.await {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::Abort(res)) => res,
                 Ok(e) => Err(Error::OperationFetch(format!("Expected Abort, found {:?}", e)))
             }
-        }
+        }.instrument(trace_span!("Host::async_abort"))
     }
 
     /// Async method, returning a future that ultimately resolves after the shutdown was started.
     pub fn async_shutdown(&self) -> impl Future<Output=Result<(),Error>> {
-        debug!("HostHandle: Building async_shutdown future");
         let mut chan = self._sender.clone();
         async move {
             let (sender, receiver) = oneshot::channel();
-            trace!("HostHandle::async_shutdown_future: Sending input");
+            trace!("Sending async shutdown input");
             chan.send((sender, OperationInput::Shutdown))
                 .await
                 .map_err(|e| Error::Channel(e.to_string()))?;
-            trace!("HostHandle::async_shutdown_future: Awaiting output");
+            trace!("Awaiting async shutdown output");
             match receiver.await {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::Shutdown(res)) => res,
                 Ok(e) => Err(Error::OperationFetch(format!("Expected Shutdown, found {:?}", e)))
             }
-        }
+        }.instrument(trace_span!("Host::async_shutdown"))
     }
 
     /// Returns the directory that contains the executions.
+    #[inline]
     pub fn get_host_directory(&self) -> path::PathBuf {
         self._conf.directory.clone()
     }
 
     /// Returns the name of the host.
+    #[inline]
     pub fn get_name(&self) -> String {
         self._conf.name.clone()
     }
 
     /// Returns the execution strings
+    #[inline]
     pub fn get_execution_procedure(&self) -> Vec<RawCommand<String>>{
         self._conf.execution.iter().map(Into::into).map(ToOwned::to_owned).map(RawCommand).collect()
     }
 
     /// Returns a handle to the frontend connection. 
+    #[inline]
     pub fn get_frontend(&self) -> RemoteHandle{
         self._conn.clone()
     }
 
     /// Downgrades the handle, meaning that the resource could be dropped before this guy.
+    #[inline]
     pub fn downgrade(&mut self) {
         self._dropper.downgrade();
     }
@@ -685,32 +734,39 @@ impl Display for HostHandle{
 
 
 /// Allows to allocate nodes on the host. This 
+#[instrument(name="allocate_node", skip(frontend, context, start_alloc))]
 async fn allocate_nodes(frontend: &Frontend,
                         context: &FrontendContext, 
                         start_alloc: &StartAllocationProcedure) 
                         -> Result<FrontendContext, Error>{
+    debug!("Allocating nodes");
     // We retrieve the commands
     let StartAllocationProcedure(cmds) = start_alloc;
     let FrontendContext(context) = context;
+    debug!("Context before allocation: \nCwd: {}\nEnvs:\n    {}", 
+        context.cwd.0.to_str().unwrap(), 
+        format_env(&context.envs).replace("\n", "\n    ")
+    );
     // We start the allocation by executing the start alloc command
     let (context, outputs) = frontend.0.async_pty(context.to_owned(), cmds.to_owned(), None, None)
         .await
         .map_err(|e| Error::AllocationFailed(format!("Failed to allocate: {}", e)))?;
-    let output_len = outputs.len();
-    // We eventually print the 
-    debug!("Host: Allocation procedure returned:"); 
-    outputs.iter()
-        .zip(cmds)
-        .for_each(|(o, c)| debug!("   {} => {:?}", c.0, o));
+    let cmds = cmds.into_iter().map(|c| c.0.to_owned()).collect::<Vec<_>>();
+    debug!("Allocation procedure returned: \n{}", format_commands_outputs(&cmds, &outputs));    
+    debug!("Context after allocation: \nCwd: {}\nEnvs:\n    {}", 
+        context.cwd.0.to_str().unwrap(), 
+        format_env(&context.envs).replace("\n", "\n    ")
+    );
     // If the allocation failed we return an error
     misc::compact_outputs(outputs)
         .result()
-        .map_err(|e| Error::AllocationFailed(format!("Failed to allocate on command {:?}: {}", cmds.get(output_len-1).unwrap().0, e)))?;
+        .map_err(|e| Error::AllocationFailed(format!("Failed to allocate on command")))?;
     // We return the Allocation context
     Ok(FrontendContext(context))
 }
 
 // Extracts node ids from terminal context
+#[instrument(name="extract_nodes", skip(context))]
 fn extract_nodes(context: &TerminalContext<PathBuf>) -> Result<Vec<NodeId>, Error>{
     context
         // We search the nodes string in environment variables
@@ -725,6 +781,7 @@ fn extract_nodes(context: &TerminalContext<PathBuf>) -> Result<Vec<NodeId>, Erro
 }
 
 /// Turns a frontend context to a node context
+#[instrument(name="front_to_node_context", skip(node, context))]
 fn front_to_node_context(node: &NodeId, context: FrontendContext) -> NodeContext {
     let FrontendContext(mut context) = context;
     let NodeId(node) = node;
@@ -733,10 +790,12 @@ fn front_to_node_context(node: &NodeId, context: FrontendContext) -> NodeContext
 }
 
 /// Allows to spawn the nodes.
+#[instrument(name="spawn_node", skip(frontend_profile, proxycommand))]
 async fn spawn_node(node: NodeId,
                     frontend_profile: ssh::config::SshProfile, 
                     proxycommand: NodeProxycommand) 
                      -> Result<Node, Error>{
+        trace!("Spawning node");
         // We retrieve the important bits
         let NodeProxycommand(pcmd) = proxycommand;
         let NodeId(node) = node;
@@ -756,18 +815,30 @@ async fn spawn_node(node: NodeId,
 }
 
 // This function allows to query the handles
+#[instrument(name="spawn_handles", skip(get_handles_proc, context))]
 async fn spawn_handles(node: Node, 
                        get_handles_proc: GetHandlesProcedure,
                        context: NodeContext) 
                      -> Result<Vec<(Handle, HandleContext)>, Error>{
+    debug!("Querying node handles");
     // We retrieve the important bits
     let Node(node) = node;
     let GetHandlesProcedure(cmds) = get_handles_proc;
     let NodeContext(context) = context;
-    // We perform the commands
+    debug!("Context before handles query: \nCwd: {}\nEnvs:\n    {}", 
+        context.cwd.0.to_str().unwrap(), 
+        format_env(&context.envs).replace("\n", "\n    ")
+    );
+    // We query the handles
     let (output_context, outputs) = node.async_pty(context.to_owned(), cmds.to_owned(), None, None)
             .await
             .map_err(|e| Error::AllocationFailed(format!("Failed to get handles: {}", e)))?;
+    let cmds = cmds.into_iter().map(|c| c.0.to_owned()).collect::<Vec<_>>();
+    debug!("Handles query procedure returned: \n{}", format_commands_outputs(&cmds, &outputs));    
+    debug!("Context after handles query: \nCwd: {}\nEnvs:\n    {}", 
+        output_context.cwd.0.to_str().unwrap(), 
+        format_env(&output_context.envs).replace("\n", "\n    ")
+    );
     // If the commands failed we return an error
     misc::compact_outputs(outputs)
         .result()
@@ -784,6 +855,7 @@ async fn spawn_handles(node: Node,
 }
 
 // Extracts handle ids from terminal context
+#[instrument(name="extract_handles", skip(context))]
 fn extract_handles(context: &TerminalContext<PathBuf>) -> Result<Vec<HandleId>, Error>{
     context
         // We search the nodes string in environment variables
@@ -798,6 +870,7 @@ fn extract_handles(context: &TerminalContext<PathBuf>) -> Result<Vec<HandleId>, 
 }
 
 /// Turns a frontend context to a node context
+#[instrument(name="node_to_handle_context", skip(handle, context))]
 fn node_to_handle_context(handle: &HandleId, context: NodeContext) -> HandleContext {
     let NodeContext(mut context) = context;
     let HandleId(handle) = handle;
@@ -805,19 +878,30 @@ fn node_to_handle_context(handle: &HandleId, context: NodeContext) -> HandleCont
     HandleContext(context)
 }
 
-
 /// Allows to cancel allocation on the host.
+#[instrument(name="cancel_allocation", skip(frontend, context, cancel_alloc))]
 async fn cancel_allocation(frontend: &Frontend, 
                            context: &FrontendContext,
                            cancel_alloc: &CancelAllocationProcedure) 
                         -> Result<FrontendContext, Error>{
+    debug!("Cancelling allocation");
     // We retrieve the commands
     let CancelAllocationProcedure(cmds) = cancel_alloc;
     let FrontendContext(context) = context;
+    debug!("Context after cancelling allocation: \nCwd: {}\nEnvs:\n    {}", 
+        context.cwd.0.to_str().unwrap(), 
+        format_env(&context.envs).replace("\n", "\n    ")
+    );
     // We cancel the allocation by executing the cancel alloc command
     let (context, outputs) = frontend.0.async_pty(context.to_owned(), cmds.to_owned(), None, None)
         .await
         .map_err(|e| Error::AllocationFailed(format!("Failed to cancel allocation: {}", e)))?;
+    let cmds = cmds.into_iter().map(|c| c.0.to_owned()).collect::<Vec<_>>();
+    debug!("Cancel allocation procedure returned: \n{}", format_commands_outputs(&cmds, &outputs));    
+    debug!("Context after cancelling allocation: \nCwd: {}\nEnvs:\n    {}", 
+        context.cwd.0.to_str().unwrap(), 
+        format_env(&context.envs).replace("\n", "\n    ")
+    );
     // If the command failed we return an error
     misc::compact_outputs(outputs)
         .result()
@@ -834,13 +918,23 @@ async fn cancel_allocation(frontend: &Frontend,
 mod test {
 
     use super::*;
-    use env_logger;
+    use crate::misc;
+    use futures::executor::block_on;
+    use tracing_subscriber::fmt::Subscriber;
+    use tracing::Level;
 
-    fn init() {
-        
-        std::env::set_var("RUST_LOG", "liborchestra::host=trace,liborchestra::ssh=debug");
-        let _ = env_logger::builder().is_test(true).try_init();
+    fn init(){
+        let subscriber = Subscriber::builder()
+            //.compact()
+            .with_max_level(Level::TRACE)
+            .with_env_filter("liborchestra::host=trace")
+            .without_time()
+            .with_target(false)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).unwrap();
     }
+
+
 
     #[test]
     fn test_host_conf() {
@@ -861,7 +955,6 @@ mod test {
 
     #[test]
     fn test_host_conf_from_file() {
-        init();
         let config = HostConf::from_file(&path::PathBuf::from("/tmp/test_host.yml"));
         eprintln!("config = {:#?}", config);
     }
@@ -885,11 +978,7 @@ mod test {
     #[test]
     // To test this, please add localhost2 in your /etc/hosts
     fn test_host_handles_envs() {
-        use futures::executor::block_on;
-        use std::thread;
-        use std::time::Duration;
-
-        //init();
+        init();
 
         let conf = HostConf {
             name: "localhost".to_owned(),
@@ -965,18 +1054,15 @@ mod test {
     }
 
     use std::io::Read;
+    use futures::executor;
+    use futures::task::SpawnExt;
+
 
     #[test]
     fn test_stress_host_resource() {
 
-        use futures::executor;
-        use futures::task::SpawnExt;
-        use std::thread;
-        use std::time::Duration;
-        use std::ops::Deref;
-
         init();
-
+        
         std::fs::remove_file("/tmp/alloc_test");
         std::fs::remove_file("/tmp/cancel_test");
 

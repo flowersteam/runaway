@@ -7,7 +7,7 @@
 //------------------------------------------------------------------------------------------ IMPORTS
 
 
-use crate::{ssh, repository, misc, primitives, commons};
+use crate::{ssh, repository, misc, commons};
 use std::{io, error, fmt};
 use regex;
 //use git2;

@@ -12,18 +12,20 @@
 use crate::commons::{DropBack, Expire};
 use futures::Future;
 use std::{error, fmt};
-use futures::executor::block_on;
+use futures::stream::{self, StreamExt};
+use futures::channel::mpsc::unbounded;
 use futures::future;
 use futures::Stream;
-use futures::stream::{self, StreamExt};
-use futures::channel::mpsc:: unbounded;
 use std::fmt::Debug;
 use std::pin::Pin;
-use chrono::{DateTime, Utc};
-use futures::sink::SinkExt;
 use super::NodeHandle;
+use chrono::{DateTime, Utc};
 use std::sync::Arc;
+use futures::sink::SinkExt;
 use futures::lock::Mutex;
+use tracing::{self, error, trace, instrument, trace_span};
+use tracing_futures::Instrument;
+
 
 //------------------------------------------------------------------------------------------- ERRORS
 
@@ -92,7 +94,9 @@ pub struct Provider(Arc<Mutex<Pin<Box<dyn stream::Stream<Item=ProviderMsg>+Send>
 impl Provider{
 
     /// Creates a new provider
+    #[instrument(name="Provider::new")]
     pub fn new() -> Provider{
+        trace!("Creating new provider");
         // At first, we want the queue to output Error::Empty to every pull, to signal to the user 
         // that some handles should be pushed in. So we set the inner stream to repeat this message.
         Provider(Arc::new(Mutex::new(Box::pin(stream::repeat(ProviderMsg::New)))))
@@ -110,31 +114,46 @@ impl Provider{
                 };
                 match next{
                     // The provider is new. We forward that to the user to push its first nodes
-                    Some(ProviderMsg::New) => return Err(Error::New),
+                    Some(ProviderMsg::New) => {
+                        trace!("Encountered a new message. Provider must be filled.");
+                        return Err(Error::New)
+                    }
                     // There is no messages left, and we forward that to the user as an error.
-                    Some(ProviderMsg::Empty) => return Err(Error::Empty),
+                    Some(ProviderMsg::Empty) => {
+                        trace!("Encountered an empty message. Provider must be filled");
+                        return Err(Error::Empty)
+                    }
                     // A handle was received on the stream. We check if it has not expired yet.
                     Some(ProviderMsg::Handle(n)) => {
+                        trace!("Encountered a handle message");
                         if n.is_expired(){
-                            trace!("Provider: Consuming");
+                            trace!("Handle expired. Consuming...");
                             n.consume();
                         } else {
+                            trace!("Returning handle");
                             return Ok(n)
                         }
                     }
                     // This means that the provider is getting closed. We consume the node and 
                     // forward that to the user.
                     Some(ProviderMsg::ToConsume(n)) => {
+                        trace!("Encountered a to-consume message. Consuming");
                         n.consume(); 
                         return Err(Error::Closed)
-                    },
+                    }
                     // The provider is closed.
-                    Some(ProviderMsg::Closed) => return Err(Error::Closed),
+                    Some(ProviderMsg::Closed) => {
+                        trace!("Encountered a closed message.");
+                        return Err(Error::Closed)
+                    }
                     // Something went very wrong
-                    None => return Err(Error::Unhandled("Channel closed ...".to_string()))
+                    None => {
+                        error!("None encountered in provider");
+                        return Err(Error::Unhandled("Channel closed ...".to_string()))
+                    }
                 }
             }
-        }
+        }.instrument(trace_span!("Provider::pull"))
     }
 
     /// Pushes a set of new handles into the queue
@@ -148,7 +167,10 @@ impl Provider{
             };
             match next {
                 Some(ProviderMsg::Empty) |Some(ProviderMsg::New) => {}
-                a => return Err(Error::UnexpectedMessage(format!("{:?}", a)))
+                a => {
+                    error!("Encountered in wrong state while pushing");
+                    return Err(Error::UnexpectedMessage(format!("{:?}", a)))
+                }
             }
             // To allow the nodes to be sent back to the provider at drop time, we use a channel as 
             // queue for the inner stream.
@@ -160,6 +182,7 @@ impl Provider{
             let mut handles_stream = stream::iter(handles);
             // and we send all the handles in the channel. We put them in the queue if you see the 
             // channel as an awaitable fifo queue.
+            trace!("Pushing handles to channel");
             tx.send_all(&mut handles_stream).await
                 .map_err(|e| Error::Unhandled(format!("Failed to send nodes: {}", e)))?;
             // We replace the inner stream by this channel, followed by a stream repeating that the 
@@ -172,10 +195,11 @@ impl Provider{
                 rx.map(ProviderMsg::Handle)
                     .chain(stream::repeat(ProviderMsg::Empty)));
             {
+                trace!("Changing stream");
                 *self.0.lock().await = new_stream;
             }
             Ok(())
-        }
+        }.instrument(trace_span!("Provider::push"))
     }
 
     /// Closes the provider, preventing it from issuing any more handles.
@@ -183,12 +207,14 @@ impl Provider{
         let inner = self.0.clone();
         async move{
             // We capture the inner stream which may yield some more handles.
+            trace!("Getting current stream");
             let mut remaining: Pin<Box<(dyn Stream<Item = ProviderMsg> + Send + 'static)>>
                 = Box::pin(stream::once(future::ready(ProviderMsg::Closed)));
             std::mem::swap(&mut *inner.lock().await, &mut remaining);
             // We replace the inner stream by a new one which transforms Handle messages to ToConsume 
             // messages (allowing handles to be consumed), and Empty messages to Closing messages. 
             // This way, every new issued message will signal to users that the provider is closed.
+            trace!("Mutating stream");
             let remaining = Box::pin(
                 remaining.map(|m| {
                     match m{
@@ -200,7 +226,7 @@ impl Provider{
             {
                 *self.0.lock().await = remaining;
             }
-        }
+        }.instrument(trace_span!("Provider::shutdown"))
     }
 
     /// Collects handles to be consumed and return afterward. Should be called after shutdown was 
@@ -208,32 +234,25 @@ impl Provider{
     pub fn collect(&mut self) -> impl Future<Output=()>+'_{
         let inner = self.0.clone();
         async move {
+            let span = trace_span!("Provider::collect");
+            let _guard = span.enter();
             let mut chan = inner.lock().await;
+            trace!("Collecting remaining handles");
             loop{
                 // We consume the ToConsume messages and return when Closed is encountered.
                 match chan.next().await{
-                    Some(ProviderMsg::ToConsume(h)) => {h.consume();},
-                    Some(ProviderMsg::Closed) => break,
+                    Some(ProviderMsg::ToConsume(h)) => {
+                        trace!("Encountered a to-consume message. Consuming");
+                        h.consume();
+                    }
+                    Some(ProviderMsg::Closed) => {
+                        trace!("All handles consumed");
+                        break
+                    }
                     m => panic!("Wrong message encountered when collecting handles: {:?}", m)
                 }
             }
-        }
+        }.instrument(trace_span!("Provider::collect"))
 
-    }
-}
-
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn init() {
-        
-        std::env::set_var("RUST_LOG", "liborchestra::hosts=trace");
-        let _ = env_logger::builder().is_test(true).try_init();
-    }
-
-    #[test]
-    fn test_lexer() {
     }
 }

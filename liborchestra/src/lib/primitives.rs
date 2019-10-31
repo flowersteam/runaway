@@ -7,7 +7,7 @@
 //------------------------------------------------------------------------------------------ IMPORTS
 
 
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
 use std::fs;
 use sha1::{Sha1, Digest};
 use crate::commons::{AsResult, RawCommand};
@@ -15,6 +15,9 @@ use crate::ssh::RemoteHandle;
 use globset;
 use std::io::Read;
 use std::fmt;
+use tracing::{self, error, trace, warn, instrument, trace_span};
+use tracing_futures::Instrument;
+
 
 
 //-------------------------------------------------------------------------------------------- TYPES
@@ -45,6 +48,7 @@ impl fmt::Display for Sha1Hash{
 
 
 /// Reads globs specs from a file
+#[instrument]
 pub fn read_globs_from_file(file: &PathBuf) -> Result<Vec<Glob<String>>, String>{
 
     // We read the file
@@ -63,6 +67,7 @@ pub fn read_globs_from_file(file: &PathBuf) -> Result<Vec<Glob<String>>, String>
 
 /// List a local folder. Returns paths to every files relative to the root. Ignore globs can be 
 /// along with include_globs, which supersede the ignore globs.
+#[instrument]
 pub fn list_local_folder(root: &PathBuf, 
                          ignore_globs: &Vec<Glob<String>>, 
                          include_globs: &Vec<Glob<String>>)
@@ -103,6 +108,7 @@ pub fn list_local_folder(root: &PathBuf,
 
 
 /// Compress a set of local files into a local tar archive.
+#[instrument]
 pub fn tar_local_files(root: &PathBuf, 
                        files: &Vec<PathBuf>, 
                        output: &PathBuf)
@@ -134,6 +140,7 @@ pub fn tar_local_files(root: &PathBuf,
 }
 
 /// Computes the sha1 hash of a local file.
+#[instrument]
 pub fn compute_local_sha1(file: &PathBuf) -> Result<Sha1Hash, String>{
 
     // We read the file
@@ -147,6 +154,7 @@ pub fn compute_local_sha1(file: &PathBuf) -> Result<Sha1Hash, String>{
 
 
 // Uncompresses a tar achive into a set of files.
+#[instrument]
 pub fn untar_local_archive(archive: &PathBuf, root: &PathBuf) -> Result<Vec<PathBuf>, String> {
 
     // We open the archive and unpacks it
@@ -168,6 +176,7 @@ pub fn untar_local_archive(archive: &PathBuf, root: &PathBuf) -> Result<Vec<Path
 } 
 
 // Moves a local file to a remote file.
+#[instrument]
 pub async fn send_local_file(from: &PathBuf, to: &PathBuf, node: &RemoteHandle)-> Result<(),String>{
 
     // We check if file already exists on the remote end
@@ -188,6 +197,7 @@ pub async fn send_local_file(from: &PathBuf, to: &PathBuf, node: &RemoteHandle)-
 }
 
 // Fetches a remote file 
+#[instrument]
 pub async fn fetch_remote_file(from: &PathBuf, to: &PathBuf, node: &RemoteHandle) -> Result<(),String>{
 
     // We check if file already exists
@@ -204,6 +214,7 @@ pub async fn fetch_remote_file(from: &PathBuf, to: &PathBuf, node: &RemoteHandle
 
 
 //  Lists the files in a remote folder.
+#[instrument]
 pub async fn list_remote_folder(root: &PathBuf, 
                                 ignore_globs: &Vec<Glob<String>>, 
                                 include_globs: &Vec<Glob<String>>,
@@ -244,6 +255,7 @@ pub async fn list_remote_folder(root: &PathBuf,
 
 
 /// Compress a set of remote files into a local tar archive.
+#[instrument]
 pub async fn tar_remote_files (root: &PathBuf, 
                                files: &Vec<PathBuf>, 
                                output: &PathBuf,
@@ -273,6 +285,7 @@ pub async fn tar_remote_files (root: &PathBuf,
 }
 
 /// Compress a set of remote files into a local tar archive.
+#[instrument]
 pub async fn compute_remote_sha1(file: &PathBuf, node: &RemoteHandle)
         -> Result<Sha1Hash, String>{
 
@@ -293,6 +306,7 @@ pub async fn compute_remote_sha1(file: &PathBuf, node: &RemoteHandle)
 
 
 // Uncompresses a tar achive into a set of files.
+#[instrument]
 pub async fn untar_remote_archive(archive: &PathBuf, root: &PathBuf, node: &RemoteHandle)
         -> Result<Vec<PathBuf>, String> {
 
@@ -312,6 +326,7 @@ pub async fn untar_remote_archive(archive: &PathBuf, root: &PathBuf, node: &Remo
 }
 
 // Checks whether a file exists or not.
+#[instrument]
 pub async fn remote_file_exists(file: &PathBuf, node: &RemoteHandle) -> Result<bool, String> {
 
     let command = RawCommand(format!("test -f {}", 
@@ -326,6 +341,7 @@ pub async fn remote_file_exists(file: &PathBuf, node: &RemoteHandle) -> Result<b
 
 
 // Checks whether a file exists or not.
+#[instrument]
 pub async fn remote_folder_exists(folder: &PathBuf, node: &RemoteHandle) -> Result<bool, String> {
 
     let command = RawCommand(format!("test -d {}", 
@@ -340,6 +356,7 @@ pub async fn remote_folder_exists(folder: &PathBuf, node: &RemoteHandle) -> Resu
 
 
 // Removes a set of files
+#[instrument]
 pub async fn remove_remote_files(files: Vec<PathBuf>, node: &RemoteHandle) -> Result<(), String> {
 
     let command = RawCommand(files.iter()
@@ -354,6 +371,7 @@ pub async fn remove_remote_files(files: Vec<PathBuf>, node: &RemoteHandle) -> Re
 
 
 // Removes a set of files
+#[instrument]
 pub async fn remove_remote_folder(folder: PathBuf, node: &RemoteHandle) -> Result<(), String> {
 
     let command = RawCommand(format!("rm -rf {}", folder.to_str().unwrap()));
@@ -366,6 +384,7 @@ pub async fn remove_remote_folder(folder: PathBuf, node: &RemoteHandle) -> Resul
 }
 
 // Creates a folder
+#[instrument]
 pub async fn create_remote_folder(folder: &PathBuf, node: &RemoteHandle) -> Result<(), String> {
 
     let command = RawCommand(format!("mkdir {}", folder.to_str().unwrap()));
@@ -388,8 +407,6 @@ mod tests {
     use super::*;
     use shells::wrap_sh;
     use futures::executor::block_on;
-    use std::collections::BTreeSet;
-    use std::iter::FromIterator;
     use crate::ssh::{config::SshProfile, RemoteHandle};
     
     #[test]
