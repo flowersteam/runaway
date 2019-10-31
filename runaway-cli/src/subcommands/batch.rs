@@ -59,7 +59,7 @@ pub fn batch(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
     info!("Loading host");
     let host = misc::get_host(matches.value_of("REMOTE").unwrap())?;
     push_env(&mut store, "RUNAWAY_REMOTE", host.get_name());
-    debug!("Host {:?} loaded", host);
+    debug!("Host {} loaded", host);
 
     // We install ctrl-c handler
     misc::install_ctrlc_handler(Some(host.clone()), None);
@@ -467,7 +467,6 @@ async fn perform_on_node(store: EnvironmentStore,
                                 Exit::ReadRemoteFolder)?;
     debug!("Files to be fetched from remote: {}", files_to_fetch.iter()
             .fold(String::new(), |mut acc, s| {acc.push_str(&format!("\n{}", s.to_str().unwrap())); acc}));
-
 
 
     // We pack data to fetch
