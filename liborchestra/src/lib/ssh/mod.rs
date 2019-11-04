@@ -54,8 +54,10 @@ use crate::commons::{
     TerminalContext
 };
 use crate::*;
-use tracing::{self, error, trace, warn, instrument, trace_span};
+use tracing::{self, error, trace, debug, warn, instrument, trace_span};
 use tracing_futures::Instrument;
+use std::os::unix::process::CommandExt;
+use libc::{signal, SIGINT, SIG_IGN};
 
 
 //------------------------------------------------------------------------------------------  MODULE
@@ -309,17 +311,26 @@ impl ProxyCommandForwarder {
 
 
         trace!("Spawning proxy command");
-        let mut command = Command::new(cmd)
-            .args(&args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .map_err(|e| Error::ProxyCommandStartup(format!("failed to start command: {}", e)))?;
+        let mut command = unsafe{ 
+            Command::new(cmd)
+                .args(&args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                // This allows to make sure the proxycommand ignores Ctrl-C. The opposite would 
+                // prevent the program to cleanup properly.
+                .pre_exec(||{
+                    signal(SIGINT, SIG_IGN);
+                    Ok(())
+                })
+                .spawn()
+                .map_err(|e| Error::ProxyCommandStartup(format!("failed to start command: {}", e)))
+        }?;
+        debug!("ProxyCommand started with pid {}", command.id());
 
 
         trace!("Spawning proxy command forwarding thread");
-        let handle = std::thread::spawn(move || {
-            
+        let handle = std::thread::Builder::new().name("proxycommand".into()).spawn(move || {
+
             let span = trace_span!("ProxyCommandForwarder::InitThread", command=c1.as_str());
             let _guard = span.enter();
             let (socket, _) = stream.accept().unwrap();
@@ -364,7 +375,7 @@ impl ProxyCommandForwarder {
                 };
             });
             (h1, h2)
-        });
+        }).unwrap();
 
         trace!("Returning proxy command");
         Ok((ProxyCommandForwarder {
