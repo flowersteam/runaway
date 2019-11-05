@@ -369,10 +369,6 @@ impl SchedulerHandle {
                 .map_err(|e| Error::Spawn(format!("{}", e)))?
             }
         )?;
-        let sched = Scheduler::from_child(
-            command.spawn()
-                .map_err(|e| Error::Spawn(format!("{}", e)))?
-            )?;
         // We create the channel that will be used to transmit operations from the outer logic (when 
         // the user call one of the async api methods) to the inner handling thread.
         let (sender, receiver) = mpsc::unbounded();
