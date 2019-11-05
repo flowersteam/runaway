@@ -37,7 +37,6 @@ tracing-attributes = "0.1.5"
 tracing-futures = {version = "0.1.0", features=["futures-preview"]}
 derivative = "1.0.3"
 
-
 [lib]
 name="liborchestra"
 path="src/lib/mod.rs"

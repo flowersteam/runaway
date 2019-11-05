@@ -53,7 +53,12 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
 
     // We setup some parameters
     info!("Reading arguments");
-    let leave = LeaveConfig::from(matches.value_of("leave").unwrap());
+    let leave;
+    if matches.is_present("on-local"){
+        leave = LeaveConfig::Everything;
+    } else{
+        leave = LeaveConfig::from(matches.value_of("leave").unwrap());
+    }
     push_env(&mut store, "RUNAWAY_LEAVE", format!("{}", leave));
     debug!("Leave option set to {}", leave);
     let parameters = matches.value_of("ARGUMENTS").unwrap_or("").to_owned();
@@ -72,12 +77,15 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
 
     // We list files to send
     info!("Reading ignore files");
-    let (mut send_ignore_globs, fetch_ignore_globs) = misc::get_send_fetch_ignores_globs(&local_folder, 
+    let (mut send_ignore_globs, mut fetch_ignore_globs) = misc::get_send_fetch_ignores_globs(&local_folder, 
         matches.value_of("send-ignore").unwrap(),
         matches.value_of("fetch-ignore").unwrap())?;
     send_ignore_globs.push(primitives::Glob(format!("**/{}", SEND_ARCH_RPATH)));
     send_ignore_globs.push(primitives::Glob(matches.value_of("send-ignore").unwrap().into()));
     send_ignore_globs.push(primitives::Glob(matches.value_of("fetch-ignore").unwrap().into()));
+    if matches.is_present("on-local"){
+        fetch_ignore_globs = vec!(primitives::Glob("*".into()));
+    }
     debug!("Sendignore globs set to {}", send_ignore_globs.iter()
         .fold(String::new(), |mut acc, s| {acc.push_str(&format!("\n{}", s.0)); acc}));
     debug!("Fetchignore globs set to {}", fetch_ignore_globs.iter()
@@ -158,10 +166,15 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
 
 
         // We substitute the remote folder and create it if needed
-        let remote_folder= PathBuf::from(
-            substitute_environment(&store, 
-                                   matches.value_of("remote-folder").unwrap())
-            );
+        let remote_folder;
+        if matches.is_present("on-local"){
+            let remote_path = PathBuf::from(
+                substitute_environment(&store, matches.value_of("output-folder").unwrap()));
+            remote_folder =  to_exit!(remote_path.canonicalize(), Exit::OutputFolder)?;
+        } else {
+            remote_folder = PathBuf::from(
+                substitute_environment(&store, matches.value_of("remote-folder").unwrap()));
+        }
         debug!("Remote folder set to {}", remote_folder.to_str().unwrap());
         if remote_send_archive.is_relative(){return Err(Exit::WrongRemoteFolderString)}
         let remote_folder_exists = to_exit!(primitives::remote_folder_exists(&remote_folder, &node).await,
@@ -240,7 +253,7 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
 
         // We pack data to fetch
         info!("Compressing data to be fetched");
-        let remote_fetch_archive = remote_folder.join(FETCH_ARCH_RPATH);
+        let remote_fetch_archive = remote_folder.join(".to_fetch.tar");
         let remote_fetch_hash = to_exit!(primitives::tar_remote_files(&remote_folder,
                                                                      &files_to_fetch,
                                                                      &remote_fetch_archive,
@@ -250,8 +263,13 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
 
 
         // We fetch data back
-        let local_output_string = substitute_environment(&execution_context.envs, matches.value_of("output-folder").unwrap());
-        let local_output_folder = to_exit!(PathBuf::from(local_output_string).canonicalize(), Exit::OutputFolder)?;
+        let local_output_folder;
+        if matches.is_present("on-local"){
+            local_output_folder = remote_folder.clone();
+        } else{
+            let local_output_string = substitute_environment(&execution_context.envs, matches.value_of("output-folder").unwrap());
+            local_output_folder = to_exit!(PathBuf::from(local_output_string).canonicalize(), Exit::OutputFolder)?;
+        }
         debug!("Local output folder set to: {}", local_output_folder.to_str().unwrap());
         if !local_output_folder.exists(){
             debug!("Creating output folder");
