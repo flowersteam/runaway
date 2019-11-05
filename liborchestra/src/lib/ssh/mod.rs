@@ -346,10 +346,18 @@ impl ProxyCommandForwarder {
                 let span = trace_span!("ProxyCommandForwarder::StdoutThread", command=c2.as_str());
                 let _guard = span.enter();  
                 while kf1.load(Ordering::Relaxed) {
-                    if std::io::copy(&mut command_stdout, &mut socket1).is_err(){
-                        break
-                    } else{
-                        socket1.flush().unwrap()
+                    match std::io::copy(&mut command_stdout, &mut socket1){
+                        Err(e) => {
+                            error!("stdout forwarding failed");
+                            break
+                        }
+                        Ok(0) => {
+                            error!("stdout forwarding returned prematurely");
+                            break
+                        }
+                        Ok(_) => {
+                            socket1.flush().unwrap()
+                        }
                     }
                 }
                 match socket1.shutdown(Shutdown::Write){
@@ -363,10 +371,17 @@ impl ProxyCommandForwarder {
                 let span = trace_span!( "ProxyCommandForwarder::StderrThread", command=c3.as_str());
                 let _guard = span.enter();  
                 while kf2.load(Ordering::Relaxed) {
-                    if std::io::copy(&mut socket2, &mut command_stdin).is_err(){
-                        break
-                    } else {
-                        command_stdin.flush().unwrap();
+                    match std::io::copy(&mut socket2, &mut command_stdin){
+                        Err(e) => {
+                            error!("stdin forwarding failed");
+                            break
+                        }
+                        Ok(0) => {
+                            break
+                        }
+                        Ok(_) => {
+                            command_stdin.flush().unwrap()
+                        }
                     }
                 }
                 match socket2.shutdown(Shutdown::Read){
