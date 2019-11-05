@@ -63,7 +63,12 @@ pub fn sched(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
 
     // We setup a few variables that will be used afterward.
     info!("Reading arguments");
-    let leave = LeaveConfig::from(matches.value_of("leave").unwrap());
+    let leave;
+    if matches.is_present("on-local"){
+        leave = LeaveConfig::Everything;
+    } else{
+        leave = LeaveConfig::from(matches.value_of("leave").unwrap());
+    }
     push_env(&mut store, "RUNAWAY_LEAVE", format!("{}", leave));
     debug!("Leave option set to {}", leave);
     let script = PathBuf::from(matches.value_of("SCRIPT").unwrap());
@@ -85,7 +90,7 @@ pub fn sched(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
 
     // We generate globs for file sending and fetching
     info!("Reading ignore files");
-    let (mut send_ignore_globs, fetch_ignore_globs) = misc::get_send_fetch_ignores_globs(
+    let (mut send_ignore_globs, mut fetch_ignore_globs) = misc::get_send_fetch_ignores_globs(
         &local_folder,
         matches.value_of("send-ignore").unwrap(),
         matches.value_of("fetch-ignore").unwrap()
@@ -93,6 +98,9 @@ pub fn sched(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
     send_ignore_globs.push(primitives::Glob(format!("**/{}", SEND_ARCH_RPATH)));
     send_ignore_globs.push(primitives::Glob(matches.value_of("send-ignore").unwrap().into()));
     send_ignore_globs.push(primitives::Glob(matches.value_of("fetch-ignore").unwrap().into()));
+    if matches.is_present("on-local"){
+        fetch_ignore_globs = vec!(primitives::Glob("*".into()));
+    }
     debug!("Sendignore globs set to {}", send_ignore_globs.iter()
         .fold(String::new(), |mut acc, s| {acc.push_str(&format!("\n{}", s.0)); acc}));
     debug!("Fetchignore globs set to {}", fetch_ignore_globs.iter()
@@ -214,7 +222,8 @@ pub fn sched(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
                 &outputs_template,
                 &leave,
                 &fetch_ignore_globs,
-                &fetch_include_globs
+                &fetch_include_globs,
+                matches.is_present("on-local"),
             ).await?;
             let ret = unpacks_fetch_post_proc(&matches, local_fetch_archive, store.clone(), remote_fetch_hash, execution_code);
             if let Some(EnvironmentValue(features)) = store.get(&EnvironmentKey("RUNAWAY_FEATURES".into())) {
@@ -270,6 +279,15 @@ pub fn sched(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
 
 //------------------------------------------------------------------------------------------ HELPERS
 
+
+// Returns the absolute path if it is not absolute
+fn absolutize(p: PathBuf) -> PathBuf{
+    if p.is_absolute(){
+        p
+    } else{
+        std::env::current_dir().unwrap().join(p)
+    }
+}
 
 // This type allows to return an iterator that owns a piece of data. I don't know how to write the 
 // next function without that, as the boxed iterator would reference to content read from the file 
@@ -355,6 +373,7 @@ async fn perform_on_node(store: EnvironmentStore,
                          leave: &LeaveConfig,
                          fetch_ignore_globs: &Vec<Glob<String>>,
                          fetch_include_globs: &Vec<Glob<String>>,
+                         on_local: bool
                          ) -> Result<(PathBuf, EnvironmentStore, Sha1Hash, i32), Exit>{
 
 
@@ -369,7 +388,13 @@ async fn perform_on_node(store: EnvironmentStore,
 
 
     // We generate the remote folder and unpack data into it
-    let remote_folder= PathBuf::from(substitute_environment(&store, remote_folder_pattern));
+    let remote_folder;
+    if on_local{
+        let remote_path = PathBuf::from(substitute_environment(&store, output_folder_pattern));
+        remote_folder = absolutize(remote_path);
+    } else {
+        remote_folder = PathBuf::from(substitute_environment(&store, remote_folder_pattern));
+    }
     push_env(&mut store, "RUNAWAY_PWD", remote_folder.to_str().unwrap());
     let (remote_files_before, _) = unpacks_send_on_node(
         &remote_folder, 
@@ -419,7 +444,7 @@ async fn perform_on_node(store: EnvironmentStore,
 
     // We pack data to fetch
     debug!("Compressing data to be fetched");
-    let remote_fetch_archive = remote_folder.join(FETCH_ARCH_RPATH);
+    let remote_fetch_archive = remote_folder.join(".to_fetch.tar");
     let remote_fetch_hash = to_exit!(primitives::tar_remote_files(&remote_folder,
                                                                  &files_to_fetch,
                                                                  &remote_fetch_archive,
@@ -429,8 +454,14 @@ async fn perform_on_node(store: EnvironmentStore,
 
 
     // We generate output folder
-    let local_output_string = substitute_environment(&execution_context.envs, output_folder_pattern);
-    let local_output_folder = PathBuf::from(local_output_string);
+    let local_output_folder;
+    if on_local{
+        local_output_folder = remote_folder.clone();
+    } else {
+        let local_output_string = substitute_environment(&execution_context.envs, output_folder_pattern);
+        local_output_folder = to_exit!(PathBuf::from(local_output_string).canonicalize(), Exit::OutputFolder)?;
+    }     
+
     debug!("Local output folder set to: {}", local_output_folder.to_str().unwrap());
     if !local_output_folder.exists(){
         debug!("Creating output folder");
