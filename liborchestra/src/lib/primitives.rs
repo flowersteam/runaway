@@ -263,12 +263,17 @@ pub async fn tar_remote_files (root: &PathBuf,
                               -> Result<Sha1Hash, String>{
     
     // We create the files string
-    let files_string = files.iter()
+    let files_string;
+    if files.is_empty(){
+        files_string = format!("--files-from /dev/null");
+    } else {
+        files_string = files.iter()
         .fold(String::new(), |mut s, path| {
             s.push_str(path.to_str().unwrap());
             s.push(' ');
             s
         });
+    }
     // We create the archive
     let command = RawCommand(format!("cd {} && tar -cvf {} {}", 
         root.to_str().unwrap(), 
