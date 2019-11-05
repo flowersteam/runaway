@@ -135,7 +135,7 @@ rw_run() {
             break;
         fi;
     done<$stdout_fifo;
-    )&
+    )& disown
     stdout_pid=$!
 
     # We start the same subcommand for the stderr.
@@ -150,7 +150,7 @@ rw_run() {
             break;
         fi;
     done<$stderr_fifo;
-    )&
+    )& disown
     stderr_pid=$!
 
     # Now we are ready to evaluate the command. The stdout and stderr are forwarded to the right 
