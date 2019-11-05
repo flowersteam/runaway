@@ -34,6 +34,9 @@ use serde_json;
 use std::os::unix::process::ExitStatusExt;
 use tracing::{self, error, trace, instrument, trace_span};
 use tracing_futures::Instrument;
+use std::os::unix::process::CommandExt;
+use libc::{signal, SIGINT, SIG_IGN};
+use std::process::Stdio;
 
 
 //----------------------------------------------------------------------------------------- MESSAGES
@@ -353,6 +356,19 @@ impl SchedulerHandle {
         trace!("Start scheduler thread");
         // We create the scheduler resource. This one will be transferred into a separate thread.
         let mut command = command;
+        let sched = Scheduler::from_child(
+            unsafe{ 
+                // This allows to make sure the proxycommand ignores Ctrl-C. The opposite would 
+                // prevent the program to cleanup properly.
+                command.pre_exec(||{
+                    signal(SIGINT, SIG_IGN);
+                    Ok(())
+                })
+                .stderr(Stdio::inherit())
+                .spawn()
+                .map_err(|e| Error::Spawn(format!("{}", e)))?
+            }
+        )?;
         let sched = Scheduler::from_child(
             command.spawn()
                 .map_err(|e| Error::Spawn(format!("{}", e)))?

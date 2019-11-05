@@ -482,7 +482,6 @@ impl Host {
     #[instrument(name="Host::abort", skip(host))]    // Allows to trigger abort. Every node acquisition will return an error after that.
     async fn abort(host: Arc<Mutex<Host>>) -> Result<(), Error>{
         debug!("Aborting host");
-        let conf = {host.lock().await.conf.clone()};
         let mut host = host.lock().await;
         host.provider.shutdown().await;
         Ok(())
@@ -547,7 +546,7 @@ impl HostHandle {
         let host = Host::from_conf(host_conf.clone())?;
         let conn = host.conn.clone();
         let (sender, receiver) = mpsc::unbounded();
-        let handle = thread::Builder::new().name(format!("orch-host-{}", host_conf.name))
+        let handle = thread::Builder::new().name("host".into())
         .spawn(move || {
             let span = trace_span!("Host::Thread");
             let _guard = span.enter();
