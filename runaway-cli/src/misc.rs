@@ -32,7 +32,6 @@ lazy_static!{
     pub static ref NO_COLORS: bool = env::var("NO_COLOR").is_ok();
 }
 
-
 //-------------------------------------------------------------------------------------------- MACRO
 
 
