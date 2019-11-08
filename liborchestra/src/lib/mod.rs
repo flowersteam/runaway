@@ -275,11 +275,14 @@ extern crate ssh2;
 extern crate dirs;
 extern crate libc;
 extern crate chrono;
+extern crate arrayvec;
 
 #[macro_use]
 extern crate serde_derive;
 #[macro_use]
 extern crate derivative;
+#[macro_use]
+extern crate lazy_static;
 
 
 //------------------------------------------------------------------------------------------ MODULES
@@ -291,6 +294,7 @@ pub mod repository;
 pub mod primitives;
 pub mod scheduler;
 pub mod commons;
+pub mod timer;
 
 #[macro_use]
 pub mod error;

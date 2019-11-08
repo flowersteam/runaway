@@ -12,6 +12,14 @@ use regex;
 use super::CMPCONF_RPATH;
 use tracing::{self, warn, debug};
 use super::commons::OutputBuf;
+use super::timer::TimerHandle;
+
+
+//------------------------------------------------------------------------------------------- STATIC
+
+lazy_static! {
+    pub static ref TIMER: TimerHandle = TimerHandle::spawn().expect("Failed to spawn timer.");
+}
 
 
 //------------------------------------------------------------------------------------------- ERRORS
@@ -45,17 +53,8 @@ impl fmt::Display for Error {
 macro_rules! async_sleep {
     ($dur: expr) => {
         {
-            let (tx, rx) = oneshot::channel();
-            thread::spawn(move || {
-                thread::sleep($dur);
-                tx.send(()).unwrap();
-            });
-            use tracing_futures::Instrument;
-            use tracing::trace_span;
-            rx.instrument(trace_span!("async_sleep!"))
-                .await
-                .unwrap();
-
+            use crate::misc::TIMER;
+            (*TIMER).async_sleep($dur).await.unwrap();
         }
     };
 }
@@ -72,7 +71,7 @@ macro_rules! await_wouldblock_io {
             loop{
                 match $expr {
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        async_sleep!(std::time::Duration::from_nanos(1))
+                        async_sleep!(std::time::Duration::from_millis(2))
                     }
                     res => break res,
                 }
@@ -93,10 +92,10 @@ macro_rules! await_wouldblock_ssh {
             loop{
                 match $expr {
                     Err(ref e) if e.code() == -37 => {
-                        async_sleep!(std::time::Duration::from_nanos(1))
+                        async_sleep!(std::time::Duration::from_millis(2))
                     }
                     Err(ref e) if e.code() == -21 => {
-                        async_sleep!(std::time::Duration::from_nanos(1))
+                        async_sleep!(std::time::Duration::from_millis(2))
                     }
                     res => break res,
                 }
@@ -124,7 +123,7 @@ macro_rules! await_retry_n_ssh {
                         }
                         $(
                             else if e.code() == $code as i32 {
-                                async_sleep!(std::time::Duration::from_nanos(1));
+                                async_sleep!(std::time::Duration::from_millis(2));
                                 i += 1;
                             }
                         )*
@@ -151,7 +150,7 @@ macro_rules! await_retry_ssh {
                 match $expr {
                     Err(e)  => {
                         $(  if e.code() == $code as i32 {
-                                async_sleep!(std::time::Duration::from_nanos(1));
+                                async_sleep!(std::time::Duration::from_millis(2));
                             } else  )*
                         {
                             break Err(e)
@@ -184,7 +183,7 @@ macro_rules! await_retry_n {
                             break Err(e)
                         }
                         else{
-                            async_sleep!(std::time::Duration::from_nanos(1));
+                            async_sleep!(std::time::Duration::from_millis(2));
                             i += 1;
                         }
                     }
