@@ -56,6 +56,7 @@ pub enum Exit {
     RecordFeatures,
     SchedulerCrashed,
     SchedulerShutdown,
+    InstallCompletion,
 }
 
 impl std::fmt::Display for Exit {
@@ -112,6 +113,7 @@ impl std::fmt::Display for Exit {
             Exit::RecordFeatures => write!(f, "failed to record features"),
             Exit::SchedulerCrashed => write!(f, "scheduler crashed"),
             Exit::SchedulerShutdown => write!(f, "scheduler was shutdown"),
+            Exit::InstallCompletion => write!(f, "failed to install completion")
             }
     }
 }
@@ -167,6 +169,7 @@ impl From<Exit> for i32 {
             Exit::RecordFeatures => 9945,
             Exit::SchedulerCrashed => 9946,
             Exit::SchedulerShutdown => 9947,
+            Exit::InstallCompletion => 9948,
         }
     }
 }

@@ -16,3 +16,6 @@ pub use batch::batch;
 
 mod sched;
 pub use sched::sched;
+
+mod complete;
+pub use complete::install_completion;

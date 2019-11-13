@@ -292,20 +292,7 @@ fn main(){
             .arg(clap::Arg::with_name("stop-on-fail")
                 .long("stop-on-fail")
                 .help(""))
-        )
-        .subcommand(clap::SubCommand::with_name("test")
-            .about("Tests a remote profile")
-            .arg(clap::Arg::with_name("verbose")
-                .short("V")
-                .long("verbose")
-                .help("Print more messages"))
-            .arg(clap::Arg::with_name("silent")
-                .long("silent")
-                .help("Print no messages from runaway"))
-            .arg(clap::Arg::with_name("FILE")
-                .help("The yaml profile to test.")
-                .index(1)
-                .required(true)));
+        );
 
     // If the completion_file already exists, we update it to account for the new available profiles
     match misc::which_shell(){
@@ -325,14 +312,12 @@ fn main(){
 
     // We dispatch to subcommands and exit;
     let output;
-    if let Some(_) = matches.subcommand_matches("test"){
-        output = Ok(Exit::AllGood);
-    } else if let Some(matches) = matches.subcommand_matches("exec"){
+    if let Some(matches) = matches.subcommand_matches("exec"){
         output = subcommands::exec(matches.clone());
     } else if let Some(matches) = matches.subcommand_matches("batch"){
         output = subcommands::batch(matches.clone());
     } else if let Some(_) = matches.subcommand_matches("install-completion"){
-        output = Ok(Exit::AllGood);
+        output = subcommands::install_completion(application);
     } else if let Some(matches) = matches.subcommand_matches("sched"){
         output = subcommands::sched(matches.clone());
     } else {
