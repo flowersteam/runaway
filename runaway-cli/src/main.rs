@@ -8,6 +8,7 @@
 
 //------------------------------------------------------------------------------------------ IMPORTS
 
+extern crate openssl_probe;
 
 #[macro_use]
 extern crate lazy_static;
@@ -39,6 +40,9 @@ const DESC: &str = "Execute code on remote hosts.";
 
 // The application entrypoint.
 fn main(){
+
+    // We get openssl certificates
+    openssl_probe::init_ssl_cert_env_vars();
 
     // We get available profiles
     let profiles = misc::get_available_profiles();
