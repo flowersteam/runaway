@@ -10,6 +10,7 @@
 use liborchestra::PROFILES_FOLDER_RPATH;
 use clap;
 use crate::exit::Exit;
+use crate::misc;
 use std::io::Write;
 use tracing::{self, error, info};
 use std::os::unix::fs::PermissionsExt;
@@ -20,6 +21,9 @@ use std::os::unix::fs::PermissionsExt;
 
 // Output completion for profiles.
 pub fn install_completion(application: clap::App) -> Result<Exit, Exit>{
+    // We initialize the logger
+    let matches = application.clone().get_matches();
+    misc::init_logger(&matches);
     match which_shell(){
         Ok(clap::Shell::Zsh) => {
             info!("Zsh recognized. Proceeding.");
@@ -106,7 +110,10 @@ fn generate_zsh_completion(application: clap::App) {
         .join(PROFILES_FOLDER_RPATH)
         .join(format!("_{}", &bin_name));
     let mut application = application;
-    std::fs::remove_file(&file_path).unwrap();
+    match std::fs::remove_file(&file_path){
+        Ok(_) => info!("Replacing completion file"),
+        Err(_) => info!("No completion file existed"),
+    };
     application.gen_completions(bin_name, clap::Shell::Zsh, file_path.parent().unwrap());
     std::fs::set_permissions(file_path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
@@ -119,7 +126,10 @@ fn generate_bash_completion(application: clap::App) {
         .join(PROFILES_FOLDER_RPATH)
         .join(format!("{}.bash", &bin_name));
     let mut application = application;
-    std::fs::remove_file(&file_path).unwrap();
+    match std::fs::remove_file(&file_path){
+        Ok(_) => info!("Replacing completion file"),
+        Err(_) => info!("No completion file existed"),
+    }
     application.gen_completions(bin_name, clap::Shell::Bash, file_path.parent().unwrap());
     std::fs::set_permissions(file_path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
