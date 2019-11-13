@@ -348,7 +348,7 @@ impl ProxyCommandForwarder {
                 while kf1.load(Ordering::Relaxed) {
                     match std::io::copy(&mut command_stdout, &mut socket1){
                         Err(e) => {
-                            error!("stdout forwarding failed");
+                            error!("stdout forwarding failed: {}", e);
                             break
                         }
                         Ok(0) => {
@@ -373,7 +373,7 @@ impl ProxyCommandForwarder {
                 while kf2.load(Ordering::Relaxed) {
                     match std::io::copy(&mut socket2, &mut command_stdin){
                         Err(e) => {
-                            error!("stdin forwarding failed");
+                            error!("stdin forwarding failed: {}", e);
                             break
                         }
                         Ok(0) => {
@@ -600,7 +600,7 @@ impl std::fmt::Debug for OperationInput{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self{
             OperationInput::Exec(c) => write!(f, "Exec({:?})", c),
-            OperationInput::Pty(t, c, out, err) => write!(f, "Pty({:?}, {}, {})", c, stringify!(out), stringify!(err)),
+            OperationInput::Pty(_, c, _out, _err) => write!(f, "Pty({:?}, {}, {})", c, stringify!(_out), stringify!(_err)),
             OperationInput::ScpSend(a, b) => write!(f, "ScpSend({:?}, {:?})", a, b),
             OperationInput::ScpFetch(a, b) => write!(f, "ScpFetch({:?}, {:?})", a, b),
         }
@@ -1394,7 +1394,7 @@ mod test {
         init();
         let (proxy_command, address) = ProxyCommandForwarder::from_command("echo kikou").unwrap();
         let mut stream = TcpStream::connect(address).unwrap();
-        std::thread::sleep_ms(1000);
+        std::thread::sleep(1000);
         assert!(TcpStream::connect(address).is_err());
         let mut buf = [0 as u8; 6];
         stream.read_exact(&mut buf).unwrap();

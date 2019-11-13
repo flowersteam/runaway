@@ -15,7 +15,6 @@ use std::thread;
 use futures::channel::mpsc::{UnboundedSender};
 
 use std::fmt::Debug;
-use std::process::Command;
 use crate::*;
 use tracing::{self, warn, trace, instrument, trace_span};
 use tracing_futures::Instrument;
@@ -160,6 +159,7 @@ impl<T> Slot<T>{
    
     /// Gives a handle to the inner.
     #[inline]
+    #[allow(dead_code)]
     pub fn as_arrayvec(&self) -> &ArrayVec<[Timed<T>; SLOT_LEN]>{
         &self.waiters
     }
@@ -178,12 +178,14 @@ impl<T> Slot<T>{
    
     /// Returns the duration of the slot.
     #[inline]
+    #[allow(dead_code)]
     pub fn duration(&self) -> Duration{
         self.end-self.beginning
     }
    
     /// Returns the number of timed inside.
     #[inline]
+    #[allow(dead_code)]
     pub fn len(&self) -> usize{
         self.waiters.len()
     }
@@ -337,10 +339,10 @@ impl<T> Timer<T>{
             
             if do_turn { 
                 let slot = {
-                    let mut current_wheel = &mut self.0[w];      
+                    let current_wheel = &mut self.0[w];      
                     current_wheel.turn()
                 };
-                let mut previous_wheel = &mut self.0[w-1];
+                let previous_wheel = &mut self.0[w-1];
                 let res: Result<Vec<usize>, Timed<T>> = slot.to_vec()
                     .into_iter()
                     .map(|t| previous_wheel.try_insert(t))
@@ -363,6 +365,7 @@ impl<T> Timer<T>{
     }
     
     /// Returns the number of timed in the timer.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize{
         self.0.iter().fold(0, |a, w| a+w.len())
     }
@@ -473,7 +476,6 @@ impl TimerHandle{
             match receiver.await {
                 Err(e) => Err(Error::OperationFetch(format!("{}", e))),
                 Ok(OperationOutput::Sleep) => Ok(()),
-                Ok(e) => Err(Error::OperationFetch(format!("Expected RequestParameters, found {:?}", e)))
             }
         }.instrument(trace_span!("SchedulerHandle::async_request_parameters"))
     }

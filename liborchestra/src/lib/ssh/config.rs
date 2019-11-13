@@ -671,7 +671,7 @@ impl<'s> Parser<'s> {
             Some(Ok(Token(TokenType::Word, ib))) if ib.as_str() == "ProxyCommand" => {
                 self.consume_proxycommand_clause()
             }
-            Some(Ok(Token(TokenType::NewLine, ib))) => {
+            Some(Ok(Token(TokenType::NewLine, _ib))) => {
                 None
             }
             Some(Ok(Token(TokenType::Word, ib))) => {

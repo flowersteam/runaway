@@ -15,8 +15,7 @@ use crate::ssh::RemoteHandle;
 use globset;
 use std::io::Read;
 use std::fmt;
-use tracing::{self, error, trace, warn, instrument, trace_span};
-use tracing_futures::Instrument;
+use tracing::{self, instrument};
 
 
 

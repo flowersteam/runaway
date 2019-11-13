@@ -1,4 +1,4 @@
-#![feature(trace_macros, async_await, result_map_or_else, trait_alias, try_blocks)]
+#![feature(result_map_or_else, trait_alias, try_blocks)]
 //! liborchestra/mod.rs
 //!
 //! Liborchestra:

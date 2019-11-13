@@ -29,7 +29,6 @@ use futures::channel::mpsc::{UnboundedSender};
 use std::fmt::{Display, Debug};
 use std::process::Command;
 use crate::*;
-use serde::{Deserialize, Serialize};
 use serde_json;
 use std::os::unix::process::ExitStatusExt;
 use tracing::{self, error, trace, instrument, trace_span};

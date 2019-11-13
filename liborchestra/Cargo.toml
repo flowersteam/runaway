@@ -17,6 +17,7 @@ rust-crypto = "0.2"
 uuid = { version = "0.6", features = ["serde", "v4"] }
 rpassword = "0.0.4"
 ssh2 = "0.3.3"
+shells = "0.2.0"
 dirs = "1.0"
 url = "1.7.2"
 git2 = {version = "0.8"}
@@ -27,6 +28,7 @@ walkdir = "2.2.7"
 libc = "0.2"
 globset = "0.4.4"
 tracing = "0.1.10"
+tracing-subscriber = "0.1.6"
 tracing-attributes = "0.1.5"
 tracing-futures = {version = "0.1.0", features=["futures-preview"]}
 derivative = "1.0.3"

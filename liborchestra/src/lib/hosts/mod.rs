@@ -759,7 +759,7 @@ async fn allocate_nodes(frontend: &Frontend,
     // If the allocation failed we return an error
     misc::compact_outputs(outputs)
         .result()
-        .map_err(|e| Error::AllocationFailed(format!("Failed to allocate on command")))?;
+        .map_err(|e| Error::AllocationFailed(format!("Failed to allocate on command: {}", e)))?;
     // We return the Allocation context
     Ok(FrontendContext(context))
 }

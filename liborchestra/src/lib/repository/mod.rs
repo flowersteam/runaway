@@ -898,7 +898,8 @@ impl CampaignHandle {
             _dropper: Dropper::from_closure(
                 Box::new(move ||{
                     drop_sender.close_channel();
-                    handle.join();
+                    handle.join()
+                        .unwrap_or_else(|_| {error!("Failed to wait")});
                 }), 
                 format!("CampaignHandle")),
         })

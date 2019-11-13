@@ -18,8 +18,7 @@ use clap;
 use uuid;
 use futures::executor::block_on;
 use crate::{to_exit};
-use liborchestra::commons::{EnvironmentValue, EnvironmentStore, 
-    substitute_environment, OutputBuf, push_env};
+use liborchestra::commons::{EnvironmentStore, substitute_environment, OutputBuf, push_env};
 use crate::misc;
 use crate::exit::Exit;
 use liborchestra::primitives;
