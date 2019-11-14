@@ -1,15 +1,30 @@
-// liborchestra/misc.rs
-//
-// Author: Alexandre Péré
-///
-/// A few miscellaneous functions publicly available.
+//! liborchestra/misc.rs
+//! Author: Alexandre Péré
+//!
+//! A few miscellaneous available library wide.
 
-// IMPORTS
+
+//------------------------------------------------------------------------------------------ IMPORTS
+
+
 use std::{process, path, fs, error, fmt};
 use regex;
 use super::CMPCONF_RPATH;
+use tracing::{self, warn, debug};
+use super::commons::OutputBuf;
+use super::timer::TimerHandle;
 
-// ERRORS
+
+//------------------------------------------------------------------------------------------- STATIC
+
+lazy_static! {
+    pub static ref TIMER: TimerHandle = TimerHandle::spawn().expect("Failed to spawn timer.");
+}
+
+
+//------------------------------------------------------------------------------------------- ERRORS
+
+
 #[derive(Debug)]
 pub enum Error {
     InvalidRepository,
@@ -27,7 +42,163 @@ impl fmt::Display for Error {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////////////// FUNCTIONS
+
+//------------------------------------------------------------------------------------------- MACROS
+
+
+/// This macro allows to asynchronously wait for (at least) a given time. This means that the thread
+/// is yielded when it is done. For now, it creates a separate thread each time a sleep is needed, 
+/// which is far from ideal.
+#[macro_export] 
+macro_rules! async_sleep {
+    ($dur: expr) => {
+        {
+            use crate::misc::TIMER;
+            (*TIMER).async_sleep($dur).await.unwrap();
+        }
+    };
+}
+
+/// This macro allows to intercept a wouldblock error returned by the expression evaluation, and 
+/// awaits for 1 ns (at least) before retrying. 
+#[macro_export]
+macro_rules! await_wouldblock_io {
+    ($expr:expr) => {
+        {
+            use tracing::trace_span;
+            let span = trace_span!("await_wouldblock_io!");
+            let _guard = span.enter();
+            loop{
+                match $expr {
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        async_sleep!(std::time::Duration::from_millis(2))
+                    }
+                    res => break res,
+                }
+            }
+        }
+    }
+}
+
+/// This macro allows to intercept a wouldblock error returned by the expression evaluation, and 
+/// awaits for 1 ns (at least) before retrying. 
+#[macro_export]
+macro_rules! await_wouldblock_ssh {
+    ($expr:expr) => {
+        {
+            use tracing::trace_span;
+            let span = trace_span!("await_wouldblock_ssh!");
+            let _guard = span.enter();
+            loop{
+                match $expr {
+                    Err(ref e) if e.code() == -37 => {
+                        async_sleep!(std::time::Duration::from_millis(2))
+                    }
+                    Err(ref e) if e.code() == -21 => {
+                        async_sleep!(std::time::Duration::from_millis(2))
+                    }
+                    res => break res,
+                }
+            }
+        }
+    }
+}
+
+/// This macro allows to retry an ssh expression if the error code received was $code. It allows to 
+/// retry commands that fails every now and then for a limited amount of time.
+#[macro_export]
+macro_rules! await_retry_n_ssh {
+    ($expr:expr, $nb:expr, $($code:expr),*) => {
+       {    
+            use tracing::trace_span;
+            let span = trace_span!("await_retry_n_ssh!");
+            let _guard = span.enter();
+            let nb = $nb as usize;
+            let mut i = 1 as usize;
+            loop{
+                match $expr {
+                    Err(e)  => {
+                        if i == nb {
+                            break Err(e)
+                        }
+                        $(
+                            else if e.code() == $code as i32 {
+                                async_sleep!(std::time::Duration::from_millis(2));
+                                i += 1;
+                            }
+                        )*
+                    }
+                    res => {
+                        break res
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// This macro allows to retry an ssh expression if the error code received was $code. It allows to 
+/// retry commands that fail but must be retried until it's ok. For example 
+#[macro_export]
+macro_rules! await_retry_ssh {
+    ($expr:expr, $($code:expr),*) => {
+       {    
+            use tracing::trace_span;
+            let span = trace_span!("await_retry_n_ssh!");
+            let _guard = span.enter();
+            loop{
+                match $expr {
+                    Err(e)  => {
+                        $(  if e.code() == $code as i32 {
+                                async_sleep!(std::time::Duration::from_millis(2));
+                            } else  )*
+                        {
+                            break Err(e)
+                        }
+                    }
+                    res => {
+                        break res
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// This macro allows to retry an expression it returns an error. It allows to 
+/// retry commands that fails every now and then for a limited amount of time.
+#[macro_export]
+macro_rules! await_retry_n {
+    ($expr:expr, $nb:expr) => {
+       {    
+            use tracing::trace_span;
+            let span = trace_span!("await_retry_n!");
+            let _guard = span.enter();
+            let nb = $nb as usize;
+            let mut i = 1 as usize;
+            loop{
+                match $expr {
+                    Err(e)  => {
+                        if i == nb {
+                            break Err(e)
+                        }
+                        else{
+                            async_sleep!(std::time::Duration::from_millis(2));
+                            i += 1;
+                        }
+                    }
+                    res => {
+                        break res
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+
+//---------------------------------------------------------------------------------------- FUNCTIONS
 
 /// Returns a tuple containing the git and git-lfs versions.
 pub fn check_git_lfs_versions() -> Result<(String, String), crate::Error> {
@@ -53,7 +224,8 @@ pub fn check_git_lfs_versions() -> Result<(String, String), crate::Error> {
 
 /// Returns the absolute path to the higher expegit folder starting from `start_path`.
 pub fn search_expegit_root(start_path: &path::PathBuf) -> Result<path::PathBuf, crate::Error> {
-    debug!("Searching expegit repository root from {}", fs::canonicalize(start_path).unwrap().to_str().unwrap());
+    debug!("Searching expegit repository root from {}", 
+        fs::canonicalize(start_path).unwrap().to_str().unwrap());
     let start_path = fs::canonicalize(start_path)?;
     if start_path.is_file() { panic!("Should provide a folder path.") };
     // We add a dummy folder that will be popped directly to check for .
@@ -117,9 +289,38 @@ pub fn get_hostname() -> Result<String, crate::Error> {
     Ok(format!("{}@{}", user, host))
 }
 
+use std::process::{Output};
+use std::os::unix::process::ExitStatusExt;
+
+/// Compacts a list of outputs in a single output: 
+/// + The stdouts are concatenated
+/// + The stderrs are concatenated
+/// + The last error code is kept
+pub fn compact_outputs(outputs: Vec<Output>) -> Output{
+    let mut outputs = outputs;
+    outputs.iter_mut()
+        .fold(Output{status: ExitStatusExt::from_raw(0), stdout: Vec::new(), stderr: Vec::new()},
+              |mut acc, o| {
+                  acc.stdout.append(&mut o.stdout);
+                  acc.stderr.append(&mut o.stderr);
+                  acc.status = o.status;
+                  acc
+              })
+} 
+
+/// Formats commands and output properly
+pub fn format_commands_outputs(commands: &Vec<String>, outputs: &Vec<Output>) -> String{
+    commands.iter().zip(outputs.iter().map(|o| OutputBuf::from(o.to_owned())))
+        .fold(String::new(), |mut acc, (c, o)|{
+            acc.push_str(&format!("{:?} :\n    stdout: {:?}\n    stderr: {:?}\n    ecode: {}\n",
+                c, o.stdout, o.stderr, o.ecode));
+            acc
+        })
+}
+
+//-------------------------------------------------------------------------------------------- TESTS
 
 
-// TESTS
 #[cfg(test)]
 mod test {
     use std::fs;

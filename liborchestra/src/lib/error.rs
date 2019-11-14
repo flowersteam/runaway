@@ -1,5 +1,4 @@
 //! liborchestra/error.rs
-//! Author: Alexandre Péré
 //!
 //! This module contains module-level error type to interface with the error types implemented at
 //! the sub-module level. 
@@ -8,11 +7,26 @@
 //------------------------------------------------------------------------------------------ IMPORTS
 
 
-use crate::{ssh, repository, misc, primitives, derive_from_error};
+use crate::{ssh, repository, misc, commons};
 use std::{io, error, fmt};
 use regex;
 //use git2;
 use yaml_rust;
+
+
+//------------------------------------------------------------------------------------------- MACROS
+
+
+#[macro_export]
+macro_rules! derive_from_error {
+    ($error:ident, $from_type:ty, $variant:ident) => {
+        impl From<$from_type> for $error {
+            fn from(err: $from_type) -> $error {
+                    $error::$variant(err)
+            }
+        }
+    }
+}
 
 
 //-------------------------------------------------------------------------------------------- ERROR
@@ -31,7 +45,7 @@ pub enum Error {
     Git(git2::Error),
     Repository(repository::Error),
     Misc(misc::Error),
-    Primitives(primitives::Error),
+    Commons(commons::Error),
 }
 
 impl error::Error for Error {}
@@ -48,7 +62,7 @@ impl fmt::Display for Error {
             Error::Git(ref s) => write!(f, "Git related error happened:\n{}", s),
             Error::Repository(ref s) => write!(f, "Repository related error happened:\n{}", s),
             Error::Misc(ref s) => write!(f, "Misc related error happened:\n{}", s),
-            Error::Primitives(ref s) => write!(f, "Primitives related error occurred:\n{}", s)
+            Error::Commons(ref s) => write!(f, "Primitives related error occurred:\n{}", s)
         }
     }
 }
@@ -61,4 +75,4 @@ derive_from_error!(Error, ssh::Error, Ssh);
 derive_from_error!(Error, git2::Error, Git);
 derive_from_error!(Error, repository::Error, Repository);
 derive_from_error!(Error, misc::Error, Misc);
-derive_from_error!(Error, primitives::Error, Primitives);
+derive_from_error!(Error, commons::Error, Commons);

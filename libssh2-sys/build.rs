@@ -98,8 +98,8 @@ fn main() {
         cfg.define("LIBSSH2_OPENSSL", None);
         cfg.define("HAVE_LIBCRYPT32", None);
         cfg.define("HAVE_EVP_AES_128_CTR", None);
-        cfg.define("LIBSSH2DEBUG", None);
         if is_debug{
+            cfg.define("LIBSSH2DEBUG", None);
             cfg.define("HAVE_GETTIMEOFDAY", None);
             cfg.define("ENABLE_DEBUG_LOGGING", Some("ON"));
         }
