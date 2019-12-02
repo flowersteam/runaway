@@ -957,7 +957,7 @@ async fn setup_pty(channel: &mut ssh2::Channel<'_>, cwd: &PathBuf, envs: &Enviro
     // We setup the context
     let context = envs.iter()
         .fold(format!("cd {}\n", cwd.to_str().unwrap()), |acc, (EnvironmentKey(n), EnvironmentValue(v))|{
-            format!("{}export {}=\'{}\'\n", acc, n, v)
+            format!("{}export {}='{}'\n", acc, n, v)
         });
     await_wouldblock_io!(channel.write_all(context.as_bytes()))
         .map_err(|e| Error::ExecutionFailed(format!("Failed to set context up: {}", e)))?;
@@ -1082,7 +1082,7 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
 async fn close_pty(channel: &mut ssh2::Channel<'_>) -> Result<(), Error>{
     trace!("Closing pty channel");
     // We make sure to leave bash and the landing shell
-    await_wouldblock_io!(channel.write_all("history -c \nexit\n history -c \nexit\n".as_bytes()))
+    await_wouldblock_io!(channel.write_all("history -c\nexit\n".as_bytes()))
         .map_err(|e| Error::ExecutionFailed(format!("Failed to start bash: {}", e)))?;
 
     // We close the channel
@@ -1391,13 +1391,6 @@ mod test {
             let output = misc::compact_outputs(outputs);
             assert_eq!(String::from_utf8(output.stdout).unwrap(), "KIKOU\n");
             assert_eq!(output.status.code().unwrap(), 0);
-            let commands = vec![RawCommand("a=KIKOU\nKIKOU".into()), 
-                          RawCommand("echo \"$a\"".into())];
-            let context = TerminalContext::default();
-            let (_, outputs) = remote.async_pty(context, commands, None, None).await.unwrap();
-            let output = misc::compact_outputs(outputs);
-            assert_eq!(String::from_utf8(output.stdout).unwrap(), "KIKOU\nKIKOU\n");
-            assert_eq!(output.status.code().unwrap(), 0);
        }
         block_on(test());
     }
@@ -1470,15 +1463,15 @@ mod test {
             // Check order of outputs
             let mut context = TerminalContext::default();
             context.cwd = Cwd("/tmp".into());
-            context.envs.insert(EnvironmentKey("RW_TEST".into()),
+            context.envs.insert(EnvironmentKey("RUNAWAY_TEST".into()),
                                              EnvironmentValue("VAL1".into()));
             let commands = vec![RawCommand("pwd".into()), 
-                                RawCommand("echo $RW_TEST".into()),
-                                RawCommand("export RW_TEST=VAL2".into())];
+                                RawCommand("echo $RUNAWAY_TEST".into()),
+                                RawCommand("export RUNAWAY_TEST=VAL2".into())];
             let (context, outputs) = remote.async_pty(context, commands, None, None).await.unwrap();
             let output = misc::compact_outputs(outputs);
             assert_eq!(String::from_utf8(output.stdout).unwrap(), "/tmp\nVAL1\n");
-            assert_eq!(context.envs.get(&EnvironmentKey("RW_TEST".into())).unwrap(), &EnvironmentValue("VAL2".into()));
+            assert_eq!(context.envs.get(&EnvironmentKey("RUNAWAY_TEST".into())).unwrap(), &EnvironmentValue("VAL2".into()));
             assert_eq!(output.status.code().unwrap(), 0);
        }
         block_on(test());

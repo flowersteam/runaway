@@ -91,7 +91,7 @@ rw_run() {
 rw_close(){
 
     # We output the current working directory
-    echo "RUNAWAY_CWD: $(pwd)"
+    printf 'RUNAWAY_CWD: %s' $(pwd)
 
     # We echo the environment variables
     env | sed 's/^/RUNAWAY_ENV: /g'
@@ -101,5 +101,6 @@ rw_close(){
     rm $stderr_fifo
 
     # We leave
-    echo "RUNAWAY_EOF:"
+    echo 'RUNAWAY_EOF:'
 }
+
