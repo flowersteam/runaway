@@ -32,7 +32,6 @@ use tracing::{self, info, error, debug};
 /// Executes a single execution of the script with the command arguments and returns exit code.
 pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
 
-
     // We initialize the logger
     misc::init_logger(&matches);
 
@@ -60,7 +59,10 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
     }
     push_env(&mut store, "RUNAWAY_LEAVE", format!("{}", leave));
     debug!("Leave option set to {}", leave);
-    let parameters = matches.value_of("ARGUMENTS").unwrap_or("").to_owned();
+    let parameters = match matches.values_of("ARGUMENTS"){
+        Some(it) => it.fold(String::new(), |acc, arg| format!("{} {}", acc, arg)),
+        None => "".to_owned()
+    };
     push_env(&mut store, "RUNAWAY_ARGUMENTS", parameters.clone());
     debug!("Arguments set to {}", parameters);
     let script = PathBuf::from(matches.value_of("SCRIPT").unwrap());

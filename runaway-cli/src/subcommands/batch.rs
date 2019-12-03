@@ -277,9 +277,12 @@ fn extract_args_iter(matches: &clap::ArgMatches) -> Result<Box<dyn std::iter::It
             .map(|l| misc::expand_template_string(&l).into_iter())
             .flatten()))
     } else {
-        let content = matches.value_of("ARGUMENTS").unwrap();
-        debug!("Arguments tempolate found: {}", content);
-        Ok(Box::new(misc::expand_template_string(content).into_iter()))
+        let content = match matches.values_of("ARGUMENTS"){
+            Some(it) => it.fold(String::new(), |acc, arg| format!("{} {}", acc, arg)),
+            None => "".to_owned()
+        };
+        debug!("Arguments template found: {}", content);
+        Ok(Box::new(misc::expand_template_string(&content).into_iter()))
     }
 }
 
