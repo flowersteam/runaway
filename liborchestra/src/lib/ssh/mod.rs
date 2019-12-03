@@ -84,117 +84,7 @@ pub mod config;
 
 
 /// Bash pty agent, injected in the pty before executing the commands.
-static BASH_PTY_AGENT: &str = "
-rw_init() {
-    # We remove the prompt banner
-    export PS1=
-    # We disable stdin echo
-    stty -echo
-    # We generate two fifo that will be used to format stdout messages and stderr messages
-    export stdout_fifo=/tmp/$(uuidgen)
-    export stderr_fifo=/tmp/$(uuidgen)
-    mkfifo $stdout_fifo
-    mkfifo $stderr_fifo
-}
-
-
-# Function used to execute a command. 
-rw_run() {
-
-    # Since stdout and stderr are handled in separate threads, we have to ensure that stdout and 
-    # stderr were completely read before moving to the next command. We do so by using file locks, 
-    # which are unix locks using file descriptors.
-
-    # We create the files
-    way_in_lock=/tmp/$(uuidgen)
-    way_out_lock=/tmp/$(uuidgen)
-
-    # We create the file descriptors
-    exec 201>$way_in_lock
-    exec 202>$way_out_lock
-
-    # We lock the way_in_lock in exclusive mode. This will prevent the stdout and stderr handlers to 
-    # break before the command completed.
-    flock -x 201
-
-    # We start a subcommand that handles the stdout messages on the stdout_fifo.
-    echo Starting stdout handler
-    # First we lock the way_out_lock in shared mode to prevent the command from returning before all 
-    # messages were handled.
-    (
-    flock -s 202;
-    while true; do
-        # We format the line
-        if read line ; then
-            echo RUNAWAY_STDOUT: $line;
-        # We try to acquire a shared lock on the way_in_lock. This can only happen when the exclusive
-        # lock hold by the command will be released, after the command was executed.
-        elif flock -ns 201; then
-            # We release our lock on the way_out_lock.
-            flock -u 202;
-            break;
-        fi;
-    done<$stdout_fifo;
-    )& disown
-    stdout_pid=$!
-
-    # We start the same subcommand for the stderr.
-    echo Starting stderr handler
-    (
-    flock -s 202;
-    while true; do
-        if read line ; then
-            echo RUNAWAY_STDERR: $line;
-        elif flock -ns 201; then
-            flock -u 202;
-            break;
-        fi;
-    done<$stderr_fifo;
-    )& disown
-    stderr_pid=$!
-
-    # Now we are ready to evaluate the command. The stdout and stderr are forwarded to the right 
-    # fifos for further handling under the adequqte subprocesses.
-
-    { eval $1 ; } 1>$stdout_fifo 2>$stderr_fifo
-    # We retrieve the exit code
-    RUNAWAY_ECODE=$?
-
-    # We release the exclusive lock on the way_in_lock. This has the effect to break the loops in 
-    # the stdout and stderr handlers.
-    flock -u 201
-
-    # We wait to acquire an exclusive lock on the way_out_lock. This can only occur after the two 
-    # handlers broke and released their shared lock.
-    flock -x 202
-
-    # We remove the locks 
-    rm $way_in_lock
-    rm $way_out_lock
-
-    # We echo the exit code.
-    echo RUNAWAY_ECODE: $RUNAWAY_ECODE
-
-}
-
-# Function to teardown the agent.
-rw_close(){
-
-    # We output the current working directory
-    echo RUNAWAY_CWD: $(pwd)
-
-    # We echo the environment variables
-    env | sed 's/^/RUNAWAY_ENV: /g'
-
-    # We cleanup
-    rm $stdout_fifo
-    rm $stderr_fifo
-
-    # We leave
-    echo RUNAWAY_EOF:
-
-}
-";
+static BASH_PTY_AGENT: &str = include_str!("agent.sh");
 
 
 //------------------------------------------------------------------------------------------- ERRORS
@@ -1044,7 +934,7 @@ async fn close_exec(channel: &mut ssh2::Channel<'_>) -> Result<ExitStatus, Error
 async fn acquire_pty_channel<'a>(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Channel<'_>, ssh2::Error>{
     trace!("Acquiring pty channel");
     let mut channel = await_wouldblock_ssh!(await_retry_ssh!({remote.lock().await.session().channel_session()},-21))?;
-    await_wouldblock_ssh!(await_retry_n_ssh!(channel.request_pty("xterm", None, Some((0,0,0,0))), 10, -14))?;
+    await_wouldblock_ssh!(await_retry_n_ssh!(channel.request_pty("ansi", None, Some((0,0,0,0))), 10, -14))?;
     await_wouldblock_ssh!(channel.shell())?;
     Ok(channel)
 }
@@ -1055,7 +945,7 @@ async fn acquire_pty_channel<'a>(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Ch
 async fn setup_pty(channel: &mut ssh2::Channel<'_>, cwd: &PathBuf, envs: &EnvironmentStore) -> Result<(), Error>{
     trace!("Setting up a pty channel");
     // We make sure we run on bash
-    await_wouldblock_io!(channel.write_all("export HISTFILE=/dev/null\nbash\n".as_bytes()))
+    await_wouldblock_io!(channel.write_all("export HISTFILE=/dev/null\nexec bash\n".as_bytes()))
         .map_err(|e| Error::ExecutionFailed(format!("Failed to start bash: {}", e)))?;
 
     // We inject the linux pty agent on the remote end.
@@ -1067,7 +957,7 @@ async fn setup_pty(channel: &mut ssh2::Channel<'_>, cwd: &PathBuf, envs: &Enviro
     // We setup the context
     let context = envs.iter()
         .fold(format!("cd {}\n", cwd.to_str().unwrap()), |acc, (EnvironmentKey(n), EnvironmentValue(v))|{
-            format!("{}export {}=\"{}\"\n", acc, n, v)
+            format!("{}export {}='{}'\n", acc, n, v)
         });
     await_wouldblock_io!(channel.write_all(context.as_bytes()))
         .map_err(|e| Error::ExecutionFailed(format!("Failed to set context up: {}", e)))?;
@@ -1101,7 +991,7 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
         // We write next command
         let cmd = cmds.remove(0);
         trace!(?cmd, "Writing next command");
-        await_wouldblock_io!(stream.get_mut().write_all(format!("rw_run \"{}\"\n", cmd).as_bytes()))
+        await_wouldblock_io!(stream.get_mut().write_all(format!("rw_run '{}'\n", cmd).as_bytes()))
             .map_err(|e| Error::ExecutionFailed(format!("Failed to exec command '{}': {}", cmd, e)))?;
         let output = Output {
             status: ExitStatusExt::from_raw(0),
@@ -1116,7 +1006,7 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
             await_wouldblock_io!(stream.read_line(&mut buffer))
                 .map_err(|e| Error::ExecutionFailed(format!("Failed to read outputs: {}", e)))?;
             buffer = buffer.replace("\r\n", "\n");
-            trace!(?buffer, "Reading command output");
+            trace!("Reading command output: {:?}", buffer);
             // We receive an exit code
             if buffer.starts_with("RUNAWAY_ECODE: "){
                 trace!("Ecode message detected");
@@ -1192,7 +1082,7 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
 async fn close_pty(channel: &mut ssh2::Channel<'_>) -> Result<(), Error>{
     trace!("Closing pty channel");
     // We make sure to leave bash and the landing shell
-    await_wouldblock_io!(channel.write_all("history -c \nexit\n history -c \nexit\n".as_bytes()))
+    await_wouldblock_io!(channel.write_all("history -c\nexit\n".as_bytes()))
         .map_err(|e| Error::ExecutionFailed(format!("Failed to start bash: {}", e)))?;
 
     // We close the channel
@@ -1382,7 +1272,7 @@ mod test {
     fn init(){
         let subscriber = Subscriber::builder()
             .compact()
-            .with_max_level(Level::TRACE)
+            .with_max_level(Level::DEBUG)
             .without_time()
             .with_target(false)
             .finish();
@@ -1394,7 +1284,7 @@ mod test {
         init();
         let (proxy_command, address) = ProxyCommandForwarder::from_command("echo kikou").unwrap();
         let mut stream = TcpStream::connect(address).unwrap();
-        std::thread::sleep(1000);
+        std::thread::sleep(std::time::Duration::from_secs(1));
         assert!(TcpStream::connect(address).is_err());
         let mut buf = [0 as u8; 6];
         stream.read_exact(&mut buf).unwrap();
@@ -1495,7 +1385,7 @@ mod test {
             let remote = RemoteHandle::spawn(profile).unwrap();
             // Check order of outputs
             let commands = vec![RawCommand("a=KIKOU".into()), 
-                          RawCommand("echo $a".into())];
+                                RawCommand("echo $a".into())];
             let context = TerminalContext::default();
             let (_, outputs) = remote.async_pty(context, commands, None, None).await.unwrap();
             let output = misc::compact_outputs(outputs);
@@ -1573,15 +1463,15 @@ mod test {
             // Check order of outputs
             let mut context = TerminalContext::default();
             context.cwd = Cwd("/tmp".into());
-            context.envs.insert(EnvironmentKey("RW_TEST".into()),
+            context.envs.insert(EnvironmentKey("RUNAWAY_TEST".into()),
                                              EnvironmentValue("VAL1".into()));
             let commands = vec![RawCommand("pwd".into()), 
-                                RawCommand("echo $RW_TEST".into()),
-                                RawCommand("export RW_TEST=VAL2".into())];
+                                RawCommand("echo $RUNAWAY_TEST".into()),
+                                RawCommand("export RUNAWAY_TEST=VAL2".into())];
             let (context, outputs) = remote.async_pty(context, commands, None, None).await.unwrap();
             let output = misc::compact_outputs(outputs);
             assert_eq!(String::from_utf8(output.stdout).unwrap(), "/tmp\nVAL1\n");
-            assert_eq!(context.envs.get(&EnvironmentKey("RW_TEST".into())).unwrap(), &EnvironmentValue("VAL2".into()));
+            assert_eq!(context.envs.get(&EnvironmentKey("RUNAWAY_TEST".into())).unwrap(), &EnvironmentValue("VAL2".into()));
             assert_eq!(output.status.code().unwrap(), 0);
        }
         block_on(test());
@@ -1597,7 +1487,7 @@ mod test {
                 hostname: Some("127.0.0.1".to_owned()),
                 user: Some("apere".to_owned()),
                 port: None,
-                proxycommand: Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
+                proxycommand: Some("ssh -A -l apere localhost -W localhost:22".to_owned())
             };
             let remote = RemoteHandle::spawn(profile).unwrap();
             let output = std::process::Command::new("dd")
