@@ -37,7 +37,7 @@ rw_run() {
         local stdin;
         # We format the line
         if read line ; then
-            printf 'RUNAWAY_STDOUT: %s\n' $line ;
+            echo "RUNAWAY_STDOUT: $line" ;
         # We try to acquire a shared lock on the way_in_lock. This can only happen when the exclusive
         # lock hold by the command will be released, after the command was executed.
         elif flock -ns 201; then
@@ -53,7 +53,7 @@ rw_run() {
     flock -s 202;
     while true; do
         if read line ; then
-            printf 'RUNAWAY_STDERR: %s\n' $line ;
+            echo "RUNAWAY_STDERR: $line" ;
         elif flock -ns 201; then
             flock -u 202;
             break;

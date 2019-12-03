@@ -1006,7 +1006,7 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
             await_wouldblock_io!(stream.read_line(&mut buffer))
                 .map_err(|e| Error::ExecutionFailed(format!("Failed to read outputs: {}", e)))?;
             buffer = buffer.replace("\r\n", "\n");
-            println!("Reading command output: {:?}", buffer);
+            trace!("Reading command output: {:?}", buffer);
             // We receive an exit code
             if buffer.starts_with("RUNAWAY_ECODE: "){
                 trace!("Ecode message detected");
@@ -1487,7 +1487,7 @@ mod test {
                 hostname: Some("127.0.0.1".to_owned()),
                 user: Some("apere".to_owned()),
                 port: None,
-                proxycommand: Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
+                proxycommand: Some("ssh -A -l apere localhost -W localhost:22".to_owned())
             };
             let remote = RemoteHandle::spawn(profile).unwrap();
             let output = std::process::Command::new("dd")
