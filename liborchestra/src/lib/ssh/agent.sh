@@ -37,7 +37,7 @@ rw_run() {
         local stdin;
         # We format the line
         if read line ; then
-            echo "RUNAWAY_STDOUT: $line" ;
+            printf "RUNAWAY_STDOUT: %s\n" "$line" ;
         # We try to acquire a shared lock on the way_in_lock. This can only happen when the exclusive
         # lock hold by the command will be released, after the command was executed.
         elif flock -ns 201; then
@@ -53,7 +53,7 @@ rw_run() {
     flock -s 202;
     while true; do
         if read line ; then
-            echo "RUNAWAY_STDERR: $line" ;
+            printf "RUNAWAY_STDERR: %s\n" "$line";
         elif flock -ns 201; then
             flock -u 202;
             break;
@@ -91,7 +91,7 @@ rw_run() {
 rw_close(){
 
     # We output the current working directory
-    printf 'RUNAWAY_CWD: %s' $(pwd)
+    printf 'RUNAWAY_CWD: %s\n' $(pwd)
 
     # We echo the environment variables
     env | sed 's/^/RUNAWAY_ENV: /g'
