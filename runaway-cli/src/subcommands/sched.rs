@@ -32,6 +32,7 @@ use std::convert::TryInto;
 use rand::{self, Rng};
 use std::io::Write;
 use tracing::{self, info, error, debug};
+use path_abs::PathAbs;
 
 
 //--------------------------------------------------------------------------------------- SUBCOMMAND
@@ -459,7 +460,9 @@ async fn perform_on_node(store: EnvironmentStore,
         local_output_folder = remote_folder.clone();
     } else {
         let local_output_string = substitute_environment(&execution_context.envs, output_folder_pattern);
-        local_output_folder = to_exit!(PathBuf::from(local_output_string).canonicalize(), Exit::OutputFolder)?;
+        let abs_local_output_folder = to_exit!(PathAbs::new(local_output_string), Exit::OutputFolder)?;
+        let abs_local_output_folder: &PathBuf = abs_local_output_folder.as_ref();
+        local_output_folder = abs_local_output_folder.to_owned();
     }     
 
     debug!("Local output folder set to: {}", local_output_folder.to_str().unwrap());
