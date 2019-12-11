@@ -382,7 +382,7 @@ impl Host {
 
         // We retrieve node ids from the terminal context
         let node_ids = extract_nodes(&frontend_context.0)?;
-        trace!(?node_ids, "Retrieved nodes");
+        trace!("Retrieved nodes: {:?}", node_ids);
 
         // We spawn the nodes
         trace!("Spawning nodes");
@@ -771,7 +771,7 @@ fn extract_nodes(context: &TerminalContext<PathBuf>) -> Result<Vec<NodeId>, Erro
         // We search the nodes string in environment variables
         .envs
         .get(&EnvironmentKey("RUNAWAY_NODES".into()))
-        .map(|EnvironmentValue(s)| s)
+        .map(|EnvironmentValue(s)| s.trim_start_matches(' ').trim_end_matches(' ').to_owned())
         .ok_or(Error::AllocationFailed("RUNAWAY_NODES was not set.".to_string()))?
         // We split and map to node ids
         .split(' ')
@@ -860,7 +860,7 @@ fn extract_handles(context: &TerminalContext<PathBuf>) -> Result<Vec<HandleId>, 
         // We search the nodes string in environment variables
         .envs
         .get(&EnvironmentKey("RUNAWAY_HANDLES".into()))
-        .map(|EnvironmentValue(s)| s)
+        .map(|EnvironmentValue(s)| s.trim_start_matches(' ').trim_end_matches(' ').to_owned())
         .ok_or(Error::AllocationFailed(format!("RUNAWAY_HANDLES was not set.")))?
         // We split and map to node ids
         .split(' ')
