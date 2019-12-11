@@ -57,6 +57,7 @@ pub enum Exit {
     SchedulerCrashed,
     SchedulerShutdown,
     InstallCompletion,
+    PostScriptPath,
 }
 
 impl std::fmt::Display for Exit {
@@ -113,7 +114,8 @@ impl std::fmt::Display for Exit {
             Exit::RecordFeatures => write!(f, "failed to record features"),
             Exit::SchedulerCrashed => write!(f, "scheduler crashed"),
             Exit::SchedulerShutdown => write!(f, "scheduler was shutdown"),
-            Exit::InstallCompletion => write!(f, "failed to install completion")
+            Exit::InstallCompletion => write!(f, "failed to install completion"),
+            Exit::PostScriptPath => write!(f, "failed to load post script"),
             }
     }
 }
@@ -170,6 +172,7 @@ impl From<Exit> for i32 {
             Exit::SchedulerCrashed => 9946,
             Exit::SchedulerShutdown => 9947,
             Exit::InstallCompletion => 9948,
+            Exit::PostScriptPath => 9949,
         }
     }
 }
