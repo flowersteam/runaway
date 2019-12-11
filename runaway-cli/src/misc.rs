@@ -285,6 +285,10 @@ pub fn init_logger(matches: &clap::ArgMatches) {
     if matches.is_present("silent"){
     } else if matches.is_present("verbose"){
         EchoSubscriber::setup_verbose();
+    } else if matches.is_present("debug-ssh"){
+        EchoSubscriber::setup_ssh();
+    } else if matches.is_present("trace"){
+        EchoSubscriber::setup_trace(matches.value_of("trace").unwrap().to_owned());
     } else {
         EchoSubscriber::setup_normal();
     }
