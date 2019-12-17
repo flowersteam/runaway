@@ -32,6 +32,7 @@ use rand::{self, Rng};
 use std::io::Write;
 use tracing::{self, error, debug, info, warn};
 use liborchestra::commons::format_env;
+use path_abs::PathAbs;
 
 
 //--------------------------------------------------------------------------------------- SUBCOMMAND
@@ -57,7 +58,7 @@ pub fn batch(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
 
     // We load the host
     info!("Loading host");
-    let host = misc::get_host(matches.value_of("REMOTE").unwrap())?;
+    let host = misc::get_host(matches.value_of("REMOTE").unwrap(), store.clone())?;
     push_env(&mut store, "RUNAWAY_REMOTE", host.get_name());
     debug!("Host {} loaded", host);
 
@@ -430,7 +431,7 @@ async fn perform_on_node(store: EnvironmentStore,
     let mut store = store;
     push_env(&mut store, "RUNAWAY_ARGUMENTS", arguments);
 
-
+    
     // We generate an uuid
     let id = uuid::Uuid::new_v4().hyphenated().to_string();
     push_env(&mut store, "RUNAWAY_UUID", id.clone());
@@ -518,7 +519,9 @@ async fn perform_on_node(store: EnvironmentStore,
         local_output_folder = remote_folder.clone();
     } else {
         let local_output_string = substitute_environment(&execution_context.envs, output_folder_pattern.as_str());
-        local_output_folder = to_exit!(PathBuf::from(local_output_string).canonicalize(), Exit::OutputFolder)?;
+        let abs_local_output_folder = to_exit!(PathAbs::new(local_output_string), Exit::OutputFolder)?;
+        let abs_local_output_folder: &PathBuf = abs_local_output_folder.as_ref();
+        local_output_folder = abs_local_output_folder.to_owned();
     }     
     debug!("Local output folder set to: {}", local_output_folder.to_str().unwrap());
     if !local_output_folder.exists(){
@@ -606,13 +609,12 @@ fn unpacks_fetch_post_proc(matches: &clap::ArgMatches<'_>,
     // We execute the post processing
     debug!("Executing post script");
     let command_string = if matches.is_present("post-script"){
-        let path_str = PathBuf::from(matches.value_of("post-script").unwrap())
-            .canonicalize()
-            .unwrap()
-            .to_str()
+        let path = PathBuf::from(matches.value_of("post-script").unwrap());
+        let path = to_exit!(path.canonicalize(), Exit::PostScriptPath)?;
+        let path = path.to_str()
             .unwrap()
             .to_owned();
-        format!("bash {}", path_str)
+        format!("bash {}", path)
     } else {
         matches.value_of("post-command").unwrap().to_owned()
     };

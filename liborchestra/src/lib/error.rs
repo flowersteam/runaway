@@ -10,7 +10,6 @@
 use crate::{ssh, repository, misc, commons};
 use std::{io, error, fmt};
 use regex;
-//use git2;
 use yaml_rust;
 
 

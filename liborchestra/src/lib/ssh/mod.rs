@@ -215,7 +215,7 @@ impl ProxyCommandForwarder {
                 .spawn()
                 .map_err(|e| Error::ProxyCommandStartup(format!("failed to start command: {}", e)))
         }?;
-        debug!("ProxyCommand started with pid {}", command.id());
+        debug!("ProxyCommand {} started with pid {}", command_string, command.id());
 
 
         trace!("Spawning proxy command forwarding thread");
@@ -742,8 +742,6 @@ impl RemoteHandle {
 fn new_session(stream: &TcpStream) -> Result<Session, Error>{
     trace!("Creates a new session");
     let mut session = Session::new().unwrap();
-    session.method_pref(MethodType::HostKey, "ssh-rsa")
-        .map_err(|_| Error::ConnectionFailed("Failed to set preferences".to_string()))?;
     session.handshake(stream)
         .map_err(|e| Error::ConnectionFailed(format!("Failed to perform handshake: \n{}", e)))?;
     Ok(session)
@@ -1006,7 +1004,7 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
             await_wouldblock_io!(stream.read_line(&mut buffer))
                 .map_err(|e| Error::ExecutionFailed(format!("Failed to read outputs: {}", e)))?;
             buffer = buffer.replace("\r\n", "\n");
-            trace!("Reading command output: {:?}", buffer);
+            debug!("Reading command output: {:?}", buffer);
             // We receive an exit code
             if buffer.starts_with("RUNAWAY_ECODE: "){
                 trace!("Ecode message detected");
@@ -1128,7 +1126,7 @@ async fn setup_scp_send<'a>(remote: &'a Arc<Mutex<Remote>>,
             error!("Failed to obtain channel");
             return Err(Error::ChannelNotAvailable)
         },
-        Err(e) => return Err(Error::ScpSendFailed(format!("Failed to open scp send channel: {}", e))),
+        Err(e) => return Err(Error::ScpSendFailed(format!("Failed to open scp send channel. Does the path exist ? : {}", e))),
     };
     Ok((local_file, bytes as i64, channel))
 }
@@ -1384,12 +1382,12 @@ mod test {
             };
             let remote = RemoteHandle::spawn(profile).unwrap();
             // Check order of outputs
-            let commands = vec![RawCommand("a=KIKOU".into()), 
+            let commands = vec![RawCommand("a=\"KIKOU KIKOU\"".into()), 
                                 RawCommand("echo $a".into())];
             let context = TerminalContext::default();
             let (_, outputs) = remote.async_pty(context, commands, None, None).await.unwrap();
             let output = misc::compact_outputs(outputs);
-            assert_eq!(String::from_utf8(output.stdout).unwrap(), "KIKOU\n");
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), "KIKOU KIKOU\n");
             assert_eq!(output.status.code().unwrap(), 0);
        }
         block_on(test());
@@ -1467,11 +1465,11 @@ mod test {
                                              EnvironmentValue("VAL1".into()));
             let commands = vec![RawCommand("pwd".into()), 
                                 RawCommand("echo $RUNAWAY_TEST".into()),
-                                RawCommand("export RUNAWAY_TEST=VAL2".into())];
+                                RawCommand("export RUNAWAY_TEST=\"VAL2 VAL3\"".into())];
             let (context, outputs) = remote.async_pty(context, commands, None, None).await.unwrap();
             let output = misc::compact_outputs(outputs);
             assert_eq!(String::from_utf8(output.stdout).unwrap(), "/tmp\nVAL1\n");
-            assert_eq!(context.envs.get(&EnvironmentKey("RUNAWAY_TEST".into())).unwrap(), &EnvironmentValue("VAL2".into()));
+            assert_eq!(context.envs.get(&EnvironmentKey("RUNAWAY_TEST".into())).unwrap(), &EnvironmentValue("VAL2 VAL3".into()));
             assert_eq!(output.status.code().unwrap(), 0);
        }
         block_on(test());

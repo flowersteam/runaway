@@ -338,7 +338,7 @@ struct Host {
 impl Host {
     // Builds a host from a configuration.
     #[instrument(name="Host::from_conf")]
-    fn from_conf(conf: HostConf) -> Result<Host, Error> {
+    fn from_conf(conf: HostConf, context: FrontendContext) -> Result<Host, Error> {
         trace!("Loading from conf");
         // We retrieve the ssh profile from the configuration
         let profile = ssh::config::get_profile(
@@ -351,7 +351,7 @@ impl Host {
         trace!(?conn, "Connection to frontend acquired");
 
         // We generate the host
-        let mut context = FrontendContext(TerminalContext::default());
+        let mut context = context;
         context.0.envs.insert(EnvironmentKey("RUNAWAY_PATH".into()), 
                               EnvironmentValue(conf.directory.to_str().unwrap().into()));
         Ok(Host {
@@ -382,7 +382,7 @@ impl Host {
 
         // We retrieve node ids from the terminal context
         let node_ids = extract_nodes(&frontend_context.0)?;
-        trace!(?node_ids, "Retrieved nodes");
+        trace!("Retrieved nodes: {:?}", node_ids);
 
         // We spawn the nodes
         trace!("Spawning nodes");
@@ -542,8 +542,8 @@ pub struct HostHandle {
 impl HostHandle {
     /// This function spawns the thread that will handle all the repository operations using the
     /// CampaignResource, and returns a handle to it.
-    pub fn spawn(host_conf: HostConf) -> Result<HostHandle, Error> {
-        let host = Host::from_conf(host_conf.clone())?;
+    pub fn spawn(host_conf: HostConf, context: TerminalContext<PathBuf>) -> Result<HostHandle, Error> {
+        let host = Host::from_conf(host_conf.clone(), FrontendContext(context))?;
         let conn = host.conn.clone();
         let (sender, receiver) = mpsc::unbounded();
         let handle = thread::Builder::new().name("host".into())
@@ -771,7 +771,7 @@ fn extract_nodes(context: &TerminalContext<PathBuf>) -> Result<Vec<NodeId>, Erro
         // We search the nodes string in environment variables
         .envs
         .get(&EnvironmentKey("RUNAWAY_NODES".into()))
-        .map(|EnvironmentValue(s)| s)
+        .map(|EnvironmentValue(s)| s.trim_start_matches(' ').trim_end_matches(' ').to_owned())
         .ok_or(Error::AllocationFailed("RUNAWAY_NODES was not set.".to_string()))?
         // We split and map to node ids
         .split(' ')
@@ -860,7 +860,7 @@ fn extract_handles(context: &TerminalContext<PathBuf>) -> Result<Vec<HandleId>, 
         // We search the nodes string in environment variables
         .envs
         .get(&EnvironmentKey("RUNAWAY_HANDLES".into()))
-        .map(|EnvironmentValue(s)| s)
+        .map(|EnvironmentValue(s)| s.trim_start_matches(' ').trim_end_matches(' ').to_owned())
         .ok_or(Error::AllocationFailed(format!("RUNAWAY_HANDLES was not set.")))?
         // We split and map to node ids
         .split(' ')
@@ -990,8 +990,10 @@ mod test {
             execution: vec!["$RUNAWAY_COMMAND".to_owned()],
             directory: path::PathBuf::from("/projets/flowers/alex/executions"),
         };
+        
 
-        let res_handle = HostHandle::spawn(conf).unwrap();
+        let context = TerminalContext::default();
+        let res_handle = HostHandle::spawn(conf, context).unwrap();
 
         // We test environment of first connection
         let conn1 = {
@@ -1080,7 +1082,10 @@ mod test {
             directory: path::PathBuf::from("/projets/flowers/alex/executions"),
         };
 
-        let res_handle = HostHandle::spawn(conf).unwrap();
+
+        let context = TerminalContext::default();
+
+        let res_handle = HostHandle::spawn(conf, context).unwrap();
 
         async fn test(res: HostHandle) {
             let conn = res.async_acquire().await.unwrap();

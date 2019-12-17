@@ -28,7 +28,9 @@ impl Visit for EchoVisitor{
 // This logger only echoes messages to stderr, without any more formatting.
 pub enum EchoSubscriber{
     Normal,
-    Verbose
+    Verbose,
+    Ssh,
+    Trace(String)
 }
 
 impl EchoSubscriber{
@@ -40,13 +42,28 @@ impl EchoSubscriber{
         tracing::subscriber::set_global_default(EchoSubscriber::Verbose)
             .expect("Setting logger failed.");
     }
+    pub fn setup_ssh(){
+        tracing::subscriber::set_global_default(EchoSubscriber::Ssh)
+            .expect("Setting logger failed.");
+    }
+    pub fn setup_trace(module: String){
+        tracing::subscriber::set_global_default(EchoSubscriber::Trace(module))
+            .expect("Setting logger failed.");
+
+    }
 }
 
 impl Subscriber for EchoSubscriber{
     fn enabled(&self, metadata: &Metadata) -> bool { 
-        match (self, metadata.level()){
-            (_, &Level::INFO) | (_, &Level::ERROR)  => true,
-            (EchoSubscriber::Verbose, &Level::DEBUG) | (EchoSubscriber::Verbose, &Level::WARN) => true,
+        match (self, metadata.level(), metadata.target()){
+            (_, &Level::INFO, _) => true,
+            (_, &Level::ERROR, _)  => true,
+            (EchoSubscriber::Verbose, &Level::DEBUG, t) if t != "liborchestra::ssh" => true,
+            (EchoSubscriber::Verbose, &Level::WARN, _) => true,
+            (EchoSubscriber::Ssh, &Level::DEBUG, "liborchestra::ssh") => true,
+            (EchoSubscriber::Ssh, &Level::WARN, "liborchestra::ssh") => true,
+            (EchoSubscriber::Trace(m), &Level::TRACE, t) if t == format!("liborchestra::{}", m) => true,
+            (EchoSubscriber::Trace(_), &Level::DEBUG, _) => true,
             _ => false
         }
     }
