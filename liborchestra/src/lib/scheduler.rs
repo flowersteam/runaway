@@ -687,10 +687,10 @@ if __name__ == \"__main__\":
         command.stderr(std::process::Stdio::inherit());
         let scheduler = SchedulerHandle::spawn(command, "scheduler.py".into()).unwrap();
 
-        let parameters = block_on(scheduler.async_request_parameters()).unwrap();
+        let parameters = block_on(scheduler.async_request_parameters("hhh".into())).unwrap();
         assert_eq!(parameters, format!("params_from_python"));
 
-        block_on(scheduler.async_record_output("params_from_rust".into(), "stdout".into(), "stderr".into(), 0, "1.5".into(), ".".into())).unwrap();
+        block_on(scheduler.async_record_output("hhh".into(), "params_from_rust".into(), "stdout".into(), "stderr".into(), 0, "1.5".into(), ".".into())).unwrap();
 
         drop(scheduler);
 
@@ -702,9 +702,9 @@ if __name__ == \"__main__\":
         command.stderr(std::process::Stdio::inherit());
         let scheduler = SchedulerHandle::spawn(command, "scheduler.py".into()).unwrap();
 
-        block_on(scheduler.async_request_parameters()).unwrap_err();
+        block_on(scheduler.async_request_parameters("hhh".into())).unwrap_err();
 
-        block_on(scheduler.async_record_output("params_from_rust".into(), "stdout".into(), "stderr".into(), 0, "1.5".into(), ".".into())).unwrap_err();
+        block_on(scheduler.async_record_output("hhh".into(), "params_from_rust".into(), "stdout".into(), "stderr".into(), 0, "1.5".into(), ".".into())).unwrap_err();
 
     }
 
