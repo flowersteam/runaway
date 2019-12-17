@@ -38,9 +38,18 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
     // We create the store that will keep env vars
     let mut store = EnvironmentStore::new();
 
+    // We read the envs to the store.
+    if !matches.is_present("no-env-read"){
+        let envs = misc::read_local_runaway_envs();
+        debug!("Local environment variables captured: {}", envs.iter()
+            .fold(String::new(), |mut acc, (k, v)| {acc.push_str(&format!("\n{:?}={:?}", k, v)); acc}));
+        envs.into_iter()
+            .for_each(|(k, v)| {push_env(&mut store, k.0, v.0);});
+    }
+
     // We load the host
     info!("Loading host");
-    let host = misc::get_host(matches.value_of("REMOTE").unwrap())?;
+    let host = misc::get_host(matches.value_of("REMOTE").unwrap(), store.clone())?;
     push_env(&mut store, "RUNAWAY_REMOTE", host.get_name());
     debug!("Host {:?} loaded", host);
 
