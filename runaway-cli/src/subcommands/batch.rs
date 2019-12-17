@@ -58,7 +58,7 @@ pub fn batch(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
 
     // We load the host
     info!("Loading host");
-    let host = misc::get_host(matches.value_of("REMOTE").unwrap())?;
+    let host = misc::get_host(matches.value_of("REMOTE").unwrap(), store.clone())?;
     push_env(&mut store, "RUNAWAY_REMOTE", host.get_name());
     debug!("Host {} loaded", host);
 

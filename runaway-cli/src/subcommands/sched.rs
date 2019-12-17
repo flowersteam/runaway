@@ -58,7 +58,7 @@ pub fn sched(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
 
     // We load the host
     info!("Loading host");
-    let host = misc::get_host(matches.value_of("REMOTE").unwrap())?;
+    let host = misc::get_host(matches.value_of("REMOTE").unwrap(), store.clone())?;
     push_env(&mut store, "RUNAWAY_REMOTE", host.get_name());
     debug!("Host {} loaded", host);
 
@@ -180,10 +180,16 @@ pub fn sched(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
             // Again, we make local copies.
             let sched = sched.clone();
             let host = host.clone();
+            let mut store = store;
+
+            // We generate an uuid
+            let id = uuid::Uuid::new_v4().hyphenated().to_string();
+            push_env(&mut store, "RUNAWAY_UUID", id.clone());
+            debug!("Execution id set to {}", format!("{}", id));
 
             // We get the arguments
             info!("Querying the scheduler");
-            let arguments: String = match sched.async_request_parameters().await{
+            let arguments: String = match sched.async_request_parameters(id.clone()).await{
                 Ok(arg) => Ok(arg),
                 Err(liborchestra::scheduler::Error::Crashed) => Err(Exit::SchedulerCrashed),
                 Err(liborchestra::scheduler::Error::Shutdown) => Err(Exit::SchedulerShutdown),
@@ -193,18 +199,18 @@ pub fn sched(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
 
             // We acquire the node
             let node = to_exit!(host.async_acquire().await, Exit::NodeAcquisition)?;
-            let mut store = store;
+
             store.extend(node.context.envs.clone().into_iter());
             debug!("Acquired node with context: \nCwd: {}\nEnvs:\n    {}", 
                 node.context.cwd.0.to_str().unwrap(), 
                 format_env(&node.context.envs).replace("\n", "\n    ")
             );
 
-            Ok((arguments, node, store))
+            Ok((arguments, node, store, id))
         };
 
         // We execute this future and breaks if an error was encountered
-        let (arguments, node, store) = match executor.run(arg_and_node_and_store_fut){
+        let (arguments, node, store, id) = match executor.run(arg_and_node_and_store_fut){
             Ok(a) => a,
             Err(e) => break e
         };
@@ -213,7 +219,7 @@ pub fn sched(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
         let perform_fut = async move {
             info!("Starting execution with arguments\"{}\"", arguments);
             // We perform the exec
-            let (local_fetch_archive, store, remote_fetch_hash, execution_code) = perform_on_node(
+            let (local_fetch_archive, store, remote_fetch_hash, output) = perform_on_node(
                 store,
                 node,
                 &host,
@@ -226,13 +232,21 @@ pub fn sched(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
                 &fetch_include_globs,
                 matches.is_present("on-local"),
             ).await?;
-            let ret = unpacks_fetch_post_proc(&matches, local_fetch_archive, store.clone(), remote_fetch_hash, execution_code);
-            if let Some(EnvironmentValue(features)) = store.get(&EnvironmentKey("RUNAWAY_FEATURES".into())) {
-                to_exit!(sched.async_record_output(arguments, features.to_string()).await, Exit::RecordFeatures)?;
-            } else {
-                error!("RUNAWAY_FEATURES was not set.");
-                return Err(Exit::FeaturesNotSet);
-            }
+            let ret = unpacks_fetch_post_proc(&matches, local_fetch_archive.clone(), store.clone(), remote_fetch_hash, output.ecode);
+            let features = match store.get(&EnvironmentKey("RUNAWAY_FEATURES".into())){
+                Some(EnvironmentValue(features)) => features.to_string(),
+                None => "".to_owned()
+            };
+            let path = local_fetch_archive
+                .parent()
+                .unwrap()
+                .canonicalize()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
+            to_exit!(sched.async_record_output(id, arguments, output.stdout, output.stderr, output.ecode, features, path).await,
+                Exit::RecordFeatures)?;
             ret
         };
 
@@ -375,17 +389,11 @@ async fn perform_on_node(store: EnvironmentStore,
                          fetch_ignore_globs: &Vec<Glob<String>>,
                          fetch_include_globs: &Vec<Glob<String>>,
                          on_local: bool
-                         ) -> Result<(PathBuf, EnvironmentStore, Sha1Hash, i32), Exit>{
+                         ) -> Result<(PathBuf, EnvironmentStore, Sha1Hash, OutputBuf), Exit>{
 
 
     let mut store = store;
     push_env(&mut store, "RUNAWAY_ARGUMENTS", arguments);
-
-
-    // We generate an uuid
-    let id = uuid::Uuid::new_v4().hyphenated().to_string();
-    push_env(&mut store, "RUNAWAY_UUID", id.clone());
-    debug!("Execution id set to {}", format!("{}", id));
 
 
     // We generate the remote folder and unpack data into it
@@ -403,6 +411,8 @@ async fn perform_on_node(store: EnvironmentStore,
         &node
     ).await?;
 
+    // We retrieve the id 
+    let EnvironmentValue(id) = store.get(&EnvironmentKey("RUNAWAY_UUID".into())).unwrap().to_owned();
 
     // We perform the job
     debug!("Executing script");
@@ -514,7 +524,7 @@ async fn perform_on_node(store: EnvironmentStore,
 
 
     // We return needed informations
-    Ok((local_fetch_archive, execution_context.envs, remote_fetch_hash, out.ecode))
+    Ok((local_fetch_archive, execution_context.envs, remote_fetch_hash, out))
 
 }
 
