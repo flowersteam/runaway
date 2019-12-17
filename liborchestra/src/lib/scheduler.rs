@@ -36,6 +36,7 @@ use tracing_futures::Instrument;
 use std::os::unix::process::CommandExt;
 use libc::{signal, SIGINT, SIG_IGN};
 use std::process::Stdio;
+use std::path::PathBuf;
 
 
 //----------------------------------------------------------------------------------------- MESSAGES
@@ -46,11 +47,12 @@ use std::process::Stdio;
 /// This enumeration represents the different request messages that can be sent to the command. Those 
 /// requests will be serialized to the following jsons when sent to the command stdin:
 pub enum RequestMessages{
-    /// Example of json transcript: `{"GET_PARAMETERS_REQUEST": {}}`
-    GetParametersRequest{},
-    /// Example of json transcript: `{"RECORD_OUTPUT_REQUEST": {"parametes": "some params", 
+    /// Example of json transcript: `{"GET_PARAMETERS_REQUEST": {"uuid": "kkkagr23451"}}`
+    GetParametersRequest{ uuid: String },
+    /// Example of json transcript: `{"RECORD_OUTPUT_REQUEST": {"uuid": "kkkagr23451", "parametes": 
+    /// "some params", "stdout": "some mess", "stderr": "some mess", "ecode": 0, "path": "/home", 
     /// "features": "[0.5, 0.5]"} }`
-    RecordOutputRequest{ parameters: String, features: String},
+    RecordOutputRequest{ uuid: String, parameters: String, stdout: String, stderr: String, ecode: i32, features: String, path: String},
     // Example of json transcript: `{"SHUTDOWN_REQUEST": {}}`
     ShutdownRequest{},
 }
@@ -76,7 +78,7 @@ pub enum ResponseMessages{
 //------------------------------------------------------------------------------------------- MACROS
 
 
-/// This macro allows to send a particular request to the scheduler, and retrieve the output
+/// This macro allows to send a particular request to the scheduler, and retrieve the output.
 #[macro_export]
 macro_rules! query_command {
     ($sched: expr, $req: expr ) => {
@@ -220,7 +222,7 @@ impl Scheduler {
 
     /// Inner future containing the logic to request parameters. 
     #[instrument(name="Scheduler::request_parameters", skip(sched))]
-    async fn request_parameters(sched: Arc<Mutex<Scheduler>>) -> Result<String, Error> {
+    async fn request_parameters(sched: Arc<Mutex<Scheduler>>, uuid: String) -> Result<String, Error> {
         trace!("Requesting parameters");
         loop{
             let response = {
@@ -236,7 +238,7 @@ impl Scheduler {
                 }
 
                 // We query the command
-                let request = RequestMessages::GetParametersRequest{};
+                let request = RequestMessages::GetParametersRequest{uuid: uuid.clone()};
                 query_command!(sched, &request)?
             };
 
@@ -253,7 +255,9 @@ impl Scheduler {
 
     /// Inner future containing the logic to record an output. 
     #[instrument(name="Scheduler::record_output", skip(sched))]
-    async fn record_output(sched: Arc<Mutex<Scheduler>>, parameters: String, features: String) -> Result<(), Error>{
+    async fn record_output(sched: Arc<Mutex<Scheduler>>, uuid: String, parameters: String, 
+        stdout: String, stderr: String, ecode: i32, features: String, path: String) 
+        -> Result<(), Error>{
         trace!("Recording output");
         {   
             // We bind the command to this scope. Such that if one of the io blocks, we are sure that 
@@ -271,7 +275,7 @@ impl Scheduler {
             }
  
             // We query the command
-            let request = RequestMessages::RecordOutputRequest{parameters, features};
+            let request = RequestMessages::RecordOutputRequest{uuid, parameters, stdout, stderr, ecode, features, path};
             match query_command!(sched, &request)?{
                 ResponseMessages::RecordOutputResponse{} => Ok(()),
                 m => Err(Error::Message(format!("Unexpected message received {:?}", m)))
@@ -323,8 +327,8 @@ impl Scheduler {
 /// Messages sent by the outer future to the resource inner thread, so as to start an operation. 
 /// This contains the input of the operation if any.
 enum OperationInput{
-    RequestParameters,
-    RecordOutput(String, String),
+    RequestParameters(String),
+    RecordOutput(String, String, String, String, i32, String, String),
     Shutdown,
 }
 
@@ -396,9 +400,9 @@ impl SchedulerHandle {
                     let _guard = span.enter();
                     trace!(?operation, "Received operation");
                     match operation {
-                        OperationInput::RequestParameters => {
+                        OperationInput::RequestParameters(uuid) => {
                             spawner.spawn_local(
-                                Scheduler::request_parameters(res.clone())
+                                Scheduler::request_parameters(res.clone(), uuid)
                                     .map(|a| {
                                         sender.send(OperationOutput::RequestParameters(a))
                                             .map_err(|e| error!("Failed to \\
@@ -408,9 +412,9 @@ impl SchedulerHandle {
                                     .instrument(span.clone())
                             )
                         }
-                        OperationInput::RecordOutput(parameters, features) => {
+                        OperationInput::RecordOutput(uuid, parameters, stdout, stderr, ecode, features, path) => {
                             spawner.spawn_local(
-                                Scheduler::record_output(res.clone(), parameters, features)
+                                Scheduler::record_output(res.clone(), uuid, parameters, stdout, stderr, ecode, features, path)
                                     .map(|a| {
                                         sender.send(OperationOutput::RecordOutput(a))
                                             .map_err(|e| error!("Failed to \\
@@ -473,12 +477,12 @@ impl SchedulerHandle {
 
     /// Async method, which request a parameter string from the scheduler, and wait for it if the 
     /// scheduler is not yet ready.
-    pub fn async_request_parameters(&self) -> impl Future<Output=Result<String,Error>> {
+    pub fn async_request_parameters(&self, uuid: String) -> impl Future<Output=Result<String,Error>> {
         let mut chan = self._sender.clone();
         async move {
             let (sender, receiver) = oneshot::channel();
             trace!("Sending async request parameters input");
-            chan.send((sender, OperationInput::RequestParameters))
+            chan.send((sender, OperationInput::RequestParameters(uuid)))
                 .await
                 .map_err(|e| Error::Channel(e.to_string()))?;
             trace!("Awaiting async request parameters output");
@@ -491,12 +495,14 @@ impl SchedulerHandle {
     }
 
     /// Async method, returning a future that ultimately resolves after the output was recorded.
-    pub fn async_record_output(&self, parameters: String, output: String) -> impl Future<Output=Result<(),Error>> {
+    pub fn async_record_output(&self, uuid: String, parameters: String, stdout: String, 
+        stderr: String, ecode: i32, features: String, path: String) 
+        -> impl Future<Output=Result<(),Error>> {
         let mut chan = self._sender.clone();
         async move {
             let (sender, receiver) = oneshot::channel();
             trace!("Sending async record output input");
-            chan.send((sender, OperationInput::RecordOutput(parameters, output)))
+            chan.send((sender, OperationInput::RecordOutput(uuid, parameters, stdout, stderr, ecode, features, path)))
                 .await
                 .map_err(|e| Error::Channel(e.to_string()))?;
             trace!("Awaiting async record output output");
@@ -611,7 +617,11 @@ if __name__ == \"__main__\":
         elif \"RECORD_OUTPUT_REQUEST\" in inpt.keys():
             sys.stderr.write(f\"Python received RECORD_OUTPUT_REQUEST {inpt}\\n\")
             if inpt[\"RECORD_OUTPUT_REQUEST\"][\"parameters\"] != \"params_from_rust\": raise Exception()
+            if inpt[\"RECORD_OUTPUT_REQUEST\"][\"stdout\"] != \"stdout\": raise Exception()
+            if inpt[\"RECORD_OUTPUT_REQUEST\"][\"stderr\"] != \"stderr\": raise Exception()
+            if inpt[\"RECORD_OUTPUT_REQUEST\"][\"ecode\"] != 0: raise Exception()
             if inpt[\"RECORD_OUTPUT_REQUEST\"][\"features\"] != '1.5': raise Exception()
+            if inpt[\"RECORD_OUTPUT_REQUEST\"][\"path\"] != \".\": raise Exception()
             sys.stdout.write(json.dumps({\"RECORD_OUTPUT_RESPONSE\": {}}))
             sys.stdout.write(\"\\n\")
         elif \"SHUTDOWN_REQUEST\" in inpt.keys():
@@ -643,6 +653,10 @@ if __name__ == \"__main__\":
         elif \"RECORD_OUTPUT_REQUEST\" in inpt.keys():
             sys.stderr.write(\"Python received RECORD_OUTPUT_REQUEST\\n\")
             if inpt[\"RECORD_OUTPUT_REQUEST\"][\"parameters\"] != \"params_from_rust\": raise Exception()
+            if inpt[\"RECORD_OUTPUT_REQUEST\"][\"stdout\"] != \"stdout\": raise Exception()
+            if inpt[\"RECORD_OUTPUT_REQUEST\"][\"stderr\"] != \"stderr\": raise Exception()
+            if inpt[\"RECORD_OUTPUT_REQUEST\"][\"ecode\"] != 0: raise Exception()
+            if inpt[\"RECORD_OUTPUT_REQUEST\"][\"path\"] != \".\": raise Exception()
             if inpt[\"RECORD_OUTPUT_REQUEST\"][\"features\"] != '1.5': raise Exception()
             print(json.dumps({\"ERROR_RESPONSE\": {\"message\": \"error_from_python\"}}))
         elif \"SHUTDOWN_REQUEST\" in inpt.keys():
@@ -673,10 +687,10 @@ if __name__ == \"__main__\":
         command.stderr(std::process::Stdio::inherit());
         let scheduler = SchedulerHandle::spawn(command, "scheduler.py".into()).unwrap();
 
-        let parameters = block_on(scheduler.async_request_parameters()).unwrap();
+        let parameters = block_on(scheduler.async_request_parameters("hhh".into())).unwrap();
         assert_eq!(parameters, format!("params_from_python"));
 
-        block_on(scheduler.async_record_output("params_from_rust".into(), "1.5".into())).unwrap();
+        block_on(scheduler.async_record_output("hhh".into(), "params_from_rust".into(), "stdout".into(), "stderr".into(), 0, "1.5".into(), ".".into())).unwrap();
 
         drop(scheduler);
 
@@ -688,9 +702,9 @@ if __name__ == \"__main__\":
         command.stderr(std::process::Stdio::inherit());
         let scheduler = SchedulerHandle::spawn(command, "scheduler.py".into()).unwrap();
 
-        block_on(scheduler.async_request_parameters()).unwrap_err();
+        block_on(scheduler.async_request_parameters("hhh".into())).unwrap_err();
 
-        block_on(scheduler.async_record_output("params_from_rust".into(), "1.5".into())).unwrap_err();
+        block_on(scheduler.async_record_output("hhh".into(), "params_from_rust".into(), "stdout".into(), "stderr".into(), 0, "1.5".into(), ".".into())).unwrap_err();
 
     }
 
