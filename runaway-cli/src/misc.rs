@@ -18,7 +18,7 @@ use clap;
 use crate::exit::Exit;
 use crate::logger::EchoSubscriber;
 use liborchestra::primitives::{read_globs_from_file, list_local_folder, Glob};
-use liborchestra::commons::{EnvironmentStore, EnvironmentKey, EnvironmentValue};
+use liborchestra::commons::{EnvironmentStore, EnvironmentKey, EnvironmentValue, TerminalContext};
 use liborchestra::scheduler::SchedulerHandle;
 use itertools::Itertools;
 use tracing::{self, info, error};
@@ -96,10 +96,12 @@ macro_rules! try_return_err {
 
 
 /// Allows to load host from a host path configuration
-pub fn get_host(host_name: &str) -> Result<HostHandle, Exit>{
+pub fn get_host(host_name: &str, envs: EnvironmentStore) -> Result<HostHandle, Exit>{
     let host_path = get_host_path(host_name);
+    let mut context = TerminalContext::default();
+    context.envs = envs;
     let config = to_exit!(HostConf::from_file(&host_path), Exit::LoadHostConfiguration)?;
-    to_exit!(HostHandle::spawn(config), Exit::SpawnHost)
+    to_exit!(HostHandle::spawn(config, context), Exit::SpawnHost)
 }
 
 /// Allows to generate globs from send and fetch ignore file.

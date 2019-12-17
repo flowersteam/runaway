@@ -692,8 +692,6 @@ if __name__ == \"__main__\":
 
         block_on(scheduler.async_record_output("params_from_rust".into(), "1.5".into())).unwrap_err();
 
-        
-
     }
 
 }
