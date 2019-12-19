@@ -1,4 +1,4 @@
-//! liborchestra/timer.rs
+//! lib/timer.rs
 //!
 //! This module contains a structure that allows asynchronous waits. It is based on the timing wheel
 //! used in tokio-timer.

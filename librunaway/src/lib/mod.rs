@@ -1,12 +1,10 @@
 #![feature(result_map_or_else, trait_alias, try_blocks)]
-//! liborchestra/mod.rs
+//! lib/mod.rs
 //!
-//! Liborchestra:
-//! =============
+//! Librunaway:
+//! ===========
 //!  
-//! Welcome to the developer documentation of liborchestra. Liborchestra gives tools to manipulate 
-//! expegit repositories, run scripts on user-defined hosts, and orchestrate the executions of 
-//! batches of experiments under variations of parameters.
+//! Welcome to the developer documentation of librunaway.
 //! 
 //! Concepts around which the code is written:
 //! + Experiment: refers to the code of the experiment. By extension, refers to the separate
@@ -32,16 +30,16 @@
 //! in [the async-rust book](https://rust-lang.github.io/async-book/). If you never read or wrote 
 //! asynchronous code before, you may well try to get intuition about it with some experiments and 
 //! tutorials. If you already know about asynchronous code, and want to speed up, here are the 
-//! important bits to sort the code out:
+//! important bits to sort things out:
 //!     + `Future` is a trait whose implementation contains a piece of logic of your code. This 
-//!       piece of asynchronous execution is coded in the `poll` function of the trait. Put simply, 
-//!       this function returns `Pending`, if the execution can't be concluded yet, and `Ready(...)` 
+//!       piece of asynchronous execution is coded in the `poll` method of the trait. Put simply, 
+//!       this method returns `Pending`, if the execution can't be concluded yet, and `Ready(...)` 
 //!       if it is done.
 //!     + A `Future` in itself, is pretty useless, it has to be spawned (as a _task_) on an 
 //!       `Executor`, which will take care about driving the task to completion, by repetedly 
 //!       calling `.poll()` on the different tasks it's responsible for (in fact not really, see the 
 //!       last comment).
-//!     + Since writing all your code in via `Future` trait implementation is a mess, the language 
+//!     + Since writing all the code in `Future` implementation is a mess, the language 
 //!       team implemented the `async` block feature that makes everything simpler.
 //!     + Tagging a block or a function with an `async` keyword, will turn this block into a future. 
 //!       Those blocks does not give you the ability to create your own future logic (for example 
@@ -63,7 +61,7 @@
 //! 
 //! The Futures-based asynchronous paradigm used in rust allows to run several concurrent tasks on a 
 //! handful of threads. The most common use of this concurrency, is asynchronous i/o in io-bound 
-//! applications. For this reason, most current tools are developed around this need, i.e. the 
+//! applications. For this reason, most current tools are developed around this need, e.g. the 
 //! `tokio` framework which provides asynchronous `TcpListeners`. 
 //! 
 //! This being said, concurrency can be applied to several other situations, for example the 
@@ -72,9 +70,9 @@
 //! can be run in parallel), but we only have access to say 8 local threads to launch the scripts 
 //! and gather the outputs. Then two main logics can be used:
 //!     + Every threads take a task and drive it to completion (starts the script, wait for it to 
-//!       finish and gather data) beforemoving to a new task. In our case, we have at most 8 tasks 
+//!       finish and gather data) before moving to a new task. In our case, we have at most 8 tasks 
 //!       running at the same time.
-//!     + Every threads perform as much work as possible on a task before switching to another task 
+//!     + Every threads performs as much work as possible on a task before switching to another task 
 //!       that, can be advanced, before eventually coming back to the first to advance it further. 
 //!       In this case, the concurrent number of tasks is not limited by the number of threads. 
 //! The second approach is a perfect fit for Futures-based concurrency as existing in rust.
@@ -90,7 +88,7 @@
 //! we had to wrap several synchronous resources into an asynchronous handle. This is the case of 
 //! following structures:
 //!     + `ssh::RemoteHandle` is a handle to a synchronous ssh remote connection.
-//!     + `repository::CampaignHandle` is a handle to a synchronous campaign repository.
+//!     + `repository::CampaignHandle` is a handle to a synchronous campaign repository
 //!     + `application::ApplicationHandle` is a handle to a synchronous application managing several 
 //!       remote executions.
 //!     + `hosts::HostHandle` is a handle to a synchronous cluster connection.
@@ -312,11 +310,11 @@ pub static SEND_IGNORE_RPATH: &str = ".sendignore";
 /// globs pattern for files to ignore in fetch
 pub static FETCH_IGNORE_RPATH: &str = ".fetchignore";
 /// folder containing execution profiles in $HOME
-pub static PROFILES_FOLDER_RPATH: &str = ".orchestra";
+pub static PROFILES_FOLDER_RPATH: &str = ".runaway";
 /// file containing known hosts keys
-pub static KNOWN_HOSTS_RPATH: &str = ".orchestra/known_hosts";
+pub static KNOWN_HOSTS_RPATH: &str = ".runaway/known_hosts";
 /// file containing ssh configs
-pub static SSH_CONFIG_RPATH: &str = ".orchestra/config";
+pub static SSH_CONFIG_RPATH: &str = ".runaway/config";
 /// file name of tar archive to send
 pub static SEND_ARCH_RPATH: &str = ".send.tar";
 /// file name of tar to fetch

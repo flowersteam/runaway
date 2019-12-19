@@ -11,15 +11,15 @@ use ctrlc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use liborchestra::{
+use librunaway::{
     PROFILES_FOLDER_RPATH};
-use liborchestra::hosts::{HostConf, HostHandle};
+use librunaway::hosts::{HostConf, HostHandle};
 use clap;
 use crate::exit::Exit;
 use crate::logger::EchoSubscriber;
-use liborchestra::primitives::{read_globs_from_file, list_local_folder, Glob};
-use liborchestra::commons::{EnvironmentStore, EnvironmentKey, EnvironmentValue, TerminalContext};
-use liborchestra::scheduler::SchedulerHandle;
+use librunaway::primitives::{read_globs_from_file, list_local_folder, Glob};
+use librunaway::commons::{EnvironmentStore, EnvironmentKey, EnvironmentValue, TerminalContext};
+use librunaway::scheduler::SchedulerHandle;
 use itertools::Itertools;
 use tracing::{self, info, error};
 use std::env;

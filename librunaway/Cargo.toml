@@ -1,5 +1,5 @@
 [package]
-name = "liborchestra"
+name = "librunaway"
 version = "0.3.1"
 authors = ["Alexandre Péré <alexandre.pere@protonmail.com>"]
 edition = "2018"
@@ -36,5 +36,5 @@ arrayvec = "0.5.1"
 lazy_static = "1.4.0"
 
 [lib]
-name="liborchestra"
+name="librunaway"
 path="src/lib/mod.rs"

@@ -1,4 +1,4 @@
-//! liborchestra/primitives.rs
+//! lib/primitives.rs
 //!
 //! This module contains primitives functions (asynchronous or not) that can be assembled to produce 
 //! larger pieces of logic commonly used in the applications.

@@ -1,4 +1,4 @@
-//! liborchestra/error.rs
+//! lib/errorrs
 //!
 //! This module contains module-level error type to interface with the error types implemented at
 //! the sub-module level. 
