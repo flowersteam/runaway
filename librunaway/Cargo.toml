@@ -16,7 +16,7 @@ yaml-rust="0.4"
 rust-crypto = "0.2"
 uuid = { version = "0.6", features = ["serde", "v4"] }
 rpassword = "0.0.4"
-ssh2 = "0.3.3"
+ssh2 = "0.6"
 shells = "0.2.0"
 dirs = "1.0"
 url = "1.7.2"

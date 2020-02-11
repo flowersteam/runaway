@@ -1,10 +1,4 @@
 [workspace]
 members = [
     "librunaway",
-    "runaway-cli",
-    "ssh2-rs",
-    "libssh2-sys"]
-
-[patch.crates-io]
-"ssh2" = {path="ssh2-rs"}
-"libssh2-sys" = { path = "libssh2-sys"}
+    "runaway-cli",]
