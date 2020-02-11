@@ -1,4 +1,4 @@
-//! liborchestra/commons.rs
+//! lib/commons.rs
 //!
 //! This module contains some type definitions common to the whole project.
 

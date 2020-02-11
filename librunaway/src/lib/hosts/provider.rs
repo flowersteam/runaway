@@ -1,5 +1,4 @@
-//! liborchestra/hosts/queue.rs
-//! Author: Alexandre Péré
+//! lib/hosts/queue.rs
 //!
 //! This module contains structure that manages host allocations. The resulting tool is the
 //! HostResource, which given an host configuration provide asynchronous nodes allocation. Put

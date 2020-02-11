@@ -7,21 +7,21 @@
 //-------------------------------------------------------------------------------------------IMPORTS
 
 
-use liborchestra::{
+use librunaway::{
     SEND_ARCH_RPATH, 
     FETCH_ARCH_RPATH};
-use liborchestra::hosts::{HostHandle, LeaveConfig};
+use librunaway::hosts::{HostHandle, LeaveConfig};
 use clap;
 use uuid;
 use futures::executor::{block_on};
 use futures::task::SpawnExt;
 use crate::{to_exit};
-use liborchestra::commons::{EnvironmentStore,substitute_environment, push_env, OutputBuf, AsResult,
+use librunaway::commons::{EnvironmentStore,substitute_environment, push_env, OutputBuf, AsResult,
                             EnvironmentKey, EnvironmentValue, DropBack, Expire, format_env};
-use liborchestra::hosts::NodeHandle;
-use liborchestra::primitives::{self, Glob, Sha1Hash};
-use liborchestra::ssh::RemoteHandle;
-use liborchestra::scheduler::SchedulerHandle;
+use librunaway::hosts::NodeHandle;
+use librunaway::primitives::{self, Glob, Sha1Hash};
+use librunaway::ssh::RemoteHandle;
+use librunaway::scheduler::SchedulerHandle;
 use crate::color;
 use crate::misc;
 use crate::exit::Exit;
@@ -191,8 +191,8 @@ pub fn sched(matches: clap::ArgMatches<'static>) -> Result<Exit, Exit>{
             info!("Querying the scheduler");
             let arguments: String = match sched.async_request_parameters(id.clone()).await{
                 Ok(arg) => Ok(arg),
-                Err(liborchestra::scheduler::Error::Crashed) => Err(Exit::SchedulerCrashed),
-                Err(liborchestra::scheduler::Error::Shutdown) => Err(Exit::SchedulerShutdown),
+                Err(librunaway::scheduler::Error::Crashed) => Err(Exit::SchedulerCrashed),
+                Err(librunaway::scheduler::Error::Shutdown) => Err(Exit::SchedulerShutdown),
                 Err(e) => to_exit!(Err(e), Exit::RequestParameters)
             }?;
             debug!("Scheduler returned argument {:?}", arguments);
@@ -437,7 +437,7 @@ async fn perform_on_node(store: EnvironmentStore,
             Some(stdout_callback), 
             Some(stderr_callback)).await,
         Exit::Execute)?;
-    let out: OutputBuf = liborchestra::misc::compact_outputs(outs).into();
+    let out: OutputBuf = librunaway::misc::compact_outputs(outs).into();
     push_env(&mut execution_context.envs, "RUNAWAY_ECODE", format!("{}", out.ecode));
     push_env(&mut execution_context.envs, "RUNAWAY_STDOUT", &out.stdout);
     push_env(&mut execution_context.envs, "RUNAWAY_STDERR", &out.stderr);

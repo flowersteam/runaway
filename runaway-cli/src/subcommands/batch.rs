@@ -7,18 +7,18 @@
 //-------------------------------------------------------------------------------------------IMPORTS
 
 
-use liborchestra::{
+use librunaway::{
     SEND_ARCH_RPATH, 
     FETCH_ARCH_RPATH};
-use liborchestra::hosts::{HostHandle, LeaveConfig};
+use librunaway::hosts::{HostHandle, LeaveConfig};
 use clap;
 use uuid;
 use futures::executor::block_on;
 use futures::task::SpawnExt;
 use crate::{to_exit};
-use liborchestra::commons::{EnvironmentStore,substitute_environment, push_env, OutputBuf, AsResult};
-use liborchestra::primitives::{self, Glob, Sha1Hash};
-use liborchestra::ssh::RemoteHandle;
+use librunaway::commons::{EnvironmentStore,substitute_environment, push_env, OutputBuf, AsResult};
+use librunaway::primitives::{self, Glob, Sha1Hash};
+use librunaway::ssh::RemoteHandle;
 use crate::misc;
 use crate::color;
 use crate::exit::Exit;
@@ -31,7 +31,7 @@ use std::convert::TryInto;
 use rand::{self, Rng};
 use std::io::Write;
 use tracing::{self, error, debug, info, warn};
-use liborchestra::commons::format_env;
+use librunaway::commons::format_env;
 use path_abs::PathAbs;
 
 
@@ -486,7 +486,7 @@ async fn perform_on_node(store: EnvironmentStore,
             Some(stdout_callback), 
             Some(stderr_callback)).await,
         Exit::Execute)?;
-    let out: OutputBuf = liborchestra::misc::compact_outputs(outs).into();
+    let out: OutputBuf = librunaway::misc::compact_outputs(outs).into();
     push_env(&mut execution_context.envs, "RUNAWAY_ECODE", format!("{}", out.ecode));
     push_env(&mut execution_context.envs, "RUNAWAY_STDOUT", &out.stdout);
     push_env(&mut execution_context.envs, "RUNAWAY_STDERR", &out.stderr);
