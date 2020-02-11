@@ -1,7 +1,6 @@
-//! liborchestra/misc.rs
-//! Author: Alexandre Péré
+//! lib/misc.rs
 //!
-//! A few miscellaneous available library wide.
+//! A few miscellaneous functions available library wide.
 
 
 //------------------------------------------------------------------------------------------ IMPORTS

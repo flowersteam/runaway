@@ -13,7 +13,6 @@ use ssh2::{
     Session,
     KnownHostFileKind,
     CheckResult,
-    MethodType,
     KnownHostKeyFormat};
 use std::{
     net::{TcpStream, SocketAddr, ToSocketAddrs, Shutdown},
@@ -319,8 +318,6 @@ struct Remote{
     #[derivative(Debug="ignore")]
     session: Option<&'static Session>,
     #[derivative(Debug="ignore")]
-    stream: TcpStream,
-    #[derivative(Debug="ignore")]
     proxycommand: Option<ProxyCommandForwarder>,
     repr: String,
 }
@@ -385,11 +382,10 @@ impl Remote {
         trace!("Creating connection from address");
         let stream = TcpStream::connect(&addr)
             .map_err(|_| Error::ConnectionFailed(format!("Failed to connect to address {}", addr)))?;
-        let session = Remote::start_session(&stream, host, user)?;
+        let session = Remote::start_session(stream, host, user)?;
         let session: &'static Session = Box::leak(Box::new(session));
         Ok(Remote {
             session: Some(session),
-            stream,
             proxycommand: None,
             repr: format!("{}", addr),
         })
@@ -408,7 +404,7 @@ impl Remote {
 
     /// Starts the ssh session.
     #[instrument(name="Remote::start_session")]
-    fn start_session(stream: &TcpStream, host: &str, user: &str) -> Result<Session, Error> {
+    fn start_session(stream: TcpStream, host: &str, user: &str) -> Result<Session, Error> {
         trace!("Opening remote connection to host");
         let mut session = new_session(stream)?;
         authenticate_host(host, &mut session)?;
@@ -739,10 +735,11 @@ impl RemoteHandle {
 
 // Generates a new session following our preferences
 #[instrument]
-fn new_session(stream: &TcpStream) -> Result<Session, Error>{
+fn new_session(stream: TcpStream) -> Result<Session, Error>{
     trace!("Creates a new session");
     let mut session = Session::new().unwrap();
-    session.handshake(stream)
+    session.set_tcp_stream(stream);
+    session.handshake()
         .map_err(|e| Error::ConnectionFailed(format!("Failed to perform handshake: \n{}", e)))?;
     Ok(session)
 }
@@ -829,7 +826,7 @@ fn authenticate_local(user: &str, session: &mut Session) -> Result<(), Error>{
 
 // Acquires an exec channel on the remote
 #[instrument(skip(remote))]
-async fn acquire_exec_channel(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Channel<'_>, Error>{
+async fn acquire_exec_channel(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Channel, Error>{
     trace!("Acquiring exec channel.");
     // We query a channel session. Error -21 corresponds to missing available channels. It 
     // must be retried until an other execution comes to an end, and makes a channel available. 
@@ -852,7 +849,7 @@ async fn acquire_exec_channel(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Chann
 
 // Performs exec command.
 #[instrument(skip(channel))]
-async fn setup_exec(cmd: String, channel: &mut ssh2::Channel<'_>) -> Result<(), Error>{
+async fn setup_exec(cmd: String, channel: &mut ssh2::Channel) -> Result<(), Error>{
     trace!("Perform exec command `{}`", cmd);
     // We execute the command in the cwd.
     await_wouldblock_ssh!(channel.exec(&format!("{}\n", cmd)))
@@ -867,7 +864,7 @@ async fn setup_exec(cmd: String, channel: &mut ssh2::Channel<'_>) -> Result<(), 
 
 // Reads the output of an exec command, and returns the output.
 #[instrument(skip(channel))]
-async fn read_exec_out_err(channel: &mut ssh2::Channel<'_>) -> Result<Output, Error>{
+async fn read_exec_out_err(channel: &mut ssh2::Channel) -> Result<Output, Error>{
     trace!("Reading exec output");
     // We generate a new output
     let mut output = Output {
@@ -913,7 +910,7 @@ async fn read_exec_out_err(channel: &mut ssh2::Channel<'_>) -> Result<Output, Er
 
 // Closes the exec channel retrieving tyhe exit status 
 #[instrument(skip(channel))]
-async fn close_exec(channel: &mut ssh2::Channel<'_>) -> Result<ExitStatus, Error>{
+async fn close_exec(channel: &mut ssh2::Channel) -> Result<ExitStatus, Error>{
     trace!("Closing exec channel");
     // We close the channel and retrieve the execution code
     let ecode: Result<i32, ssh2::Error> = try {
@@ -929,7 +926,7 @@ async fn close_exec(channel: &mut ssh2::Channel<'_>) -> Result<ExitStatus, Error
 
 // Starts a pty channel
 #[instrument(skip(remote))]
-async fn acquire_pty_channel<'a>(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Channel<'_>, ssh2::Error>{
+async fn acquire_pty_channel<'a>(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Channel, ssh2::Error>{
     trace!("Acquiring pty channel");
     let mut channel = await_wouldblock_ssh!(await_retry_ssh!({remote.lock().await.session().channel_session()},-21))?;
     await_wouldblock_ssh!(await_retry_n_ssh!(channel.request_pty("ansi", None, Some((0,0,0,0))), 10, -14))?;
@@ -940,7 +937,7 @@ async fn acquire_pty_channel<'a>(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Ch
 
 // Setups the pty 
 #[instrument(skip(channel))]
-async fn setup_pty(channel: &mut ssh2::Channel<'_>, cwd: &PathBuf, envs: &EnvironmentStore) -> Result<(), Error>{
+async fn setup_pty(channel: &mut ssh2::Channel, cwd: &PathBuf, envs: &EnvironmentStore) -> Result<(), Error>{
     trace!("Setting up a pty channel");
     // We make sure we run on bash
     await_wouldblock_io!(channel.write_all("export HISTFILE=/dev/null\nexec bash\n".as_bytes()))
@@ -966,7 +963,7 @@ async fn setup_pty(channel: &mut ssh2::Channel<'_>, cwd: &PathBuf, envs: &Enviro
 
 // Performs a set of pty commands
 #[instrument(skip(channel, stdout_cb, stderr_cb))]
-async fn perform_pty(channel: &mut ssh2::Channel<'_>, 
+async fn perform_pty(channel: &mut ssh2::Channel, 
                      cmds: Vec<RawCommand<String>>, 
                      stdout_cb: Box<dyn Fn(Vec<u8>) + Send + 'static>,
                      stderr_cb: Box<dyn Fn(Vec<u8>) + Send + 'static> ) 
@@ -1077,7 +1074,7 @@ async fn perform_pty(channel: &mut ssh2::Channel<'_>,
 
 // Closes a pty channel.
 #[instrument(skip(channel))]
-async fn close_pty(channel: &mut ssh2::Channel<'_>) -> Result<(), Error>{
+async fn close_pty(channel: &mut ssh2::Channel) -> Result<(), Error>{
     trace!("Closing pty channel");
     // We make sure to leave bash and the landing shell
     await_wouldblock_io!(channel.write_all("history -c\nexit\n".as_bytes()))
@@ -1102,7 +1099,7 @@ async fn close_pty(channel: &mut ssh2::Channel<'_>) -> Result<(), Error>{
 async fn setup_scp_send<'a>(remote: &'a Arc<Mutex<Remote>>, 
                         local_path: &PathBuf,
                         remote_path: &PathBuf) 
-                        -> Result<(BufReader<File>, i64, ssh2::Channel<'a>), Error>{
+                        -> Result<(BufReader<File>, i64, ssh2::Channel), Error>{
     trace!("Setting up scp send");
     // Open local file and compute statistics
     let local_file = match File::open(local_path) {
@@ -1110,7 +1107,7 @@ async fn setup_scp_send<'a>(remote: &'a Arc<Mutex<Remote>>,
         Err(e) => return Err(Error::ScpSendFailed(format!("Failed to open local file: {}", e))),
     };
     let bytes = local_file.get_ref().metadata().unwrap().len();
-    
+
     // Open channel
     let ret = await_wouldblock_ssh!(
         {
@@ -1134,7 +1131,7 @@ async fn setup_scp_send<'a>(remote: &'a Arc<Mutex<Remote>>,
 
 // Performs the scp send
 #[instrument(skip(channel, local_file, bytes))]
-async fn perform_scp_send(channel: &mut ssh2::Channel<'_>, 
+async fn perform_scp_send(channel: &mut ssh2::Channel, 
                           local_file: &mut BufReader<File>, 
                           bytes: i64) -> Result<(), Error>{
     trace!("Performing scp send copy");
@@ -1172,7 +1169,7 @@ async fn perform_scp_send(channel: &mut ssh2::Channel<'_>,
 
 // Closes scp channel
 #[instrument(skip(channel))]
-async fn close_scp_channel(channel: ssh2::Channel<'_>) -> Result<(), ssh2::Error>{
+async fn close_scp_channel(channel: ssh2::Channel) -> Result<(), ssh2::Error>{
     trace!("Closing scp channel");
     let mut channel = channel;
     await_wouldblock_ssh!(channel.send_eof())?;
@@ -1188,7 +1185,7 @@ async fn close_scp_channel(channel: ssh2::Channel<'_>) -> Result<(), ssh2::Error
 async fn setup_scp_fetch<'a>(remote: &'a Arc<Mutex<Remote>>, 
                              remote_path: &PathBuf, 
                              local_path: &PathBuf ) 
-                             -> Result<(File, ssh2::Channel<'a>, i64), Error>{
+                             -> Result<(File, ssh2::Channel, i64), Error>{
     trace!("Setting up scp fetch");
     let local_file = match OpenOptions::new().write(true).create_new(true).open(local_path) {
         Ok(f) => f,
@@ -1216,9 +1213,9 @@ async fn setup_scp_fetch<'a>(remote: &'a Arc<Mutex<Remote>>,
 
 // Processes scp fetch
 #[instrument(skip(channel))]
-async fn process_scp_fetch(channel: &mut ssh2::Channel<'_>, 
-                           local_file: File, 
-                           remaining_bytes: i64) 
+async fn process_scp_fetch(channel: &mut ssh2::Channel,
+                           local_file: File,
+                           remaining_bytes: i64)
                            -> Result<(), Error>{
     trace!("Processing scp fetch");
     let mut remaining_bytes = remaining_bytes;

@@ -1,4 +1,4 @@
-//! liborchestra/hosts/mod.rs
+//! lib/hosts/mod.rs
 //! Author: Alexandre Péré
 //!
 //! This module contains structure that manages host allocations. The resulting tool is the
@@ -176,7 +176,7 @@ impl Deref for NodeHandle {
 //--------------------------------------------------------------------------------------- STRUCTURES
 
 
-/// A host configuration represents the implementation of the (imaginary) orchestra host interface
+/// A host configuration represents the implementation of the (imaginary)  host interface
 /// for a given host. It can write to/read from yaml files. The fields have the following
 /// meaning:
 /// + name: The name of the configuration
@@ -926,7 +926,7 @@ mod test {
         let subscriber = Subscriber::builder()
             //.compact()
             .with_max_level(Level::TRACE)
-            .with_env_filter("liborchestra::host=trace")
+            .with_env_filter("librunaway::host=trace")
             .without_time()
             .with_target(false)
             .finish();

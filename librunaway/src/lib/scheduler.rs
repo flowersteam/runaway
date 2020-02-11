@@ -1,4 +1,4 @@
-//! liborchestra/scheduler.rs
+//! lib/scheduler.rs
 //!
 //! This module contains a structure that allows to use an external command as a scheduler. A 
 //! scheduler is a program that will provide experiments parameters on request, based on the results
@@ -36,7 +36,6 @@ use tracing_futures::Instrument;
 use std::os::unix::process::CommandExt;
 use libc::{signal, SIGINT, SIG_IGN};
 use std::process::Stdio;
-use std::path::PathBuf;
 
 
 //----------------------------------------------------------------------------------------- MESSAGES

@@ -7,7 +7,7 @@
 //-------------------------------------------------------------------------------------------IMPORTS
 
 
-use liborchestra::PROFILES_FOLDER_RPATH;
+use librunaway::PROFILES_FOLDER_RPATH;
 use clap;
 use crate::exit::Exit;
 use crate::misc;

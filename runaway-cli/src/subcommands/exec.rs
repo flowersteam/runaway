@@ -10,18 +10,18 @@
 //-------------------------------------------------------------------------------------------IMPORTS
 
 
-use liborchestra::{
+use librunaway::{
     SEND_ARCH_RPATH, 
     FETCH_ARCH_RPATH};
-use liborchestra::hosts::LeaveConfig;
+use librunaway::hosts::LeaveConfig;
 use clap;
 use uuid;
 use futures::executor::block_on;
 use crate::{to_exit};
-use liborchestra::commons::{EnvironmentStore, substitute_environment, OutputBuf, push_env};
+use librunaway::commons::{EnvironmentStore, substitute_environment, OutputBuf, push_env};
 use crate::misc;
 use crate::exit::Exit;
-use liborchestra::primitives;
+use librunaway::primitives;
 use std::path::{PathBuf, Path};
 use tracing::{self, info, error, debug};
 
@@ -245,7 +245,7 @@ pub fn exec(matches: clap::ArgMatches) -> Result<Exit, Exit>{
                 Some(stdout_callback), 
                 Some(stderr_callback)).await,
             Exit::Execute)?;
-        let out: OutputBuf = liborchestra::misc::compact_outputs(outs.clone()).into();
+        let out: OutputBuf = librunaway::misc::compact_outputs(outs.clone()).into();
         push_env(&mut execution_context.envs, "RUNAWAY_ECODE", format!("{}", out.ecode));
         push_env(&mut execution_context.envs, "RUNAWAY_STDOUT", &out.stdout);
         push_env(&mut execution_context.envs, "RUNAWAY_STDERR", &out.stderr);
