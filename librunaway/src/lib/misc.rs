@@ -278,10 +278,10 @@ pub fn format_commands_outputs(commands: &Vec<String>, outputs: &Vec<Output>) ->
 
 /// Initializes tracing
 fn init_tracing(level: tracing::Level, env: String){
-    let subscriber = subscriber::builder()
+    let subscriber = Subscriber::builder()
         .compact()
         .with_max_level(level)
-        .with_env_filter(env.as_ref())
+        .with_env_filter(env.as_str())
         .without_time()
         .with_target(false)
         .finish();
