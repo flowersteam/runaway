@@ -1,6 +1,4 @@
-//! lib/primitives.rs
-//!
-//! This module contains primitives functions (asynchronous or not) that can be assembled to produce 
+//! This module contains primitives functions (asynchronous or not) that can be assembled to produce
 //! larger pieces of logic commonly used in the applications.
 
 
@@ -39,7 +37,7 @@ impl From<Sha1Hash> for String{
 impl fmt::Display for Sha1Hash{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
-    } 
+    }
 }
 
 
@@ -64,14 +62,14 @@ pub fn read_globs_from_file(file: &PathBuf) -> Result<Vec<Glob<String>>, String>
 
 }
 
-/// List a local folder. Returns paths to every files relative to the root. Ignore globs can be 
+/// List a local folder. Returns paths to every files relative to the root. Ignore globs can be
 /// along with include_globs, which supersede the ignore globs.
 #[instrument]
-pub fn list_local_folder(root: &PathBuf, 
-                         ignore_globs: &Vec<Glob<String>>, 
+pub fn list_local_folder(root: &PathBuf,
+                         ignore_globs: &Vec<Glob<String>>,
                          include_globs: &Vec<Glob<String>>)
                         -> Result<Vec<PathBuf>, String>{
-    
+
     // We create ignore globset
     let mut ignore = globset::GlobSetBuilder::new();
     ignore_globs.iter()
@@ -108,8 +106,8 @@ pub fn list_local_folder(root: &PathBuf,
 
 /// Compress a set of local files into a local tar archive.
 #[instrument]
-pub fn tar_local_files(root: &PathBuf, 
-                       files: &Vec<PathBuf>, 
+pub fn tar_local_files(root: &PathBuf,
+                       files: &Vec<PathBuf>,
                        output: &PathBuf)
                       -> Result<Sha1Hash, String>{
 
@@ -133,7 +131,7 @@ pub fn tar_local_files(root: &PathBuf,
     archive
         .finish()
         .map_err(|e| format!("Failed to finish the archive: {}", e))?;
-    // We compute hash 
+    // We compute hash
     compute_local_sha1(output)
 
 }
@@ -172,7 +170,7 @@ pub fn untar_local_archive(archive: &PathBuf, root: &PathBuf) -> Result<Vec<Path
         .unpack(root)
         .map_err(|e| format!("Failed to unpack archive: {}", e))?;
     Ok(files)
-} 
+}
 
 // Moves a local file to a remote file.
 #[instrument]
@@ -186,7 +184,7 @@ pub async fn send_local_file(from: &PathBuf, to: &PathBuf, node: &RemoteHandle)-
     if already_there.status.success() {
         return Err("File already exists".into())
     } else {
-        node.async_scp_send(from.to_path_buf(), 
+        node.async_scp_send(from.to_path_buf(),
                             to.to_path_buf())
             .await
             .map_err(|e| format!("Failed to send input data: {}", e))?;
@@ -195,14 +193,14 @@ pub async fn send_local_file(from: &PathBuf, to: &PathBuf, node: &RemoteHandle)-
 
 }
 
-// Fetches a remote file 
+// Fetches a remote file
 #[instrument]
 pub async fn fetch_remote_file(from: &PathBuf, to: &PathBuf, node: &RemoteHandle) -> Result<(),String>{
 
     // We check if file already exists
     //if to.exists(){
     //    return Err("File already exists".into())
-    //} 
+    //}
     // Depending on the result, we fetch the file
     node.async_scp_fetch(from.to_owned(), to.to_owned())
         .await
@@ -214,10 +212,10 @@ pub async fn fetch_remote_file(from: &PathBuf, to: &PathBuf, node: &RemoteHandle
 
 //  Lists the files in a remote folder.
 #[instrument]
-pub async fn list_remote_folder(root: &PathBuf, 
-                                ignore_globs: &Vec<Glob<String>>, 
+pub async fn list_remote_folder(root: &PathBuf,
+                                ignore_globs: &Vec<Glob<String>>,
                                 include_globs: &Vec<Glob<String>>,
-                                node: &RemoteHandle) 
+                                node: &RemoteHandle)
                                -> Result<Vec<PathBuf>, String>{
     // We create ignore globset
     let mut ignore = globset::GlobSetBuilder::new();
@@ -255,12 +253,12 @@ pub async fn list_remote_folder(root: &PathBuf,
 
 /// Compress a set of remote files into a local tar archive.
 #[instrument]
-pub async fn tar_remote_files (root: &PathBuf, 
-                               files: &Vec<PathBuf>, 
+pub async fn tar_remote_files (root: &PathBuf,
+                               files: &Vec<PathBuf>,
                                output: &PathBuf,
-                               node: &RemoteHandle) 
+                               node: &RemoteHandle)
                               -> Result<Sha1Hash, String>{
-    
+
     // We create the files string
     let files_string;
     if files.is_empty(){
@@ -274,8 +272,8 @@ pub async fn tar_remote_files (root: &PathBuf,
         });
     }
     // We create the archive
-    let command = RawCommand(format!("cd {} && tar -cvf {} {}", 
-        root.to_str().unwrap(), 
+    let command = RawCommand(format!("cd {} && tar -cvf {} {}",
+        root.to_str().unwrap(),
         output.to_str().unwrap(),
         files_string));
     node.async_exec(command)
@@ -315,8 +313,8 @@ pub async fn untar_remote_archive(archive: &PathBuf, root: &PathBuf, node: &Remo
         -> Result<Vec<PathBuf>, String> {
 
     // We open the archive and unpacks it
-    let command = RawCommand(format!("tar -xvf {} -C {}", 
-        archive.to_str().unwrap(), 
+    let command = RawCommand(format!("tar -xvf {} -C {}",
+        archive.to_str().unwrap(),
         root.to_str().unwrap()));
     node.async_exec(command)
         .await
@@ -333,7 +331,7 @@ pub async fn untar_remote_archive(archive: &PathBuf, root: &PathBuf, node: &Remo
 #[instrument]
 pub async fn remote_file_exists(file: &PathBuf, node: &RemoteHandle) -> Result<bool, String> {
 
-    let command = RawCommand(format!("test -f {}", 
+    let command = RawCommand(format!("test -f {}",
         file.to_str().unwrap()));
     Ok(node.async_exec(command)
         .await
@@ -348,7 +346,7 @@ pub async fn remote_file_exists(file: &PathBuf, node: &RemoteHandle) -> Result<b
 #[instrument]
 pub async fn remote_folder_exists(folder: &PathBuf, node: &RemoteHandle) -> Result<bool, String> {
 
-    let command = RawCommand(format!("test -d {}", 
+    let command = RawCommand(format!("test -d {}",
         folder.to_str().unwrap()));
     Ok(node.async_exec(command)
         .await
@@ -412,7 +410,7 @@ mod tests {
     use shells::wrap_sh;
     use futures::executor::block_on;
     use crate::ssh::{config::SshProfile, RemoteHandle};
-    
+
     #[test]
     fn test_read_globs_from_file(){
         wrap_sh!("echo '*.gz\nfolder/*' > /tmp/test_glob").unwrap();
@@ -593,5 +591,5 @@ mod tests {
         }
         wrap_sh!("rm -rf /tmp/test_dir /tmp/test_dir2 /tmp/test_archive").unwrap();
     }
-    
+
 }

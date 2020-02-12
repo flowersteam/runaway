@@ -2,9 +2,9 @@
 //!
 //! This module contains a structure that wraps the ssh2 session object to provide ways to handle
 //! ssh configurations, authentications, and proxy-commands. In particular, since libssh2
-//! does not provide ways to handle proxy-commands, we propose our own structure based on a threaded 
+//! does not provide ways to handle proxy-commands, we propose our own structure based on a threaded
 //! copy loop that opens a proxy-command as a subprocess and copy the output on a random tcp socket.
- 
+
 
 //------------------------------------------------------------------------------------------ IMPORTS
 
@@ -45,11 +45,11 @@ use futures::FutureExt;
 use futures::SinkExt;
 use futures::channel::{mpsc, oneshot};
 use crate::commons::{
-    Cwd, 
-    EnvironmentStore, 
-    EnvironmentKey, 
-    EnvironmentValue, 
-    RawCommand, 
+    Cwd,
+    EnvironmentStore,
+    EnvironmentKey,
+    EnvironmentValue,
+    RawCommand,
     TerminalContext
 };
 use crate::*;
@@ -68,11 +68,11 @@ pub mod config;
 //---------------------------------------------------------------------------------------- PTY AGENT
 
 
-/// The `pty` method proposed by the `Remote` object, needs a remote side agent to relay stdout, 
-/// stderr, exit codes and more, using only a single pty stream. As of today this agent consists 
+/// The `pty` method proposed by the `Remote` object, needs a remote side agent to relay stdout,
+/// stderr, exit codes and more, using only a single pty stream. As of today this agent consists
 /// of a piece of bash agent implemented through a few functions.
-/// 
-/// In practice, the pty should format messages according to the following protocol: 
+///
+/// In practice, the pty should format messages according to the following protocol:
 ///     + `RUNAWAY_STDOUT: {some stdout}\n` to transmit an stdout line
 ///     + `RUNAWAY_STDERR: {some stderr}\n` to transmit an stderr line
 ///     + `RUNAWAY_ECODE: {some exit code}\n` to transmit an error code
@@ -159,9 +159,9 @@ impl From<Error> for crate::commons::Error{
 /// This structure starts a proxy command which is forwarded on a tcp socket. This allows
 /// a libssh2 session to get connected through a proxy command. On the first connection to the
 /// socket, the proxycommand will be started in a subprocess, and the reads from the socket will be
-/// copied to the process stdin, and the stdout from the process will be written to the socket. The 
-/// forthcoming connections are rejected. The messages get forwarded as long as the forwarder stays 
-/// in scope. The forwarding is explicitly stopped when the forwarder is dropped. 
+/// copied to the process stdin, and the stdout from the process will be written to the socket. The
+/// forthcoming connections are rejected. The messages get forwarded as long as the forwarder stays
+/// in scope. The forwarding is explicitly stopped when the forwarder is dropped.
 #[derive(Derivative)]
 #[derivative(Debug)]
 pub struct ProxyCommandForwarder {
@@ -175,7 +175,7 @@ pub struct ProxyCommandForwarder {
 
 impl ProxyCommandForwarder {
     /// Creates a new `ProxyCommandForwarder` from a command. An available port is automatically
-    /// given by the OS, and is returned along with the forwarder. 
+    /// given by the OS, and is returned along with the forwarder.
     #[instrument(name="ProxyCommandForwarder::from_command")]
     pub fn from_command(command: &str) -> Result<(ProxyCommandForwarder, SocketAddr), Error> {
 
@@ -200,12 +200,12 @@ impl ProxyCommandForwarder {
 
 
         trace!("Spawning proxy command");
-        let mut command = unsafe{ 
+        let mut command = unsafe{
             Command::new(cmd)
                 .args(&args)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                // This allows to make sure the proxycommand ignores Ctrl-C. The opposite would 
+                // This allows to make sure the proxycommand ignores Ctrl-C. The opposite would
                 // prevent the program to cleanup properly.
                 .pre_exec(||{
                     signal(SIGINT, SIG_IGN);
@@ -229,11 +229,11 @@ impl ProxyCommandForwarder {
             let kf2 = kf.clone();
             let mut command_stdin = command.stdin.take().unwrap();
             let mut command_stdout = command.stdout.take().unwrap();
-            
+
             trace!("Creating stdout forwarding thread");
             let h1 = std::thread::spawn(move || {
                 let span = trace_span!("ProxyCommandForwarder::StdoutThread", command=c2.as_str());
-                let _guard = span.enter();  
+                let _guard = span.enter();
                 while kf1.load(Ordering::Relaxed) {
                     match std::io::copy(&mut command_stdout, &mut socket1){
                         Err(e) => {
@@ -258,7 +258,7 @@ impl ProxyCommandForwarder {
             trace!("Creating stderr forwarding thread");
             let h2 = std::thread::spawn(move || {
                 let span = trace_span!( "ProxyCommandForwarder::StderrThread", command=c3.as_str());
-                let _guard = span.enter();  
+                let _guard = span.enter();
                 while kf2.load(Ordering::Relaxed) {
                     match std::io::copy(&mut socket2, &mut command_stdin){
                         Err(e) => {
@@ -293,7 +293,7 @@ impl ProxyCommandForwarder {
 
 // Care must be taken to join the threads at drop, to appropriately close the connection and the
 // process.
-impl Drop for ProxyCommandForwarder { 
+impl Drop for ProxyCommandForwarder {
     #[instrument(name="ProxyCommandForwarder::drop")]
     fn drop(&mut self) {
         trace!("Stop keeping alive");
@@ -340,7 +340,7 @@ impl Drop for Remote{
 }
 
 impl Remote {
-    
+
     /// Helper to avoid boilerplate.
     #[inline]
     fn session(&self) -> &'static Session{
@@ -418,7 +418,7 @@ impl Remote {
     #[instrument(name="Remote::exec")]
     async fn exec(remote: Arc<Mutex<Remote>>, command: RawCommand<String>) -> Result<Output, Error>{
         trace!("Executing command");
-        let RawCommand(cmd) = command; 
+        let RawCommand(cmd) = command;
         let mut channel = acquire_exec_channel(&remote).await?;
         setup_exec(cmd, &mut channel).await?;
         let mut output = read_exec_out_err(&mut channel).await?;
@@ -429,10 +429,10 @@ impl Remote {
     /// Asynchronous function used to execute an interactive command on the remote.
     #[instrument(name="Remote::pty", skip(remote, context, commands, stdout_cb, stderr_cb))]
     async fn pty(remote: Arc<Mutex<Remote>>,
-                 context: TerminalContext<PathBuf>, 
+                 context: TerminalContext<PathBuf>,
                  commands: Vec<RawCommand<String>>,
                  stdout_cb: Box<dyn Fn(Vec<u8>) + Send + 'static>,
-                 stderr_cb: Box<dyn Fn(Vec<u8>) + Send + 'static>) 
+                 stderr_cb: Box<dyn Fn(Vec<u8>) + Send + 'static>)
                  -> Result<(TerminalContext<PathBuf>, Vec<Output>), Error> {
         trace!("Executing pty commands");
         if commands.is_empty(){
@@ -448,7 +448,7 @@ impl Remote {
         Ok((context, outputs))
     }
 
-    
+
 
     /// Asynchronous function used to send a file to a remote.
     #[instrument(name="Remote::scp_send")]
@@ -524,7 +524,7 @@ impl PartialEq for RemoteHandle {
 
 impl RemoteHandle {
 
-    /// Spawns the application and returns a handle to it. 
+    /// Spawns the application and returns a handle to it.
     #[instrument(name="RemoteHandle::spawn")]
     pub fn spawn(profile: config::SshProfile) -> Result<RemoteHandle, Error> {
         trace!("Start remote thread.");
@@ -583,7 +583,7 @@ impl RemoteHandle {
                                     })
                                     .instrument(span.clone())
                             )
-                        },                        
+                        },
                         OperationInput::ScpSend(local_path, remote_path) => {
                             spawner.spawn_local(
                                 Remote::scp_send(remote.clone(), local_path, remote_path)
@@ -632,7 +632,7 @@ impl RemoteHandle {
                 Box::new(move ||{
                     drop_sender.close_channel();
                     handle.join().unwrap();
-                }), 
+                }),
                 "RemoteHandle".to_string()),
         })
     }
@@ -657,13 +657,13 @@ impl RemoteHandle {
     }
 
     /// A function that returns a future that resolves in a result over an output, after the command
-    /// was executed in interactive mode. Callbacks can be provided to be called on stdout and 
-    /// stderr messages.  
-    pub fn async_pty(&self, 
+    /// was executed in interactive mode. Callbacks can be provided to be called on stdout and
+    /// stderr messages.
+    pub fn async_pty(&self,
         context: TerminalContext<PathBuf>,
-        commands: Vec<RawCommand<String>>, 
+        commands: Vec<RawCommand<String>>,
         stdout_cb: Option<Box<dyn Fn(Vec<u8>)+Send+'static>>,
-        stderr_cb: Option<Box<dyn Fn(Vec<u8>)+Send+'static>>) 
+        stderr_cb: Option<Box<dyn Fn(Vec<u8>)+Send+'static>>)
         -> impl Future<Output=Result<(TerminalContext<PathBuf>, Vec<Output>), Error>> {
 
         let mut chan = self.sender.clone();
@@ -690,7 +690,7 @@ impl RemoteHandle {
         }.instrument(trace_span!("RemoteHandle::async_pty"))
     }
 
-    /// A function that returns a future that resolves in a result over an empty type, after the 
+    /// A function that returns a future that resolves in a result over an empty type, after the
     /// file was sent.
     pub fn async_scp_send(&self, local_path: PathBuf, remote_path: PathBuf) -> impl Future<Output=Result<(), Error>> {
         let mut chan = self.sender.clone();
@@ -708,8 +708,8 @@ impl RemoteHandle {
             }
         }.instrument(trace_span!("RemoteHandle::async_scp_send"))
     }
-    
-    /// A function that returns a future that resolves in a result over an empty type, after the 
+
+    /// A function that returns a future that resolves in a result over an empty type, after the
     /// file was fetch
     pub fn async_scp_fetch(&self, remote_path: PathBuf, local_path: PathBuf) -> impl Future<Output=Result<(), Error>> {
         let mut chan = self.sender.clone();
@@ -761,10 +761,10 @@ fn authenticate_host(host: &str, session: &mut Session) -> Result<(),Error>{
     known_hosts.read_file(known_hosts_path.as_path(), KnownHostFileKind::OpenSSH)
         .map_err(|e| Error::ConnectionFailed(format!("Failed to reach knownhost file:\n{}", e)))?;
 
-    // We retrieve the host key 
+    // We retrieve the host key
     let (key, _) = session.host_key()
         .ok_or(Error::ConnectionFailed("Host did not provide a key.".to_string()))?;
-    
+
     // We check host key against known identities
     match known_hosts.check(host, key) {
         // Host recognized
@@ -790,7 +790,7 @@ fn authenticate_host(host: &str, session: &mut Session) -> Result<(),Error>{
             trace!("Failed to check the host");
             Err(Error::ConnectionFailed("Failed to check the host.".to_string()))
         }
-    } 
+    }
 }
 
 
@@ -798,13 +798,13 @@ fn authenticate_host(host: &str, session: &mut Session) -> Result<(),Error>{
 #[instrument(name="authenticate_local", skip(session))]
 fn authenticate_local(user: &str, session: &mut Session) -> Result<(), Error>{
     trace!("Authenticating ourselves");
-    // We retrieve the agent. 
+    // We retrieve the agent.
     let mut agent = session.agent().unwrap();
     agent.connect()
         .map_err(|e| Error::ConnectionFailed(format!("Ssh Agent was unavailable: \n{}", e)))?;
     agent.list_identities()
         .map_err(|e| Error::ConnectionFailed(format!("Couldn't list identities: \n{}", e)))?;
-    
+
     // We go through the stored identities to try to authenticate.
     let ids = agent.identities()
         .map(|id| id.unwrap().comment().to_owned())
@@ -820,7 +820,7 @@ fn authenticate_local(user: &str, session: &mut Session) -> Result<(), Error>{
         trace!("Authenticated.");
         Ok(())
     }
-    
+
 }
 
 
@@ -828,8 +828,8 @@ fn authenticate_local(user: &str, session: &mut Session) -> Result<(), Error>{
 #[instrument(skip(remote))]
 async fn acquire_exec_channel(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Channel, Error>{
     trace!("Acquiring exec channel.");
-    // We query a channel session. Error -21 corresponds to missing available channels. It 
-    // must be retried until an other execution comes to an end, and makes a channel available. 
+    // We query a channel session. Error -21 corresponds to missing available channels. It
+    // must be retried until an other execution comes to an end, and makes a channel available.
     let ret = await_wouldblock_ssh!(await_retry_ssh!(
         {
             remote.lock()
@@ -886,7 +886,7 @@ async fn read_exec_out_err(channel: &mut ssh2::Channel) -> Result<Output, Error>
                 Ok(b) => output.stdout.write_all(&buf[..b]).unwrap()
             }
         }
-        {  
+        {
             trace!("Reading stderr");
             let mut stream = channel.stream(1); // stream 1 is stderr
             match await_wouldblock_io!(stream.read(&mut buf)){
@@ -908,7 +908,7 @@ async fn read_exec_out_err(channel: &mut ssh2::Channel) -> Result<Output, Error>
 }
 
 
-// Closes the exec channel retrieving tyhe exit status 
+// Closes the exec channel retrieving tyhe exit status
 #[instrument(skip(channel))]
 async fn close_exec(channel: &mut ssh2::Channel) -> Result<ExitStatus, Error>{
     trace!("Closing exec channel");
@@ -935,7 +935,7 @@ async fn acquire_pty_channel<'a>(remote: &Arc<Mutex<Remote>>) -> Result<ssh2::Ch
 }
 
 
-// Setups the pty 
+// Setups the pty
 #[instrument(skip(channel))]
 async fn setup_pty(channel: &mut ssh2::Channel, cwd: &PathBuf, envs: &EnvironmentStore) -> Result<(), Error>{
     trace!("Setting up a pty channel");
@@ -956,17 +956,17 @@ async fn setup_pty(channel: &mut ssh2::Channel, cwd: &PathBuf, envs: &Environmen
         });
     await_wouldblock_io!(channel.write_all(context.as_bytes()))
         .map_err(|e| Error::ExecutionFailed(format!("Failed to set context up: {}", e)))?;
-    
+
     Ok(())
 }
 
 
 // Performs a set of pty commands
 #[instrument(skip(channel, stdout_cb, stderr_cb))]
-async fn perform_pty(channel: &mut ssh2::Channel, 
-                     cmds: Vec<RawCommand<String>>, 
+async fn perform_pty(channel: &mut ssh2::Channel,
+                     cmds: Vec<RawCommand<String>>,
                      stdout_cb: Box<dyn Fn(Vec<u8>) + Send + 'static>,
-                     stderr_cb: Box<dyn Fn(Vec<u8>) + Send + 'static> ) 
+                     stderr_cb: Box<dyn Fn(Vec<u8>) + Send + 'static> )
                      -> Result<(TerminalContext<PathBuf>, Vec<Output>), Error>{
     trace!("Performs pty commands");
     // We prepare necessary variables
@@ -1011,7 +1011,7 @@ async fn perform_pty(channel: &mut ssh2::Channel,
                     .unwrap();
                 let mut output = outputs.last_mut().unwrap();
                 output.status = ExitStatusExt::from_raw(ecode);
-                // If non zero, we stop the execution now. 
+                // If non zero, we stop the execution now.
                 if ecode != 0{
                     trace!("Non zero ecode.");
                     cmds.clear();
@@ -1066,7 +1066,7 @@ async fn perform_pty(channel: &mut ssh2::Channel,
     // We clear env of non-runaway environment variables.
     out_ctx.envs.retain(|EnvironmentKey(k), _| k.starts_with("RUNAWAY") );
 
-    // We return    
+    // We return
     Ok((out_ctx, outputs))
 
 }
@@ -1096,9 +1096,9 @@ async fn close_pty(channel: &mut ssh2::Channel) -> Result<(), Error>{
 
 // Sets scp send up
 #[instrument(skip(remote))]
-async fn setup_scp_send<'a>(remote: &'a Arc<Mutex<Remote>>, 
+async fn setup_scp_send<'a>(remote: &'a Arc<Mutex<Remote>>,
                         local_path: &PathBuf,
-                        remote_path: &PathBuf) 
+                        remote_path: &PathBuf)
                         -> Result<(BufReader<File>, i64, ssh2::Channel), Error>{
     trace!("Setting up scp send");
     // Open local file and compute statistics
@@ -1131,8 +1131,8 @@ async fn setup_scp_send<'a>(remote: &'a Arc<Mutex<Remote>>,
 
 // Performs the scp send
 #[instrument(skip(channel, local_file, bytes))]
-async fn perform_scp_send(channel: &mut ssh2::Channel, 
-                          local_file: &mut BufReader<File>, 
+async fn perform_scp_send(channel: &mut ssh2::Channel,
+                          local_file: &mut BufReader<File>,
                           bytes: i64) -> Result<(), Error>{
     trace!("Performing scp send copy");
     let mut stream = channel.stream(0);
@@ -1162,7 +1162,7 @@ async fn perform_scp_send(channel: &mut ssh2::Channel,
     }
     if remaining_bytes != 0{
         return Err(Error::ScpSendFailed(format!("Some bytes were not sent: {}", remaining_bytes)))
-    }   
+    }
     Ok(())
 }
 
@@ -1182,9 +1182,9 @@ async fn close_scp_channel(channel: ssh2::Channel) -> Result<(), ssh2::Error>{
 
 // Sets up scp fetch
 #[instrument(skip(remote))]
-async fn setup_scp_fetch<'a>(remote: &'a Arc<Mutex<Remote>>, 
-                             remote_path: &PathBuf, 
-                             local_path: &PathBuf ) 
+async fn setup_scp_fetch<'a>(remote: &'a Arc<Mutex<Remote>>,
+                             remote_path: &PathBuf,
+                             local_path: &PathBuf )
                              -> Result<(File, ssh2::Channel, i64), Error>{
     trace!("Setting up scp fetch");
     let local_file = match OpenOptions::new().write(true).create_new(true).open(local_path) {
@@ -1261,23 +1261,10 @@ mod test {
     use crate::ssh::config::SshProfile;
     use futures::executor::block_on;
     use crate::misc;
-    use tracing_subscriber::fmt::Subscriber;
-    use tracing::Level;
-
-    fn init(){
-        let subscriber = Subscriber::builder()
-            .compact()
-            .with_max_level(Level::DEBUG)
-            .without_time()
-            .with_target(false)
-            .finish();
-        tracing::subscriber::set_global_default(subscriber).unwrap();
-    }
 
     #[test]
     fn test_proxy_command_forwarder() {
-        init();
-        let (proxy_command, address) = ProxyCommandForwarder::from_command("echo kikou").unwrap();
+        let (_proxy_command, address) = ProxyCommandForwarder::from_command("echo kikou").unwrap();
         let mut stream = TcpStream::connect(address).unwrap();
         std::thread::sleep(std::time::Duration::from_secs(1));
         assert!(TcpStream::connect(address).is_err());
@@ -1288,7 +1275,6 @@ mod test {
 
     #[test]
     fn test_async_exec() {
-        init();
         async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
@@ -1310,7 +1296,6 @@ mod test {
 
     #[test]
     fn test_async_pty_order() {
-        init();
         async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
@@ -1321,7 +1306,7 @@ mod test {
             };
             let remote = RemoteHandle::spawn(profile).unwrap();
             // Check order of outputs
-            let commands = vec![RawCommand("echo 1".into()), 
+            let commands = vec![RawCommand("echo 1".into()),
                           RawCommand("echo 2".into()),
                           RawCommand("echo 3".into()),
                           RawCommand("echo 4".into()),
@@ -1344,7 +1329,6 @@ mod test {
 
     #[test]
     fn test_async_pty_cds() {
-        init();
         async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
@@ -1355,7 +1339,7 @@ mod test {
             };
             let remote = RemoteHandle::spawn(profile).unwrap();
             // Check order of outputs
-            let commands = vec![RawCommand("cd /tmp".into()), 
+            let commands = vec![RawCommand("cd /tmp".into()),
                           RawCommand("pwd".into())];
             let context = TerminalContext::default();
             let (_, outputs) = remote.async_pty(context, commands, None, None).await.unwrap();
@@ -1368,7 +1352,6 @@ mod test {
 
     #[test]
     fn test_async_pty_envs() {
-        init();
         async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
@@ -1379,7 +1362,7 @@ mod test {
             };
             let remote = RemoteHandle::spawn(profile).unwrap();
             // Check order of outputs
-            let commands = vec![RawCommand("a=\"KIKOU KIKOU\"".into()), 
+            let commands = vec![RawCommand("a=\"KIKOU KIKOU\"".into()),
                                 RawCommand("echo $a".into())];
             let context = TerminalContext::default();
             let (_, outputs) = remote.async_pty(context, commands, None, None).await.unwrap();
@@ -1392,7 +1375,6 @@ mod test {
 
     #[test]
     fn test_async_pty_stderr() {
-        init();
         async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
@@ -1403,7 +1385,7 @@ mod test {
             };
             let remote = RemoteHandle::spawn(profile).unwrap();
             // Check order of outputs
-            let commands = vec![RawCommand("echo kikou_stdout".into()), 
+            let commands = vec![RawCommand("echo kikou_stdout".into()),
                           RawCommand("echo kikou_stderr 1>&2".into())];
             let context = TerminalContext::default();
             let (_, outputs) = remote.async_pty(context, commands, None, None).await.unwrap();
@@ -1419,7 +1401,6 @@ mod test {
 
     #[test]
     fn test_async_pty_program_stdout() {
-        init();
         async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
@@ -1432,7 +1413,7 @@ mod test {
             // Check order of outputs
             let commands = vec![RawCommand("export PYTHONUNBUFFERED=x".into()),
                                 RawCommand("echo Python: $(which python)".into()),
-                                RawCommand("cd /home/apere/Downloads/test_runaway".into()), 
+                                RawCommand("cd /home/apere/Downloads/test_runaway".into()),
                                 RawCommand("./run.py 10".into()),
                                 RawCommand("echo Its over".into())];
             let context = TerminalContext::default();
@@ -1445,7 +1426,6 @@ mod test {
 
     #[test]
     fn test_async_pty_context() {
-        init();
         async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
@@ -1460,7 +1440,7 @@ mod test {
             context.cwd = Cwd("/tmp".into());
             context.envs.insert(EnvironmentKey("RUNAWAY_TEST".into()),
                                              EnvironmentValue("VAL1".into()));
-            let commands = vec![RawCommand("pwd".into()), 
+            let commands = vec![RawCommand("pwd".into()),
                                 RawCommand("echo $RUNAWAY_TEST".into()),
                                 RawCommand("export RUNAWAY_TEST=\"VAL2 VAL3\"".into())];
             let (context, outputs) = remote.async_pty(context, commands, None, None).await.unwrap();
@@ -1471,11 +1451,10 @@ mod test {
        }
         block_on(test());
     }
- 
+
 
     #[test]
     fn test_async_scp_send() {
-        init();
         async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
@@ -1512,7 +1491,6 @@ mod test {
 
     #[test]
     fn test_async_scp_fetch(){
-        init();
         async fn test() {
             let profile = config::SshProfile{
                 name: "test".to_owned(),
@@ -1544,12 +1522,11 @@ mod test {
             std::fs::remove_file("/tmp/local.txt").unwrap();
             std::fs::remove_file("/tmp/remote.txt").unwrap();
         }
-        block_on(test());        
+        block_on(test());
     }
 
     #[test]
     fn test_async_concurrent_exec(){
-        init();
         let profile = SshProfile{
             name: "test".to_owned(),
             hostname: Some("localhost".to_owned()),
@@ -1582,7 +1559,6 @@ mod test {
     #[test]
     fn test_async_concurrent_pty(){
 
-        init();
         let profile = SshProfile{
             name: "test".to_owned(),
             hostname: Some("localhost".to_owned()),
@@ -1592,7 +1568,7 @@ mod test {
         };
         let remote = RemoteHandle::spawn(profile).unwrap();
         async fn test(remote: RemoteHandle) -> (TerminalContext<PathBuf>, Vec<Output>){
-            let commands = vec![RawCommand("echo 1".into()), 
+            let commands = vec![RawCommand("echo 1".into()),
                           RawCommand("sleep 1".into()),
                           RawCommand("echo 2".into())];
             let context = TerminalContext::default();

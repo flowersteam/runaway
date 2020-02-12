@@ -1,6 +1,4 @@
-//! liborchestra/ssh/config.rs
-//! 
-//! This module contains structures to parse openssh profiles. 
+//! This module contains the necessary tools to parse openssh configuration files. 
 
 
 //------------------------------------------------------------------------------------------ IMPORTS
@@ -1082,23 +1080,9 @@ pub fn get_profile(config_path: &PathBuf, name: &str) -> Result<SshProfile, Erro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracing_subscriber::fmt::Subscriber;
-    use tracing::Level;
-
-    fn init(){
-        let subscriber = Subscriber::builder()
-            //.compact()
-            .with_max_level(Level::TRACE)
-            .without_time()
-            .with_target(false)
-            .finish();
-        tracing::subscriber::set_global_default(subscriber).unwrap();
-    }
 
     #[test]
     fn test_lexer() {
-
-        init();
 
         let a = "\tHost \t plafrim   #kalbfezjk \t jjja -p  \n\n\n   ".to_owned();
         let mut lexer = Lexer::from(&a);
@@ -1135,7 +1119,6 @@ mod tests {
 
     #[test]
     fn test_lexing_error() {
-        init();
         let a = "Höst pla\n\tHostName plafrim".to_owned();
         let mut lexer = Lexer::from(&a);
         let n = lexer.next().unwrap().unwrap_err();
@@ -1145,7 +1128,6 @@ mod tests {
 
     #[test]
     fn test_parser() {
-        init();
         let a = "# my configurations\n\
                  Host localhost #Kikou \n HostName localhost # comments \t \n\
                  # Some comments\n\n\
@@ -1189,7 +1171,6 @@ mod tests {
 
     #[test]
     fn test_config_reader() {
-        init();
         let a = "# My configurations\n\
             \t \n\
             Host test # first profile for testing purpose\n\

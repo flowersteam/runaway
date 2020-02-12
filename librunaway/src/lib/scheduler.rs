@@ -1,14 +1,14 @@
 //! lib/scheduler.rs
 //!
-//! This module contains a structure that allows to use an external command as a scheduler. A 
+//! This module contains a structure that allows to use an external command as a scheduler. A
 //! scheduler is a program that will provide experiments parameters on request, based on the results
-//! of previous parameters execution. Schedulers are meant to implement automatic experiment 
+//! of previous parameters execution. Schedulers are meant to implement automatic experiment
 //! selection such as bayesian optimization, exploration, and so on.
-//! 
-//! The communication between the scheduler and the library will use stdin and stdout. 
-//! Communications will be initiated by the library, which will send a request over stdin. The 
-//! command will treat this request and answer with a response on stdout. Request should be treated 
-//! synchronously by the command, and no particular order of requests should be assumed (any 
+//!
+//! The communication between the scheduler and the library will use stdin and stdout.
+//! Communications will be initiated by the library, which will send a request over stdin. The
+//! command will treat this request and answer with a response on stdout. Request should be treated
+//! synchronously by the command, and no particular order of requests should be assumed (any
 //! necessary book-keeping must be done on the command side).
 
 
@@ -43,13 +43,13 @@ use std::process::Stdio;
 
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-/// This enumeration represents the different request messages that can be sent to the command. Those 
+/// This enumeration represents the different request messages that can be sent to the command. Those
 /// requests will be serialized to the following jsons when sent to the command stdin:
 pub enum RequestMessages{
     /// Example of json transcript: `{"GET_PARAMETERS_REQUEST": {"uuid": "kkkagr23451"}}`
     GetParametersRequest{ uuid: String },
-    /// Example of json transcript: `{"RECORD_OUTPUT_REQUEST": {"uuid": "kkkagr23451", "parametes": 
-    /// "some params", "stdout": "some mess", "stderr": "some mess", "ecode": 0, "path": "/home", 
+    /// Example of json transcript: `{"RECORD_OUTPUT_REQUEST": {"uuid": "kkkagr23451", "parametes":
+    /// "some params", "stdout": "some mess", "stderr": "some mess", "ecode": 0, "path": "/home",
     /// "features": "[0.5, 0.5]"} }`
     RecordOutputRequest{ uuid: String, parameters: String, stdout: String, stderr: String, ecode: i32, features: String, path: String},
     // Example of json transcript: `{"SHUTDOWN_REQUEST": {}}`
@@ -58,7 +58,7 @@ pub enum RequestMessages{
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-/// This enumeration represents the different request messages that can be sent by the command. Those 
+/// This enumeration represents the different request messages that can be sent by the command. Those
 /// requests are expected to be serialized to json using the following templates:
 pub enum ResponseMessages{
     /// Example of json transcript: `{"GET_PARAMETERS_RESPONSE": {"parameters": "some params"}}`
@@ -81,7 +81,7 @@ pub enum ResponseMessages{
 #[macro_export]
 macro_rules! query_command {
     ($sched: expr, $req: expr ) => {
-            { 
+            {
                 // We send the message
                 let mut message = format!("{}\n", serde_json::to_string($req).unwrap())
                     .as_bytes()
@@ -91,7 +91,7 @@ macro_rules! query_command {
                         Ok(0) => break,
                         Ok(b) => {message = message[b..].to_owned()},
                         Err(e) => return Err(Error::Query(format!("{}", e)))
-                    }            
+                    }
                 }
 
                 // We retrieve the response from the command
@@ -102,12 +102,12 @@ macro_rules! query_command {
                         Ok(0) => break,
                         Ok(b) => {
                             output.append(&mut buf[..b].to_vec());
-                            if output.contains(&b'\n'){break} 
+                            if output.contains(&b'\n'){break}
                         },
                         Err(e) => return Err(Error::Query(format!("{}", e)))
                     }
                 }
-            
+
                 // We parse the answer
                 let output = String::from_utf8(output).unwrap();
                 serde_json::from_str(output.as_str())
@@ -166,9 +166,9 @@ enum SchedulerStatus{
     Shutdown,
 }
 
-/// A `Scheduler` represents an instance of a running process which implement an automatic scheduling 
+/// A `Scheduler` represents an instance of a running process which implement an automatic scheduling
 /// logic, and which can be communicated with through the json messaging exposed earlier via stdin
-/// and stdout. The child process handles to stdin and stdout are turned into non-blocking ones, 
+/// and stdout. The child process handles to stdin and stdout are turned into non-blocking ones,
 /// to allow the tasks to yield whenever needed.
 struct Scheduler {
     child: Child,
@@ -185,7 +185,7 @@ impl Debug for Scheduler{
 
 impl Scheduler {
 
-    /// Generates a scheduler from a child process spawned elswhere. Basically, this makes the stdin 
+    /// Generates a scheduler from a child process spawned elswhere. Basically, this makes the stdin
     /// and stdout file descriptors non blocking.
     #[instrument(name="Scheduler::from_child")]
     fn from_child(child: Child) -> Result<Scheduler, Error> {
@@ -219,7 +219,7 @@ impl Scheduler {
         }
     }
 
-    /// Inner future containing the logic to request parameters. 
+    /// Inner future containing the logic to request parameters.
     #[instrument(name="Scheduler::request_parameters", skip(sched))]
     async fn request_parameters(sched: Arc<Mutex<Scheduler>>, uuid: String) -> Result<String, Error> {
         trace!("Requesting parameters");
@@ -252,19 +252,19 @@ impl Scheduler {
         }
     }
 
-    /// Inner future containing the logic to record an output. 
+    /// Inner future containing the logic to record an output.
     #[instrument(name="Scheduler::record_output", skip(sched))]
-    async fn record_output(sched: Arc<Mutex<Scheduler>>, uuid: String, parameters: String, 
-        stdout: String, stderr: String, ecode: i32, features: String, path: String) 
+    async fn record_output(sched: Arc<Mutex<Scheduler>>, uuid: String, parameters: String,
+        stdout: String, stderr: String, ecode: i32, features: String, path: String)
         -> Result<(), Error>{
         trace!("Recording output");
-        {   
-            // We bind the command to this scope. Such that if one of the io blocks, we are sure that 
+        {
+            // We bind the command to this scope. Such that if one of the io blocks, we are sure that
             // an other task doesn't get woken up before this one, and reads/write the end of the
-            // messages meant for this task. Note, that this is different from the ssh connection 
+            // messages meant for this task. Note, that this is different from the ssh connection
             // case where io ocurs on the same connection, but separate channels.
             let mut sched = sched.lock().await;
-            
+
             // We transition and checks if the scheduler crashed to respond approprietely.
             sched.transitions();
             match sched.status{
@@ -272,7 +272,7 @@ impl Scheduler {
                 SchedulerStatus::Crashed => {return Err(Error::Crashed)}
                 SchedulerStatus::Shutdown => {return Err(Error::Shutdown)}
             }
- 
+
             // We query the command
             let request = RequestMessages::RecordOutputRequest{uuid, parameters, stdout, stderr, ecode, features, path};
             match query_command!(sched, &request)?{
@@ -286,10 +286,10 @@ impl Scheduler {
     #[instrument(name="Scheduler::shutdown", skip(sched))]
     async fn shutdown(sched: Arc<Mutex<Scheduler>>) -> Result<(), Error>{
         trace!("Shutting scheduler down");
-        {   
-            // We bind the command to this scope. Such that if one of the io blocks, we are sure that 
+        {
+            // We bind the command to this scope. Such that if one of the io blocks, we are sure that
             // an other task doesn't get woken up before this one, and reads/write the end of the
-            // messages meant for this task. Note, that this is different from the ssh connection 
+            // messages meant for this task. Note, that this is different from the ssh connection
             // case where io ocurs on the same connection, but separate channels.
             let mut sched = sched.lock().await;
 
@@ -300,8 +300,8 @@ impl Scheduler {
                 SchedulerStatus::Crashed => {return Err(Error::Crashed)}
                 SchedulerStatus::Shutdown => {return Ok(())}
             }
- 
-            // We query the command 
+
+            // We query the command
             let request = RequestMessages::ShutdownRequest{};
             match query_command!(sched, &request)?{
                 ResponseMessages::ShutdownResponse{} => {},
@@ -323,7 +323,7 @@ impl Scheduler {
 //------------------------------------------------------------------------------------------- HANDLE
 
 #[derive(Debug)]
-/// Messages sent by the outer future to the resource inner thread, so as to start an operation. 
+/// Messages sent by the outer future to the resource inner thread, so as to start an operation.
 /// This contains the input of the operation if any.
 enum OperationInput{
     RequestParameters(String),
@@ -332,7 +332,7 @@ enum OperationInput{
 }
 
 #[derive(Debug)]
-/// Messages sent by the inner future to the outer future, so as to return the result of an 
+/// Messages sent by the inner future to the outer future, so as to return the result of an
 /// operation.
 enum OperationOutput{
     RequestParameters(Result<String, Error>),
@@ -350,8 +350,8 @@ pub struct SchedulerHandle {
 
 impl SchedulerHandle {
 
-    /// Spawns a `Scheduler` from a command. This function contains most of the logic concerning the 
-    /// dispatch of the operations to the inner futures. 
+    /// Spawns a `Scheduler` from a command. This function contains most of the logic concerning the
+    /// dispatch of the operations to the inner futures.
     #[instrument(name="SchedulerHandle::spawn")]
     pub fn spawn(command: Command, name: String) -> Result<SchedulerHandle, Error> {
 
@@ -359,8 +359,8 @@ impl SchedulerHandle {
         // We create the scheduler resource. This one will be transferred into a separate thread.
         let mut command = command;
         let sched = Scheduler::from_child(
-            unsafe{ 
-                // This allows to make sure the proxycommand ignores Ctrl-C. The opposite would 
+            unsafe{
+                // This allows to make sure the proxycommand ignores Ctrl-C. The opposite would
                 // prevent the program to cleanup properly.
                 command.pre_exec(||{
                     signal(SIGINT, SIG_IGN);
@@ -371,11 +371,11 @@ impl SchedulerHandle {
                 .map_err(|e| Error::Spawn(format!("{}", e)))?
             }
         )?;
-        // We create the channel that will be used to transmit operations from the outer logic (when 
+        // We create the channel that will be used to transmit operations from the outer logic (when
         // the user call one of the async api methods) to the inner handling thread.
         let (sender, receiver) = mpsc::unbounded();
 
-        // We spawn the thread that dispatches the operations sent by the different handles to inner 
+        // We spawn the thread that dispatches the operations sent by the different handles to inner
         // futures.
         let handle = thread::Builder::new().name(format!("orch-sched"))
         .spawn(move || {
@@ -468,13 +468,13 @@ impl SchedulerHandle {
                 Box::new(move || {
                     drop_sender.close_channel();
                     handle.join().unwrap();
-                }), 
+                }),
                 format!("SchedulerHandle")
             ),
         })
     }
 
-    /// Async method, which request a parameter string from the scheduler, and wait for it if the 
+    /// Async method, which request a parameter string from the scheduler, and wait for it if the
     /// scheduler is not yet ready.
     pub fn async_request_parameters(&self, uuid: String) -> impl Future<Output=Result<String,Error>> {
         let mut chan = self._sender.clone();
@@ -494,8 +494,8 @@ impl SchedulerHandle {
     }
 
     /// Async method, returning a future that ultimately resolves after the output was recorded.
-    pub fn async_record_output(&self, uuid: String, parameters: String, stdout: String, 
-        stderr: String, ecode: i32, features: String, path: String) 
+    pub fn async_record_output(&self, uuid: String, parameters: String, stdout: String,
+        stderr: String, ecode: i32, features: String, path: String)
         -> impl Future<Output=Result<(),Error>> {
         let mut chan = self._sender.clone();
         async move {
@@ -588,22 +588,10 @@ where
 mod test {
 
     use super::*;
-    use tracing_subscriber::fmt::Subscriber;
-    use tracing::Level;
-
-    fn init(){
-        let subscriber = Subscriber::builder()
-            .compact()
-            .with_max_level(Level::TRACE)
-            .without_time()
-            .with_target(false)
-            .finish();
-        tracing::subscriber::set_global_default(subscriber).unwrap();
-    }
 
     fn write_python_scheduler() {
         let program = "#!/usr/bin/env python
-import json 
+import json
 import sys
 
 if __name__ == \"__main__\":
@@ -639,7 +627,7 @@ if __name__ == \"__main__\":
 
     fn write_failing_python_scheduler() {
         let program = "#!/usr/bin/env python
-import json 
+import json
 import sys
 
 if __name__ == \"__main__\":
@@ -671,15 +659,13 @@ if __name__ == \"__main__\":
         file.flush().unwrap();
     }
 
-    
+
     #[test]
     fn test_scheduler_resource() {
         use futures::executor::block_on;
 
-        init();
-
         write_python_scheduler();
-        
+
         let mut command = std::process::Command::new("/tmp/scheduler.py");
         command.stdin(std::process::Stdio::piped());
         command.stdout(std::process::Stdio::piped());

@@ -32,7 +32,7 @@ use futures::sink::SinkExt;
 const SLOT_LEN: usize = 100;
 /// The number of slots contained in the wheel. Better be a power of 2.
 const WHEEL_LEN: usize = 32;
-/// The smallest slot duration of the timer. 
+/// The smallest slot duration of the timer.
 const TIMER_PRECISION: usize =1;
 /// The number of wheels used in the timer
 const TIMER_LEN: usize = 3;
@@ -76,7 +76,7 @@ struct Timed<T>{
 impl<T> Debug for Timed<T>{
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "Timed@{:?}{{...}}", self.instant)
-    }   
+    }
 }
 
 
@@ -87,7 +87,7 @@ impl<T> Debug for Timed<T>{
 /// within the range
 struct Slot<T>{
     /// Beginning of time slot. This instant is contained in the slot.
-    beginning: Instant, 
+    beginning: Instant,
     /// End of time slot. This instant is __not__ contained in the slot itself.
     end: Instant,
     /// The list of `Timed<T>` stored in this timeslot.
@@ -96,9 +96,9 @@ struct Slot<T>{
 
 impl<T> Debug for Slot<T> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "Slot[{:?}->{:?}]{{{}/{}}}", 
-            self.beginning, 
-            self.end, 
+        write!(f, "Slot[{:?}->{:?}]{{{}/{}}}",
+            self.beginning,
+            self.end,
             self.waiters.len(),
             SLOT_LEN)
     }
@@ -111,7 +111,7 @@ impl<T> PartialEq for Slot<T> {
 }
 
 impl<T> Slot<T>{
-    
+
     /// Creates a new time slot.
     pub fn new(beginning: Instant, end: Instant) -> Slot<T>{
         Slot{
@@ -120,9 +120,9 @@ impl<T> Slot<T>{
              waiters: ArrayVec::<[Timed<T>; SLOT_LEN]>::new(),
         }
     }
-    
+
     /// Tries to insert a timed object. Returns `None` if the object was inserted (the timestamp
-    /// was in the range of the slot), and `Some(timed)` if it was not (the timestamp was out 
+    /// was in the range of the slot), and `Some(timed)` if it was not (the timestamp was out
     /// of range).
     pub fn try_insert(&mut self, Timed{instant, object}: Timed<T>) -> Option<Timed<T>>{
         if self.contains_instant(&instant){
@@ -131,58 +131,58 @@ impl<T> Slot<T>{
         } else {
             Some(Timed{instant, object})
         }
-    } 
-   
+    }
+
     /// Checks whether an instant is before the slot.
     #[inline]
     pub fn is_instant_before(&self, instant: &Instant) -> bool{
         instant < &self.beginning
     }
-   
+
     /// Checks whether an instant is after the slot.
     #[inline]
     pub fn is_instant_after(&self, instant: &Instant) -> bool{
         &self.end <= instant
     }
-   
+
     /// Checks whether the instant lies in the slot.
     #[inline]
     pub fn contains_instant(&self, instant: &Instant) -> bool{
         !self.is_instant_before(instant) && !self.is_instant_after(instant)
     }
-    
+
     /// Turns the slot to a vector.
     #[inline]
     pub fn to_vec(self) -> Vec<Timed<T>>{
         self.waiters.into_iter().collect()
     }
-   
+
     /// Gives a handle to the inner.
     #[inline]
     #[allow(dead_code)]
     pub fn as_arrayvec(&self) -> &ArrayVec<[Timed<T>; SLOT_LEN]>{
         &self.waiters
     }
-    
-    /// Returns the beginning instant.    
+
+    /// Returns the beginning instant.
     #[inline]
     pub fn beginning(&self) -> Instant {
         self.beginning
     }
-   
+
     /// Returns the end instant.
     #[inline]
     pub fn end(&self) -> Instant {
         self.end
     }
-   
+
     /// Returns the duration of the slot.
     #[inline]
     #[allow(dead_code)]
     pub fn duration(&self) -> Duration{
         self.end-self.beginning
     }
-   
+
     /// Returns the number of timed inside.
     #[inline]
     #[allow(dead_code)]
@@ -220,10 +220,10 @@ impl<T> Wheel<T>{
         Wheel{
             slots,
             increment,
-        }         
+        }
     }
-    
-    /// Pushes a timed into the wheel. If successful the function returns the index of the slot it 
+
+    /// Pushes a timed into the wheel. If successful the function returns the index of the slot it
     /// was pushed in. If not, it returns the timed.
     pub fn try_insert(&mut self, timed: Timed<T>) -> Result<usize, Timed<T>>{
         self.slots.iter_mut()
@@ -231,17 +231,17 @@ impl<T> Wheel<T>{
             .fold(Err(timed), |acc, (i, s)|{
                 match acc{
                     Err(t) => s.try_insert(t).map_or(Ok(i), |t| Err(t)),
-                    Ok(s) => Ok(s) 
+                    Ok(s) => Ok(s)
                 }
             })
     }
-    
-    /// Return true, if the wheel should turn regarding the time given as input.
+
+    /// Returns true, if the wheel should turn regarding the time given as input.
     #[inline]
     pub fn should_turn(&self, now: &Instant) -> bool{
          self.slots[0].is_instant_after(now)
     }
-   
+
     /// Removes and return the lower slot and pushes a new one at the end.
     pub fn turn(&mut self) -> Slot<T>{
         let slot = self.slots.remove(0);
@@ -249,26 +249,26 @@ impl<T> Wheel<T>{
         let next_slot = Slot::new(last, last+self.increment);
         self.slots.push(next_slot);
         slot
-    }    
-   
+    }
+
     /// Returns the beginning instant
     #[inline]
     pub fn beginning(&self) -> Instant {
         self.slots[0].beginning
     }
-   
+
     /// Returns the end instant.
     #[inline]
     pub fn end(&self) -> Instant {
         self.slots[WHEEL_LEN-1].end
     }
-    
+
     /// Returns the duration.
     #[inline]
     pub fn duration(&self) -> Duration{
         self.end()-self.beginning()
     }
-   
+
     /// Returns the number of timed stored.
     #[inline]
     pub fn len(&self) -> usize{
@@ -285,26 +285,26 @@ struct Timer<T>(ArrayVec<[Wheel<T>; TIMER_LEN]>);
 impl<T> Debug for Timer<T>{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Timer[{:#?}] ", self.0)
-    } 
+    }
 }
 
 impl<T> Timer<T>{
-    
-    // Creates a new timer.
-    pub fn new(beginning: Instant) -> Timer<T>{ 
+
+    /// Creates a new timer.
+    pub fn new(beginning: Instant) -> Timer<T>{
         let mut wheels: ArrayVec<[Wheel<T>; TIMER_LEN]> = ArrayVec::<[Wheel<T>; TIMER_LEN]>::new();
         let mut beginning = beginning;
         let mut increment = Duration::from_millis(TIMER_PRECISION as u64);
         for _ in 0..TIMER_LEN{
-            let wheel: Wheel<T> = Wheel::new(beginning, increment); 
+            let wheel: Wheel<T> = Wheel::new(beginning, increment);
             beginning = wheel.end();
-            increment = wheel.duration(); 
+            increment = wheel.duration();
             wheels.push(wheel);
         }
         Timer(wheels)
     }
-    
-    /// Pushes a timed into the timer. If successful the function returns the index of the wheel it 
+
+    /// Pushes a timed into the timer. If successful the function returns the index of the wheel it
     /// was pushed in. If not, it returns the timed.
     pub fn try_insert(&mut self, timed: Timed<T>) -> Result<usize, Timed<T>>{
         self.0.iter_mut()
@@ -312,34 +312,34 @@ impl<T> Timer<T>{
             .fold(Err(timed), |acc, (i, w)|{
                 match acc{
                     Err(t) => w.try_insert(t).map(|_| i),
-                    Ok(s) => Ok(s) 
+                    Ok(s) => Ok(s)
                 }
             })
     }
-    
+
     /// Return true, if the timer should turn regarding the time given as input.
     pub fn should_turn(&self, now: &Instant) -> bool{
         self.0[0].should_turn(now)
     }
-    
+
     /// Turns the wheels and yields the expired `Timed<T>`.
-    pub fn turn(&mut self) -> Vec<T>{ 
+    pub fn turn(&mut self) -> Vec<T>{
         // We turn the high-frequency wheel
         let ret = self.0[0].turn();
         // For all the lower-frequency wheels, we check if they should be turned, in which case
-        // the gathered timed are forwarded to the previous wheel. 
+        // the gathered timed are forwarded to the previous wheel.
         for w in 1..TIMER_LEN{
             let do_turn = {
                 let previous_wheel = &self.0[w-1];
                 let previous_span = (previous_wheel.beginning(), previous_wheel.end());
                 let current_slot = &self.0[w].slots[0];
                 let current_span = (current_slot.beginning(), current_slot.end());
-                current_span == previous_span                
+                current_span == previous_span
             };
-            
-            if do_turn { 
+
+            if do_turn {
                 let slot = {
-                    let current_wheel = &mut self.0[w];      
+                    let current_wheel = &mut self.0[w];
                     current_wheel.turn()
                 };
                 let previous_wheel = &mut self.0[w-1];
@@ -354,16 +354,16 @@ impl<T> Timer<T>{
         }
         ret.waiters.into_iter().map(|Timed{object, ..}| object).collect()
     }
-   
+
     /// Sleeps until the next expiration instant.
     pub fn sleep_until_next(&self){
         let next = self.0[0].slots[0].end();
         let now = Instant::now();
-        if next > now{ 
+        if next > now{
             std::thread::sleep(next-now);
         }
     }
-    
+
     /// Returns the number of timed in the timer.
     #[allow(dead_code)]
     pub fn len(&self) -> usize{
@@ -375,14 +375,14 @@ impl<T> Timer<T>{
 //------------------------------------------------------------------------------------------- HANDLE
 
 #[derive(Debug)]
-/// Messages sent by the outer future to the resource inner thread, so as to start an operation. 
+/// Messages sent by the outer future to the resource inner thread, so as to start an operation.
 /// This contains the input of the operation if any.
 enum OperationInput{
     Sleep(Instant),
 }
 
 #[derive(Debug)]
-/// Messages sent by the inner future to the outer future, so as to return the result of an 
+/// Messages sent by the inner future to the outer future, so as to return the result of an
 /// operation.
 enum OperationOutput{
     Sleep,
@@ -401,11 +401,11 @@ impl TimerHandle{
     pub fn spawn() -> Result<TimerHandle, Error> {
 
         trace!("Start timer thread");
-        // We create the channel that will be used to transmit operations from the outer logic (when 
+        // We create the channel that will be used to transmit operations from the outer logic (when
         // the user call one of the async api methods) to the inner handling thread.
         let (sender, mut receiver) = mpsc::unbounded();
 
-        // We spawn the thread that dispatches the operations sent by the different handles to inner 
+        // We spawn the thread that dispatches the operations sent by the different handles to inner
         // futures.
         let handle = thread::Builder::new().name("orch-timer".into()).spawn(move || {
             let span = trace_span!("Timer::Thread");
@@ -421,7 +421,7 @@ impl TimerHandle{
                         });
 
                 }
-        
+
                 'waiters: loop{
                     match receiver.try_next(){
                         Ok(Some((s, OperationInput::Sleep(i)))) => {
@@ -440,10 +440,10 @@ impl TimerHandle{
                         Ok(None) => {
                             break 'timer
                         }
-                    }    
+                    }
                 }
 
-                timer.sleep_until_next();   
+                timer.sleep_until_next();
             }
             trace!("All good. Leaving...");
         }).expect("Failed to spawn timer thread.");
@@ -456,13 +456,13 @@ impl TimerHandle{
                 Box::new(move || {
                     drop_sender.close_channel();
                     handle.join().unwrap();
-                }), 
+                }),
                 format!("TimerHandle")
             ),
         })
     }
 
-    /// Async method, which request a parameter string from the scheduler, and wait for it if the 
+    /// Async method, which request a parameter string from the scheduler, and wait for it if the
     /// scheduler is not yet ready.
     pub fn async_sleep(&self, dur: Duration) -> impl Future<Output=Result<(), Error>> {
         let mut chan = self._sender.clone();
@@ -495,25 +495,13 @@ impl Debug for TimerHandle{
 mod test {
 
     use super::*;
-    use tracing_subscriber::fmt::Subscriber;
-    use tracing::Level;
     use futures::executor::block_on;
-
-    fn init(){
-        let subscriber = Subscriber::builder()
-            .compact()
-            .with_max_level(Level::TRACE)
-            .without_time()
-            .with_target(false)
-            .finish();
-        tracing::subscriber::set_global_default(subscriber).unwrap();
-    }
 
     #[test]
     fn test_slot(){
         let beginning = Instant::now();
-        let end = beginning+Duration::from_secs(10);  
-        let mut s: Slot<()> = Slot::new(beginning, end); 
+        let end = beginning+Duration::from_secs(10);
+        let mut s: Slot<()> = Slot::new(beginning, end);
         dbg!(&s);
         assert!(s.try_insert(Timed{instant: beginning, object: ()}).is_none(), "Failed to add beginning");
         assert!(s.try_insert(Timed{instant: end, object: ()}).is_some(), "Failed not to add end");
@@ -522,7 +510,7 @@ mod test {
         let after = end + Duration::from_secs(11);
         assert!(s.try_insert(Timed{instant: before, object: ()}).is_some(), "Failed not to add before");
         assert!(s.try_insert(Timed{instant: during, object: ()}).is_none(), "Failed to add during");
-        assert!(s.try_insert(Timed{instant: after, object: ()}).is_some(), "Failed not to add after");   
+        assert!(s.try_insert(Timed{instant: after, object: ()}).is_some(), "Failed not to add after");
         dbg!(&s);
         let v = s.to_vec();
         assert_eq!(v, vec!(Timed{instant: beginning, object: ()}, Timed{instant: during, object: ()}), "Failed to produce right vector");
@@ -548,15 +536,15 @@ mod test {
         let now = beginning+Duration::from_micros(500);
         assert!(!wheel.should_turn(&now));
         let now = beginning+Duration::from_micros(1000);
-        assert!(wheel.should_turn(&now)); 
+        assert!(wheel.should_turn(&now));
         let s = wheel.turn();
         dbg!(&s);
         dbg!(&wheel);
         let now = beginning+Duration::from_micros(3000);
-        assert!(wheel.should_turn(&now)); 
+        assert!(wheel.should_turn(&now));
         let s = wheel.turn();
         dbg!(&s);
-        dbg!(&wheel); 
+        dbg!(&wheel);
     }
 
     #[test]
@@ -591,7 +579,6 @@ mod test {
 
     #[test]
     fn test_timer_handle(){
-        init();
         let  timer_handle = TimerHandle::spawn().unwrap();
         for i in 2..150{
             let now = Instant::now();

@@ -1,7 +1,7 @@
-//! lib/errorrs
+//! lib/error.rs
 //!
 //! This module contains module-level error type to interface with the error types implemented at
-//! the sub-module level. 
+//! the sub-module level.
 
 
 //------------------------------------------------------------------------------------------ IMPORTS
