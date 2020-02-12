@@ -13,7 +13,6 @@ use std::{error, fmt};
 use futures::channel::{mpsc, oneshot};
 use std::thread;
 use futures::channel::mpsc::{UnboundedSender};
-
 use std::fmt::Debug;
 use crate::*;
 use tracing::{self, warn, trace, instrument, trace_span};
@@ -586,7 +585,7 @@ mod test {
             block_on(timer_handle.async_sleep(dur)).unwrap();
             let rdur = Instant::now() - now;
             println!("Supposed to wait {:?}, waited {:?}", dur, rdur);
-            assert!(rdur-dur < Duration::from_millis(2));
+            assert!(rdur>dur);
         }
     }
 }

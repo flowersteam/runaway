@@ -588,8 +588,16 @@ where
 mod test {
 
     use super::*;
+    use futures::executor::block_on;
+    use std::path::PathBuf;
 
-    fn write_python_scheduler() {
+    static TEST_FOLDER: &str = "/tmp/runaway_test";
+
+    fn random_test_path() -> String {
+        format!("{}/{}", TEST_FOLDER, misc::get_uuid())
+    }
+
+    fn write_python_scheduler(file: &PathBuf) {
         let program = "#!/usr/bin/env python3
 import json
 import sys
@@ -619,13 +627,13 @@ if __name__ == \"__main__\":
         else:
             raise Exception(\"Unknown Message\")
 ";
-        let mut file = std::fs::File::create("/tmp/scheduler.py").unwrap();
+        let mut file = std::fs::File::create(file).unwrap();
         file.write_all(program.as_bytes()).unwrap();
         file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o777)).unwrap();
         file.flush().unwrap();
     }
 
-    fn write_failing_python_scheduler() {
+    fn write_failing_python_scheduler(file: &PathBuf) {
         let program = "#!/usr/bin/env python3
 import json
 import sys
@@ -653,42 +661,33 @@ if __name__ == \"__main__\":
         else:
             raise Exception(\"Unknown Message\")
 ";
-        let mut file = std::fs::File::create("/tmp/scheduler.py").unwrap();
+        let mut file = std::fs::File::create(file).unwrap();
         file.write_all(program.as_bytes()).unwrap();
         file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o777)).unwrap();
         file.flush().unwrap();
     }
 
+    fn start_scheduler<F: Fn(&PathBuf)>(writer: F)-> SchedulerHandle{
+        let scheduler = random_test_path();
+        writer(&(&scheduler).into());
+        let mut command = std::process::Command::new(scheduler);
+        command.stdin(std::process::Stdio::piped());
+        command.stdout(std::process::Stdio::piped());
+        command.stderr(std::process::Stdio::inherit());
+        SchedulerHandle::spawn(command, "scheduler.py".into()).unwrap()
+    }
+
 
     #[test]
     fn test_scheduler_resource() {
-        use futures::executor::block_on;
-
-        write_python_scheduler();
-
-        let mut command = std::process::Command::new("/tmp/scheduler.py");
-        command.stdin(std::process::Stdio::piped());
-        command.stdout(std::process::Stdio::piped());
-        command.stderr(std::process::Stdio::inherit());
-        let scheduler = SchedulerHandle::spawn(command, "scheduler.py".into()).unwrap();
-
+        let scheduler = start_scheduler(write_python_scheduler);
         let parameters = block_on(scheduler.async_request_parameters("hhh".into())).unwrap();
         assert_eq!(parameters, format!("params_from_python"));
-
         block_on(scheduler.async_record_output("hhh".into(), "params_from_rust".into(), "stdout".into(), "stderr".into(), 0, "1.5".into(), ".".into())).unwrap();
-
         drop(scheduler);
 
-        write_failing_python_scheduler();
-
-        let mut command = std::process::Command::new("/tmp/scheduler.py");
-        command.stdin(std::process::Stdio::piped());
-        command.stdout(std::process::Stdio::piped());
-        command.stderr(std::process::Stdio::inherit());
-        let scheduler = SchedulerHandle::spawn(command, "scheduler.py".into()).unwrap();
-
+        let scheduler = start_scheduler(write_failing_python_scheduler);
         block_on(scheduler.async_request_parameters("hhh".into())).unwrap_err();
-
         block_on(scheduler.async_record_output("hhh".into(), "params_from_rust".into(), "stdout".into(), "stderr".into(), 0, "1.5".into(), ".".into())).unwrap_err();
 
     }

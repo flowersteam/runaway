@@ -1020,171 +1020,84 @@ mod test {
 
     use super::*;
     use crate::misc;
-    use futures::executor::block_on;
     use futures::executor;
+    use futures::executor::block_on;
     use futures::task::SpawnExt;
     use std::io::Read;
 
-    #[test]
-    fn test_host_conf() {
-       let conf = HostConf {
+    static TEST_FOLDER: &str = "/tmp/runaway_test";
+
+    fn random_test_path() -> String {
+        format!("{}/{}", TEST_FOLDER, misc::get_uuid())
+    }
+
+    fn get_conf() -> HostConf {
+        let user = misc::get_user();
+
+        HostConf {
             name: "localhost".to_owned(),
-            ssh_configuration: "localhost_proxy".to_owned(),
-            node_proxycommand: "ssh -A -l apere localhost -W $NODENAME:22".to_owned(),
-            start_allocation: vec!["".to_owned()],
+            ssh_configuration: "localhost".to_owned(),
+            node_proxycommand: format!("ssh -A -l {} localhost -W $RUNAWAY_NODE_ID:22", user),
+            start_allocation: vec!["export RUNAWAY_NODES=\"localhost \"".to_owned()],
             cancel_allocation: vec!["".to_owned()],
             allocation_duration: 1,
-            get_node_handles: vec!["echo 16".to_owned()],
+            get_node_handles: vec!["export RUNAWAY_HANDLES=\"first second\"".to_owned()],
             execution: vec!["$RUNAWAY_COMMAND".to_owned()],
-            directory: path::PathBuf::from("/projets/flowers/alex/executions"),
-        };
-        let conf_path = path::PathBuf::from("/tmp/test_host.yml");
+            directory: random_test_path().into(),
+        }
+    }
+
+    #[test]
+    fn test_host_conf() {
+        let conf = get_conf();
+        let conf_path: path::PathBuf = random_test_path().into();
         conf.to_file(&conf_path);
         let conf2 = HostConf::from_file(&conf_path).unwrap();
         assert!(conf == conf2);
     }
 
     #[test]
-    fn test_host_conf_from_file() {
-        let config = HostConf::from_file(&path::PathBuf::from("/tmp/test_host.yml"));
-        eprintln!("config = {:#?}", config);
-    }
-
-    #[test]
-    // To test this, please add localhost2 in your /etc/hosts
     fn test_host_handles_envs() {
-
-        let conf = HostConf {
-            name: "localhost".to_owned(),
-            ssh_configuration: "localhost".to_owned(),
-            node_proxycommand: "ssh -A -l apere localhost -W $RUNAWAY_NODE_ID:22".to_owned(),
-            start_allocation: vec!["export RUNAWAY_NODES=\"localhost localhost2\"".to_owned()],
-            cancel_allocation: vec!["echo $RUNAWAY_JOB_ID > /tmp/jobid".to_owned()],
-            allocation_duration: 1,
-            get_node_handles: vec!["export RUNAWAY_HANDLES=\"first second\"".to_owned()],
-            execution: vec!["$RUNAWAY_COMMAND".to_owned()],
-            directory: path::PathBuf::from("/projets/flowers/alex/executions"),
-        };
-
+        let conf = get_conf();
         let context = TerminalContext::default();
         let res_handle = HostHandle::spawn(conf, context).unwrap();
 
-        // We test environment of first connection
-        let _conn1 = {
+        let test_connection = move |node: &str, handle: &str| {
             let conn = block_on(res_handle.async_acquire()).unwrap();
             let commands = vec![RawCommand("echo $RUNAWAY_NODE_ID".to_owned())];
             let (_, outputs) =
                 block_on(conn.async_pty(conn.context.clone(), commands, None, None)).unwrap();
             let output = misc::compact_outputs(outputs);
-            assert_eq!(
-                String::from_utf8(output.stdout).unwrap(),
-                "localhost\n".to_string()
-            );
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), node.to_string());
             let commands = vec![RawCommand("echo $RUNAWAY_HANDLE_ID".to_owned())];
             let (_, outputs) =
                 block_on(conn.async_pty(conn.context.clone(), commands, None, None)).unwrap();
             let output = misc::compact_outputs(outputs);
             assert_eq!(
                 String::from_utf8(output.stdout).unwrap(),
-                "first\n".to_string()
-            );
-            conn
+                handle.to_string()
+            )
         };
-
-        // We test environment of second connection
-        let _conn2 = {
-            let conn = block_on(res_handle.async_acquire()).unwrap();
-            let commands = vec![RawCommand("echo $RUNAWAY_NODE_ID".to_owned())];
-            let (_, outputs) =
-                block_on(conn.async_pty(conn.context.clone(), commands, None, None)).unwrap();
-            let output = misc::compact_outputs(outputs);
-            assert_eq!(
-                String::from_utf8(output.stdout).unwrap(),
-                "localhost\n".to_string()
-            );
-            let commands = vec![RawCommand("echo $RUNAWAY_HANDLE_ID".to_owned())];
-            let (_, outputs) =
-                block_on(conn.async_pty(conn.context.clone(), commands, None, None)).unwrap();
-            let output = misc::compact_outputs(outputs);
-            assert_eq!(
-                String::from_utf8(output.stdout).unwrap(),
-                "second\n".to_string()
-            );
-            conn
-        };
-
-        // We test environment of third connection
-        let _conn3 = {
-            let conn = block_on(res_handle.async_acquire()).unwrap();
-            let commands = vec![RawCommand("echo $RUNAWAY_NODE_ID".to_owned())];
-            let (_, outputs) =
-                block_on(conn.async_pty(conn.context.clone(), commands, None, None)).unwrap();
-            let output = misc::compact_outputs(outputs);
-            assert_eq!(
-                String::from_utf8(output.stdout).unwrap(),
-                "localhost2\n".to_string()
-            );
-            let commands = vec![RawCommand("echo $RUNAWAY_HANDLE_ID".to_owned())];
-            let (_, outputs) =
-                block_on(conn.async_pty(conn.context.clone(), commands, None, None)).unwrap();
-            let output = misc::compact_outputs(outputs);
-            assert_eq!(
-                String::from_utf8(output.stdout).unwrap(),
-                "first\n".to_string()
-            );
-            conn
-        };
-
-        // We test environment of fourth connection
-        let _conn4 = {
-            let conn = block_on(res_handle.async_acquire()).unwrap();
-            let commands = vec![RawCommand("echo $RUNAWAY_NODE_ID".to_owned())];
-            let (_, outputs) =
-                block_on(conn.async_pty(conn.context.clone(), commands, None, None)).unwrap();
-            let output = misc::compact_outputs(outputs);
-            assert_eq!(
-                String::from_utf8(output.stdout).unwrap(),
-                "localhost2\n".to_string()
-            );
-            let commands = vec![RawCommand("echo $RUNAWAY_HANDLE_ID".to_owned())];
-            let (_, outputs) =
-                block_on(conn.async_pty(conn.context.clone(), commands, None, None)).unwrap();
-            let output = misc::compact_outputs(outputs);
-            assert_eq!(
-                String::from_utf8(output.stdout).unwrap(),
-                "second\n".to_string()
-            );
-            conn
-        };
+        test_connection("localhost\n", "first\n");
+        test_connection("localhost\n", "second\n");
     }
 
     #[test]
     fn test_stress_host_resource() {
-
-        std::fs::remove_file("/tmp/alloc_test");
-        std::fs::remove_file("/tmp/cancel_test");
-
-        let conf = HostConf {
-            name: "localhost".to_owned(),
-            ssh_configuration: "localhost".to_owned(),
-            node_proxycommand: "ssh -A -l apere localhost -W $RUNAWAY_NODE_ID:22".to_owned(),
-            start_allocation: vec![
-                "sleep 5".to_owned(),
-                "echo 1 >> /tmp/alloc_test".to_owned(),
-                "export RUNAWAY_NODES='localhost'".to_owned(),
-            ],
-            cancel_allocation: vec![
-                "sleep 5".to_owned(),
-                "echo 1 >> /tmp/cancel_test".to_owned(),
-            ],
-            allocation_duration: 1,
-            get_node_handles: vec!["export RUNAWAY_HANDLES='first second'".to_owned()],
-            execution: vec!["$RUNAWAY_COMMAND".to_owned()],
-            directory: path::PathBuf::from("/projets/flowers/alex/executions"),
-        };
+        let alloc_registry = random_test_path();
+        let cancel_registry = random_test_path();
+        let mut conf = get_conf();
+        conf.start_allocation = vec![
+            "sleep 5".to_owned(),
+            format!("echo 1 >> {}", alloc_registry),
+            "export RUNAWAY_NODES='localhost'".to_owned(),
+        ];
+        conf.cancel_allocation = vec![
+            "sleep 5".to_owned(),
+            format!("echo 1 >> {}", cancel_registry),
+        ];
 
         let context = TerminalContext::default();
-
         let res_handle = HostHandle::spawn(conf, context).unwrap();
 
         async fn test(res: HostHandle) {
@@ -1196,28 +1109,24 @@ mod test {
         }
 
         let mut pool = executor::ThreadPoolBuilder::new().create().unwrap();
-
         let handles = (1..200)
             .into_iter()
             .map(|_| pool.spawn_with_handle(test(res_handle.clone())).unwrap())
             .collect::<Vec<_>>();
-
         let fut = futures::future::join_all(handles);
         pool.run(fut);
         drop(res_handle);
 
-        let mut alloc_file = std::fs::File::open("/tmp/alloc_test").unwrap();
+        let mut alloc_file = std::fs::File::open(alloc_registry).unwrap();
         let mut alloc_string = String::new();
         alloc_file.read_to_string(&mut alloc_string).unwrap();
         let n_alloc = alloc_string.lines().count();
-        dbg!(&n_alloc);
-        let n_alloc = alloc_string.lines().count();
         assert!(n_alloc > 1);
-        let mut cancel_file = std::fs::File::open("/tmp/cancel_test").unwrap();
+
+        let mut cancel_file = std::fs::File::open(cancel_registry).unwrap();
         let mut cancel_string = String::new();
         cancel_file.read_to_string(&mut cancel_string).unwrap();
         let n_cancel = alloc_string.lines().count();
-        dbg!(&n_cancel);
         assert_eq!(alloc_string, cancel_string);
     }
 }
