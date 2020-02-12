@@ -590,7 +590,7 @@ mod test {
     use super::*;
 
     fn write_python_scheduler() {
-        let program = "#!/usr/bin/env python
+        let program = "#!/usr/bin/env python3
 import json
 import sys
 
@@ -626,7 +626,7 @@ if __name__ == \"__main__\":
     }
 
     fn write_failing_python_scheduler() {
-        let program = "#!/usr/bin/env python
+        let program = "#!/usr/bin/env python3
 import json
 import sys
 
