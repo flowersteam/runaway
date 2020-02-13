@@ -1469,11 +1469,11 @@ mod test {
     }
 
     #[test]
-    fn test_async_exec() {
+    fn test_async_exec() { 
         async fn test() {
             let profile = get_profile();
             let remote = RemoteHandle::spawn(profile).unwrap();
-            let command = RawCommand("echo kikou && sleep 1 && { echo hello! 1>&2 }".into());
+            let command = RawCommand("echo kikou && sleep 1 && echo hello! 1>& 2".into());
             let output = remote.async_exec(command).await.unwrap();
             assert_eq!(String::from_utf8(output.stdout).unwrap(), "kikou\n");
             assert_eq!(String::from_utf8(output.stderr).unwrap(), "hello!\n");
