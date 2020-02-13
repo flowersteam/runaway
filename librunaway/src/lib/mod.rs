@@ -309,11 +309,11 @@ pub static SEND_IGNORE_RPATH: &str = ".sendignore";
 /// globs pattern for files to ignore in fetch
 pub static FETCH_IGNORE_RPATH: &str = ".fetchignore";
 /// folder containing execution profiles in $HOME
-pub static PROFILES_FOLDER_RPATH: &str = ".runaway";
+pub static PROFILES_FOLDER_RPATH: &str = ".config/runaway";
 /// file containing known hosts keys
-pub static KNOWN_HOSTS_RPATH: &str = ".runaway/known_hosts";
+pub static KNOWN_HOSTS_RPATH: &str = ".config/runaway/known_hosts";
 /// file containing ssh configs
-pub static SSH_CONFIG_RPATH: &str = ".runaway/config";
+pub static SSH_CONFIG_RPATH: &str = ".config/runaway/config";
 /// file name of tar archive to send
 pub static SEND_ARCH_RPATH: &str = ".send.tar";
 /// file name of tar to fetch
