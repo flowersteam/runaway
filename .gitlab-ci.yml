@@ -5,11 +5,11 @@ before_script:
   - source $HOME/.cargo/env
   - eval `ssh-agent -s`
   - ssh-add
+  - mkdir /tmp/runaway_test;
 
 test:
   stage: test
   script:
-    - mkdir /tmp/runaway_test
     - rustc --version
     - cargo --version
     - cargo test --tests
