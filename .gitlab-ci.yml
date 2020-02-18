@@ -7,13 +7,25 @@ before_script:
   - ssh-add
   - mkdir /tmp/runaway_test
 
-test:
+test-linux:
+  stage: test
+  only: 
+    - develop
+  tags:
+    - linux
+  script:
+    - rustc --version
+    - cargo --version
+    - cargo test --tests
+  after_script:
+    - rm -rf /tmp/runaway_test
+    
+test-osx:
   stage: test
   only: 
     - develop
   tags:
     - osx
-    - linux
   script:
     - rustc --version
     - cargo --version
