@@ -1,0 +1,15 @@
+stages:
+  - test
+
+test:
+  stage: test
+  script:
+    - cd $HOME/runaway
+    - git checkout $CI_COMMIT_SHA
+    - mkdir /tmp/runaway_test
+    - rustc --version
+    - cargo --version
+    - cargo test --tests
+  after_script:
+    - rm -rf /tmp/runaway-test
+  
