@@ -9,7 +9,8 @@ before_script:
 
 test:
   stage: test
-  only: develop
+  only: 
+    - develop
   tags:
     - osx
     - linux
