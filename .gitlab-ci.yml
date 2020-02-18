@@ -5,7 +5,7 @@ before_script:
   - source $HOME/.cargo/env
   - eval `ssh-agent -s`
   - ssh-add
-  - [[ -f /tmp/runaway_test ]] || mkdir /tmp/runaway_test;
+  - "[[ -f /tmp/runaway_test ]] || mkdir /tmp/runaway_test"
 
 test:
   stage: test
