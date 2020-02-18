@@ -9,7 +9,7 @@ before_script:
 test:
   stage: test
   script:
-    - cd .$HOME/runaway
+    - cd $HOME/runaway
     - git checkout $CI_COMMIT_SHA
     - mkdir /tmp/runaway_test
     - rustc --version
