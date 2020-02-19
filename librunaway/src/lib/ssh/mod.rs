@@ -1752,5 +1752,6 @@ mod test {
             }
             .boxed()
         }
+        test_async_concurrent(test);
     }
 }
