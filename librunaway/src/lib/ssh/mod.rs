@@ -1654,7 +1654,7 @@ mod test {
     ) {
         let first_file = random_test_path();
         let second_file = random_test_path();
-        wrap_sh!("dd if=/dev/urandom of={} bs=35M count=1", first_file).unwrap();
+        wrap_sh!("dd if=/dev/urandom of={} bs=35m count=1", first_file).unwrap();
         let before = std::time::Instant::now();
         block_on(transfer_func(first_file.clone(), second_file.clone()));
         let dur = std::time::Instant::now().duration_since(before);
