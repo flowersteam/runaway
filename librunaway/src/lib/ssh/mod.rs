@@ -64,7 +64,9 @@ pub mod config;
 ///     + `RUNAWAY_EOF:\n`to express the end of the stream of messages.
 
 /// Bash pty agent, injected in the pty before executing the commands.
-static BASH_PTY_AGENT: &str = include_str!("agent.sh");
+static BASH_PTY_AGENT_INIT: &str = include_str!("agent_init.sh");
+static BASH_PTY_AGENT_RUN: &str = include_str!("agent_run.sh");
+static BASH_PTY_AGENT_CLOSE: &str = include_str!("agent_close.sh");
 
 //------------------------------------------------------------------------------------------- ERRORS
 
@@ -1065,9 +1067,16 @@ async fn setup_pty(
     await_wouldblock_io!(channel.write_all("export HISTFILE=/dev/null\nexec bash\n".as_bytes()))
         .map_err(|e| Error::ExecutionFailed(format!("Failed to start bash: {}", e)))?;
 
-    // We inject the linux pty agent on the remote end.
-    await_wouldblock_io!(channel.write_all(BASH_PTY_AGENT.as_bytes()))
+    // We inject the linux pty agent on the remote end, pieces by pieces to avoid overflowing the pty.
+    await_wouldblock_io!(channel.write_all(BASH_PTY_AGENT_INIT.as_bytes()))
         .map_err(|e| Error::ExecutionFailed(format!("Failed to inject agent: {}", e)))?;
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    await_wouldblock_io!(channel.write_all(BASH_PTY_AGENT_RUN.as_bytes()))
+        .map_err(|e| Error::ExecutionFailed(format!("Failed to inject agent: {}", e)))?;
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    await_wouldblock_io!(channel.write_all(BASH_PTY_AGENT_CLOSE.as_bytes()))
+        .map_err(|e| Error::ExecutionFailed(format!("Failed to inject agent: {}", e)))?;
+    std::thread::sleep(std::time::Duration::from_millis(10));
     await_wouldblock_io!(channel.write_all("rw_init\n".as_bytes()))
         .map_err(|e| Error::ExecutionFailed(format!("Failed to initialize agent: {}", e)))?;
 
