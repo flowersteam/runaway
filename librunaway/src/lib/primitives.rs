@@ -1,6 +1,4 @@
-//! lib/primitives.rs
-//!
-//! This module contains primitives functions (asynchronous or not) that can be assembled to produce 
+//! This module contains primitives functions (asynchronous or not) that can be assembled to produce
 //! larger pieces of logic commonly used in the applications.
 
 
@@ -39,7 +37,7 @@ impl From<Sha1Hash> for String{
 impl fmt::Display for Sha1Hash{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
-    } 
+    }
 }
 
 
@@ -64,14 +62,14 @@ pub fn read_globs_from_file(file: &PathBuf) -> Result<Vec<Glob<String>>, String>
 
 }
 
-/// List a local folder. Returns paths to every files relative to the root. Ignore globs can be 
+/// List a local folder. Returns paths to every files relative to the root. Ignore globs can be
 /// along with include_globs, which supersede the ignore globs.
 #[instrument]
-pub fn list_local_folder(root: &PathBuf, 
-                         ignore_globs: &Vec<Glob<String>>, 
+pub fn list_local_folder(root: &PathBuf,
+                         ignore_globs: &Vec<Glob<String>>,
                          include_globs: &Vec<Glob<String>>)
                         -> Result<Vec<PathBuf>, String>{
-    
+
     // We create ignore globset
     let mut ignore = globset::GlobSetBuilder::new();
     ignore_globs.iter()
@@ -108,8 +106,8 @@ pub fn list_local_folder(root: &PathBuf,
 
 /// Compress a set of local files into a local tar archive.
 #[instrument]
-pub fn tar_local_files(root: &PathBuf, 
-                       files: &Vec<PathBuf>, 
+pub fn tar_local_files(root: &PathBuf,
+                       files: &Vec<PathBuf>,
                        output: &PathBuf)
                       -> Result<Sha1Hash, String>{
 
@@ -133,7 +131,7 @@ pub fn tar_local_files(root: &PathBuf,
     archive
         .finish()
         .map_err(|e| format!("Failed to finish the archive: {}", e))?;
-    // We compute hash 
+    // We compute hash
     compute_local_sha1(output)
 
 }
@@ -172,7 +170,7 @@ pub fn untar_local_archive(archive: &PathBuf, root: &PathBuf) -> Result<Vec<Path
         .unpack(root)
         .map_err(|e| format!("Failed to unpack archive: {}", e))?;
     Ok(files)
-} 
+}
 
 // Moves a local file to a remote file.
 #[instrument]
@@ -186,7 +184,7 @@ pub async fn send_local_file(from: &PathBuf, to: &PathBuf, node: &RemoteHandle)-
     if already_there.status.success() {
         return Err("File already exists".into())
     } else {
-        node.async_scp_send(from.to_path_buf(), 
+        node.async_scp_send(from.to_path_buf(),
                             to.to_path_buf())
             .await
             .map_err(|e| format!("Failed to send input data: {}", e))?;
@@ -195,14 +193,14 @@ pub async fn send_local_file(from: &PathBuf, to: &PathBuf, node: &RemoteHandle)-
 
 }
 
-// Fetches a remote file 
+// Fetches a remote file
 #[instrument]
 pub async fn fetch_remote_file(from: &PathBuf, to: &PathBuf, node: &RemoteHandle) -> Result<(),String>{
 
     // We check if file already exists
     //if to.exists(){
     //    return Err("File already exists".into())
-    //} 
+    //}
     // Depending on the result, we fetch the file
     node.async_scp_fetch(from.to_owned(), to.to_owned())
         .await
@@ -214,10 +212,10 @@ pub async fn fetch_remote_file(from: &PathBuf, to: &PathBuf, node: &RemoteHandle
 
 //  Lists the files in a remote folder.
 #[instrument]
-pub async fn list_remote_folder(root: &PathBuf, 
-                                ignore_globs: &Vec<Glob<String>>, 
+pub async fn list_remote_folder(root: &PathBuf,
+                                ignore_globs: &Vec<Glob<String>>,
                                 include_globs: &Vec<Glob<String>>,
-                                node: &RemoteHandle) 
+                                node: &RemoteHandle)
                                -> Result<Vec<PathBuf>, String>{
     // We create ignore globset
     let mut ignore = globset::GlobSetBuilder::new();
@@ -255,12 +253,12 @@ pub async fn list_remote_folder(root: &PathBuf,
 
 /// Compress a set of remote files into a local tar archive.
 #[instrument]
-pub async fn tar_remote_files (root: &PathBuf, 
-                               files: &Vec<PathBuf>, 
+pub async fn tar_remote_files (root: &PathBuf,
+                               files: &Vec<PathBuf>,
                                output: &PathBuf,
-                               node: &RemoteHandle) 
+                               node: &RemoteHandle)
                               -> Result<Sha1Hash, String>{
-    
+
     // We create the files string
     let files_string;
     if files.is_empty(){
@@ -274,8 +272,8 @@ pub async fn tar_remote_files (root: &PathBuf,
         });
     }
     // We create the archive
-    let command = RawCommand(format!("cd {} && tar -cvf {} {}", 
-        root.to_str().unwrap(), 
+    let command = RawCommand(format!("cd {} && tar -cvf {} {}",
+        root.to_str().unwrap(),
         output.to_str().unwrap(),
         files_string));
     node.async_exec(command)
@@ -315,8 +313,8 @@ pub async fn untar_remote_archive(archive: &PathBuf, root: &PathBuf, node: &Remo
         -> Result<Vec<PathBuf>, String> {
 
     // We open the archive and unpacks it
-    let command = RawCommand(format!("tar -xvf {} -C {}", 
-        archive.to_str().unwrap(), 
+    let command = RawCommand(format!("tar -xvf {} -C {}",
+        archive.to_str().unwrap(),
         root.to_str().unwrap()));
     node.async_exec(command)
         .await
@@ -333,7 +331,7 @@ pub async fn untar_remote_archive(archive: &PathBuf, root: &PathBuf, node: &Remo
 #[instrument]
 pub async fn remote_file_exists(file: &PathBuf, node: &RemoteHandle) -> Result<bool, String> {
 
-    let command = RawCommand(format!("test -f {}", 
+    let command = RawCommand(format!("test -f {}",
         file.to_str().unwrap()));
     Ok(node.async_exec(command)
         .await
@@ -348,7 +346,7 @@ pub async fn remote_file_exists(file: &PathBuf, node: &RemoteHandle) -> Result<b
 #[instrument]
 pub async fn remote_folder_exists(folder: &PathBuf, node: &RemoteHandle) -> Result<bool, String> {
 
-    let command = RawCommand(format!("test -d {}", 
+    let command = RawCommand(format!("test -d {}",
         folder.to_str().unwrap()));
     Ok(node.async_exec(command)
         .await
@@ -409,26 +407,43 @@ pub async fn create_remote_folder(folder: &PathBuf, node: &RemoteHandle) -> Resu
 mod tests {
 
     use super::*;
+    use crate::misc;
     use shells::wrap_sh;
     use futures::executor::block_on;
-    use crate::ssh::{config::SshProfile, RemoteHandle};
-    
+    use crate::ssh::{config, config::SshProfile, RemoteHandle};
+
+    static TEST_FOLDER: &str = "/tmp/runaway_test";
+
+    fn random_test_path() -> String {
+        format!("{}/{}", TEST_FOLDER, misc::get_uuid())
+    }
+
+    fn get_profile() -> SshProfile {
+        let user = misc::get_user();
+        config::SshProfile {
+            name: "test".to_owned(),
+            hostname: Some("127.0.0.1".to_owned()),
+            user: Some(misc::get_user()),
+            port: None,
+            proxycommand: Some(format!("ssh -A -l {} localhost -W localhost:22", user)),
+        }
+    }
+
     #[test]
     fn test_read_globs_from_file(){
-        wrap_sh!("echo '*.gz\nfolder/*' > /tmp/test_glob").unwrap();
-        let globs = read_globs_from_file(&PathBuf::from("/tmp/test_glob")).unwrap();
+        let glob_file = random_test_path();
+        wrap_sh!("echo '*.gz\nfolder/*' > {}", glob_file).unwrap();
+        let globs = read_globs_from_file(&PathBuf::from(&glob_file)).unwrap();
         assert_eq!(globs.len(), 2);
         assert_eq!(&Glob("*.gz".into()), globs.get(0).unwrap());
         assert_eq!(&Glob("folder/*".into()), globs.get(1).unwrap());
-        wrap_sh!("rm /tmp/test_glob").unwrap();
     }
 
     #[test]
     fn test_list_local_folder() {
-        wrap_sh!("mkdir /tmp/test_dir && mkdir /tmp/test_dir/folder").unwrap();
-        wrap_sh!("touch /tmp/test_dir/1 && touch /tmp/test_dir/folder/2 && touch /tmp/test_dir/3").unwrap();
-        let root = PathBuf::from("/tmp/test_dir");
-        let files = list_local_folder(&root,
+        let root = random_test_path();
+        wrap_sh!("mkdir {} && cd {} && mkdir folder && touch 1 folder/2 3", root, root).unwrap();
+        let files = list_local_folder(&(&root).into(),
                 &Vec::new(),
                 &Vec::new()).unwrap();
         assert_eq!(files.len(), 3);
@@ -436,14 +451,14 @@ mod tests {
         assert!(files.contains(&PathBuf::from("3")));
         assert!(files.contains(&PathBuf::from("folder/2")));
         // With ignore
-        let files = list_local_folder(&root,
+        let files = list_local_folder(&(&root).into(),
             &vec!(Glob("folder/*".into())),
             &Vec::new()).unwrap();
         assert_eq!(files.len(), 2);
         assert!(files.contains(&PathBuf::from("1")));
         assert!(files.contains(&PathBuf::from("3")));
         //With include
-        let files = list_local_folder(&root,
+        let files = list_local_folder(&(&root).into(),
                 &vec!(Glob("folder/*".into())),
                 &vec!(Glob("**/2".into()))
             ).unwrap();
@@ -451,29 +466,26 @@ mod tests {
         assert!(files.contains(&PathBuf::from("1")));
         assert!(files.contains(&PathBuf::from("3")));
         assert!(files.contains(&PathBuf::from("folder/2")));
-        wrap_sh!("rm -rf /tmp/test_dir").unwrap();
     }
 
     #[test]
     fn test_tar_untar_local_file(){
-        wrap_sh!("mkdir /tmp/test_dir && mkdir /tmp/test_dir/folder").unwrap();
-        wrap_sh!("touch /tmp/test_dir/1 && touch /tmp/test_dir/folder/2 && touch /tmp/test_dir/3").unwrap();
-        wrap_sh!("mkdir /tmp/test_dir2").unwrap();
-        let root = PathBuf::from("/tmp/test_dir");
+        let root = random_test_path();
+        wrap_sh!("mkdir {} && cd {} && mkdir folder && touch 1 folder/2 3", root, root).unwrap();
         let files = vec![
             "1".into(),
             "3".into(),
             "folder/2".into(),
         ];
-        let output = PathBuf::from("/tmp/test_archive");
-        let tar_archive = tar_local_files(&root, &files, &output).unwrap();
-        assert!(output.exists());
-        let shell_sha1 = wrap_sh!("sha1sum /tmp/test_archive").unwrap();
+        let tar_file = random_test_path();
+        let tar_archive = tar_local_files(&root.into(), &files, &(&tar_file).into()).unwrap();
+        assert!(PathBuf::from(&tar_file).exists());
+        let shell_sha1 = wrap_sh!("sha1sum {}", tar_file).unwrap();
         let sha1 = shell_sha1.split(' ').nth(0).unwrap();
         assert_eq!(sha1, tar_archive.0);
 
-        let root = PathBuf::from("/tmp/test_dir2");
-        let files = untar_local_archive(&output, &root).unwrap();
+        let root = random_test_path();
+        let files = untar_local_archive(&tar_file.into(), &root.into()).unwrap();
         let expected_files = vec![
             "1".into(),
             "3".into(),
@@ -485,45 +497,33 @@ mod tests {
         for a in files.iter(){
             assert!(expected_files.contains(a))
         }
-        wrap_sh!("rm -rf /tmp/test_dir /tmp/test_dir2 /tmp/test_archive").unwrap();
     }
 
     #[test]
     fn test_send_fetch() {
-        let profile = SshProfile{
-            name: "test".to_owned(),
-            hostname: Some("localhost".to_owned()),
-            user: Some("apere".to_owned()),
-            port: Some(22),
-            proxycommand: None // Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
-        };
+        let first_file = random_test_path();
+        let second_file = random_test_path();
+        let third_file = random_test_path();
+        let profile = get_profile();
         let node = RemoteHandle::spawn(profile).unwrap();
-        wrap_sh!("touch /tmp/test_file").unwrap();
-        let local_before = PathBuf::from("/tmp/test_file");
-        let remote_then = PathBuf::from("/tmp/test_file2");
+        wrap_sh!("touch {}", first_file).unwrap();
+        let local_before = PathBuf::from(first_file);
+        let remote_then = PathBuf::from(second_file);
         block_on(send_local_file(&local_before, &remote_then, &node)).unwrap();
         assert!(remote_then.exists());
-        let local_after = PathBuf::from("/tmp/test_file3");
+        let local_after = PathBuf::from(third_file);
         block_on(fetch_remote_file(&remote_then, &local_after, &node)).unwrap();
         assert!(local_after.exists());
-        wrap_sh!("rm /tmp/test_file*").unwrap();
     }
 
 
     #[test]
     fn test_list_remote_folder() {
-        let profile = SshProfile{
-            name: "test".to_owned(),
-            hostname: Some("localhost".to_owned()),
-            user: Some("apere".to_owned()),
-            port: Some(22),
-            proxycommand: None // Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
-        };
+        let profile = get_profile();
+        let root = random_test_path();
+        wrap_sh!("mkdir {} && cd {} && mkdir folder && touch 1 folder/2 3", root, root).unwrap();
         let node = RemoteHandle::spawn(profile).unwrap();
-        wrap_sh!("mkdir /tmp/test_dir && mkdir /tmp/test_dir/folder").unwrap();
-        wrap_sh!("touch /tmp/test_dir/1 && touch /tmp/test_dir/folder/2 && touch /tmp/test_dir/3").unwrap();
-        let root = PathBuf::from("/tmp/test_dir");
-        let files = block_on(list_remote_folder(&root,
+        let files = block_on(list_remote_folder(&(&root).into(),
                                                 &Vec::new(),
                                                 &Vec::new(),
                                                 &node)).unwrap();
@@ -532,7 +532,7 @@ mod tests {
         assert!(files.contains(&PathBuf::from("3")));
         assert!(files.contains(&PathBuf::from("folder/2")));
         // With ignore
-        let files = block_on(list_remote_folder(&root,
+        let files = block_on(list_remote_folder(&(&root).into(),
                                                 &vec!(Glob("folder/*".into())),
                                                 &Vec::new(),
                                                 &node)).unwrap();
@@ -540,7 +540,7 @@ mod tests {
         assert!(files.contains(&PathBuf::from("1")));
         assert!(files.contains(&PathBuf::from("3")));
         //With include
-        let files = block_on(list_remote_folder(&root,
+        let files = block_on(list_remote_folder(&(&root).into(),
                                                 &vec!(Glob("folder/*".into())),
                                                 &vec!(Glob("**/2".into())),
                                                 &node)).unwrap();
@@ -548,38 +548,30 @@ mod tests {
         assert!(files.contains(&PathBuf::from("1")));
         assert!(files.contains(&PathBuf::from("3")));
         assert!(files.contains(&PathBuf::from("folder/2")));
-        wrap_sh!("rm -rf /tmp/test_dir").unwrap();
     }
 
 
     #[test]
     fn test_tar_untar_remote_file(){
-        let profile = SshProfile{
-            name: "test".to_owned(),
-            hostname: Some("localhost".to_owned()),
-            user: Some("apere".to_owned()),
-            port: Some(22),
-            proxycommand: None // Some("ssh -A -l apere localhost -W localhost:22".to_owned()),
-        };
+        let profile = get_profile();
+        let root = random_test_path();
+        wrap_sh!("mkdir {} && cd {} && mkdir folder && touch 1 folder/2 3", root, root).unwrap();
         let node = RemoteHandle::spawn(profile).unwrap();
-        wrap_sh!("mkdir /tmp/test_dir && mkdir /tmp/test_dir/folder").unwrap();
-        wrap_sh!("touch /tmp/test_dir/1 && touch /tmp/test_dir/folder/2 && touch /tmp/test_dir/3").unwrap();
-        wrap_sh!("mkdir /tmp/test_dir2").unwrap();
-        let root = PathBuf::from("/tmp/test_dir");
         let files = vec![
             "1".into(),
             "3".into(),
             "folder/2".into(),
         ];
-        let output = PathBuf::from("/tmp/test_archive");
-        let tar_archive = block_on(tar_remote_files(&root, &files, &output, &node)).unwrap();
-        assert!(output.exists());
-        let shell_sha1 = wrap_sh!("sha1sum /tmp/test_archive").unwrap();
+        let tar_file = random_test_path();
+        let tar_archive = block_on(tar_remote_files(&(&root).into(), &files, &(&tar_file).into(), &node)).unwrap();
+        assert!(PathBuf::from(&tar_file).exists());
+        let shell_sha1 = wrap_sh!("sha1sum {}", tar_file).unwrap();
         let sha1 = shell_sha1.split(' ').nth(0).unwrap();
         assert_eq!(sha1, tar_archive.0);
 
-        let root = PathBuf::from("/tmp/test_dir2");
-        let files = block_on(untar_remote_archive(&output, &root, &node)).unwrap();
+        let root = random_test_path();
+        wrap_sh!("mkdir {}", root).unwrap();
+        let files = block_on(untar_remote_archive(&(&tar_file).into(), &(&root).into(), &node)).unwrap();
         let expected_files = vec![
             "1".into(),
             "3".into(),
@@ -591,7 +583,6 @@ mod tests {
         for a in files.iter(){
             assert!(expected_files.contains(a))
         }
-        wrap_sh!("rm -rf /tmp/test_dir /tmp/test_dir2 /tmp/test_archive").unwrap();
     }
-    
+
 }

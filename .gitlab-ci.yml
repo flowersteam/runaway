@@ -1,0 +1,35 @@
+stages:
+  - test
+
+before_script:
+  - source $HOME/.cargo/env
+  - eval `ssh-agent -s`
+  - ssh-add
+  - mkdir /tmp/runaway_test || echo "folder exists"
+
+test-linux:
+  stage: test
+  only: 
+    - develop
+  tags:
+    - linux
+  script:
+    - rustc --version
+    - cargo --version
+    - cargo test --tests
+  after_script:
+    - rm -rf /tmp/runaway_test
+    
+test-osx:
+  stage: test
+  only: 
+    - develop
+  tags:
+    - osx
+  script:
+    - rustc --version
+    - cargo --version
+    - cargo test --tests
+  after_script:
+    - rm -rf /tmp/runaway_test
+  

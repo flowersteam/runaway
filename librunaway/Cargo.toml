@@ -1,8 +1,9 @@
 [package]
 name = "librunaway"
-version = "0.3.1"
+version = "0.4.0"
 authors = ["Alexandre Péré <alexandre.pere@protonmail.com>"]
 edition = "2018"
+license = "MPL-2.0"
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
@@ -16,7 +17,7 @@ yaml-rust="0.4"
 rust-crypto = "0.2"
 uuid = { version = "0.6", features = ["serde", "v4"] }
 rpassword = "0.0.4"
-ssh2 = "0.3.3"
+ssh2 = "0.6"
 shells = "0.2.0"
 dirs = "1.0"
 url = "1.7.2"
@@ -27,8 +28,8 @@ sha-1 = "0.8.1"
 walkdir = "2.2.7"
 libc = "0.2"
 globset = "0.4.4"
-tracing = "0.1.10"
-tracing-subscriber = "0.1.6"
+tracing = "0.1.12"
+tracing-subscriber = "0.2"
 tracing-attributes = "0.1.5"
 tracing-futures = {version = "0.1.0", features=["futures-preview"]}
 derivative = "1.0.3"

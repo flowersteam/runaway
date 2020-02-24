@@ -21,6 +21,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::ffi::OsStr;
 use tracing::{self, trace, error, instrument};
 
+
 //------------------------------------------------------------------------------------------- ERRORS
 
 
@@ -49,26 +50,26 @@ impl fmt::Display for Error {
 //------------------------------------------------------------------------------------------ DROPPER
 
 
-/// Most of this library code relies on a structure that handles messages from the receiving end of 
+/// Most of this library code relies on a structure that handles messages from the receiving end of
 /// a channel in a separate thread. Handles to the transmitting end of the channel are freely cloned
-/// in the rest of the program with the insurance of the operations being synchronized by the 
-/// channel. When the last handle is dropped, it is important to close the channel and wait for the 
+/// in the rest of the program with the insurance of the operations being synchronized by the
+/// channel. When the last handle is dropped, it is important to close the channel and wait for the
 /// thread to cleanup and join.
-/// 
-/// This structure allows to do just that. It holds a reference to a closure, and at drop time, 
-/// checks whether it is the last handle or not. If it is, it waits for the handle to join before 
-/// dropping. This dropper should be included as the __last__ field of the handle structure, to 
+///
+/// This structure allows to do just that. It holds a reference to a closure, and at drop time,
+/// checks whether it is the last handle or not. If it is, it waits for the handle to join before
+/// dropping. This dropper should be included as the __last__ field of the handle structure, to
 /// ensure that it is dropped last (see https://github.com/rust-lang/rfcs/blob/246ff86b320a72f98ed2df92805e8e3d48b402d6/text/1857-stabilize-drop-order.md)
-/// 
-/// A `Dropper` could be either `Strong` or `Weak`. If Strong, the dropper is accounted for in the 
-/// dropping. In practice, a handle with a `Strong` dropper is guaranteed to access the resource (if 
-/// not crashed). On the other side, if `Weak`, the dropper is not accounted for in the dropping. 
-/// This means that a handle with a weak dropper is not guaranteed to access the resource. 
-/// 
-/// In practice, `Weak` droppers are used for references that do not need to be waited for, and 
+///
+/// A `Dropper` could be either `Strong` or `Weak`. If Strong, the dropper is accounted for in the
+/// dropping. In practice, a handle with a `Strong` dropper is guaranteed to access the resource (if
+/// not crashed). On the other side, if `Weak`, the dropper is not accounted for in the dropping.
+/// This means that a handle with a weak dropper is not guaranteed to access the resource.
+///
+/// In practice, `Weak` droppers are used for references that do not need to be waited for, and
 /// could ruin the dropping strategy. Two cases can arise:
 ///     + A self referential handle as seen in the `application` module
-///     + A handle that is never dropped during program execution, as seen in ctrl-c handling. 
+///     + A handle that is never dropped during program execution, as seen in ctrl-c handling.
 #[derive(Clone)]
 pub enum Dropper{
     Strong(Arc<Mutex<Option<Box<dyn FnOnce()+Send+'static>>>>, String),
@@ -108,7 +109,7 @@ impl Drop for Dropper{
 //---------------------------------------------------------------------------------------- EXPIRABLE
 
 
-/// A smart pointer containing an expirable value, a value that should not be used after a given 
+/// A smart pointer containing an expirable value, a value that should not be used after a given
 /// time. Used to implement the handle acquisition in `hosts`.
 #[derive(Clone)]
 pub struct Expire<T:Clone+Send+Sync>{
@@ -117,7 +118,7 @@ pub struct Expire<T:Clone+Send+Sync>{
 }
 
 impl<T> Expire<T> where T:Clone+Send+Sync{
-    /// Creates a new Expire pointer. 
+    /// Creates a new Expire pointer.
     pub fn new(inner: T, expiration: DateTime<Utc>) -> Expire<T>{
         Expire{inner, expiration}
     }
@@ -153,7 +154,7 @@ impl<T> Debug for Expire<T> where T:Clone+Send+Sync+Debug{
 
 /// A smart pointer representing a value that should be sent back through a channel at drop-time.
 /// Take good care about consuming every unnecessary DropBack. Indeed, if the value is not consumed,
-/// then, a self-referential sending loop can occur, that would prevent the whole channel to be 
+/// then, a self-referential sending loop can occur, that would prevent the whole channel to be
 /// closed.
 #[derive(Clone)]
 pub struct DropBack<T:Clone+Send+Sync>{
@@ -162,7 +163,7 @@ pub struct DropBack<T:Clone+Send+Sync>{
 }
 
 impl<T> DropBack<T> where T:Clone+Send+Sync{
-    /// Creates a new DropBack pointer. 
+    /// Creates a new DropBack pointer.
     pub fn new(inner: T, channel: UnboundedSender<DropBack<T>>) -> DropBack<T>{
         DropBack{
             inner: Some(inner),
@@ -170,8 +171,8 @@ impl<T> DropBack<T> where T:Clone+Send+Sync{
         }
     }
 
-    /// Consumes the DropBack pointer, by taking the value inside. Nothing will be sent back after 
-    /// that. 
+    /// Consumes the DropBack pointer, by taking the value inside. Nothing will be sent back after
+    /// that.
     pub fn consume(mut self) -> T{
         self.inner.take().unwrap()
     }
@@ -221,7 +222,7 @@ pub trait AsResult {
     fn result(self) -> Result<String, String>;
 }
 
-/// Implementation for `Ouput`. The exit code is used as a marker for failure. 
+/// Implementation for `Ouput`. The exit code is used as a marker for failure.
 impl AsResult for Output {
     fn result(self) -> Result<String, String> {
         if self.status.success() {
