@@ -1,5 +1,3 @@
-//! lib/misc.rs
-//!
 //! A few miscellaneous functions available library wide.
 
 
@@ -10,8 +8,13 @@ use std::{process, path, fs, error, fmt};
 use regex;
 use super::CMPCONF_RPATH;
 use tracing::{self, warn, debug};
+use tracing_subscriber::fmt::Subscriber;
+use tracing::Level;
+use std::process::{Output};
+use std::os::unix::process::ExitStatusExt;
 use super::commons::OutputBuf;
 use super::timer::TimerHandle;
+use uuid::Uuid;
 
 
 //------------------------------------------------------------------------------------------- STATIC
@@ -46,9 +49,9 @@ impl fmt::Display for Error {
 
 
 /// This macro allows to asynchronously wait for (at least) a given time. This means that the thread
-/// is yielded when it is done. For now, it creates a separate thread each time a sleep is needed, 
+/// is yielded when it is done. For now, it creates a separate thread each time a sleep is needed,
 /// which is far from ideal.
-#[macro_export] 
+#[macro_export]
 macro_rules! async_sleep {
     ($dur: expr) => {
         {
@@ -58,8 +61,8 @@ macro_rules! async_sleep {
     };
 }
 
-/// This macro allows to intercept a wouldblock error returned by the expression evaluation, and 
-/// awaits for 1 ns (at least) before retrying. 
+/// This macro allows to intercept a wouldblock error returned by the expression evaluation, and
+/// awaits for 1 ns (at least) before retrying.
 #[macro_export]
 macro_rules! await_wouldblock_io {
     ($expr:expr) => {
@@ -79,8 +82,8 @@ macro_rules! await_wouldblock_io {
     }
 }
 
-/// This macro allows to intercept a wouldblock error returned by the expression evaluation, and 
-/// awaits for 1 ns (at least) before retrying. 
+/// This macro allows to intercept a wouldblock error returned by the expression evaluation, and
+/// awaits for 1 ns (at least) before retrying.
 #[macro_export]
 macro_rules! await_wouldblock_ssh {
     ($expr:expr) => {
@@ -103,12 +106,12 @@ macro_rules! await_wouldblock_ssh {
     }
 }
 
-/// This macro allows to retry an ssh expression if the error code received was $code. It allows to 
+/// This macro allows to retry an ssh expression if the error code received was $code. It allows to
 /// retry commands that fails every now and then for a limited amount of time.
 #[macro_export]
 macro_rules! await_retry_n_ssh {
     ($expr:expr, $nb:expr, $($code:expr),*) => {
-       {    
+       {
             use tracing::trace_span;
             let span = trace_span!("await_retry_n_ssh!");
             let _guard = span.enter();
@@ -136,12 +139,12 @@ macro_rules! await_retry_n_ssh {
     }
 }
 
-/// This macro allows to retry an ssh expression if the error code received was $code. It allows to 
-/// retry commands that fail but must be retried until it's ok. For example 
+/// This macro allows to retry an ssh expression if the error code received was $code. It allows to
+/// retry commands that fail but must be retried until it's ok. For example
 #[macro_export]
 macro_rules! await_retry_ssh {
     ($expr:expr, $($code:expr),*) => {
-       {    
+       {
             use tracing::trace_span;
             let span = trace_span!("await_retry_n_ssh!");
             let _guard = span.enter();
@@ -164,12 +167,12 @@ macro_rules! await_retry_ssh {
     }
 }
 
-/// This macro allows to retry an expression it returns an error. It allows to 
+/// This macro allows to retry an expression it returns an error. It allows to
 /// retry commands that fails every now and then for a limited amount of time.
 #[macro_export]
 macro_rules! await_retry_n {
     ($expr:expr, $nb:expr) => {
-       {    
+       {
             use tracing::trace_span;
             let span = trace_span!("await_retry_n!");
             let _guard = span.enter();
@@ -196,48 +199,8 @@ macro_rules! await_retry_n {
 }
 
 
-
 //---------------------------------------------------------------------------------------- FUNCTIONS
 
-/// Returns a tuple containing the git and git-lfs versions.
-pub fn check_git_lfs_versions() -> Result<(String, String), crate::Error> {
-    debug!("Checking git and lfs versions");
-    let git_version = String::from_utf8(process::Command::new("git")
-        .args(&["--version"])
-        .output()?.stdout)
-        .expect("Failed to parse utf8 string");
-    let lfs_version = String::from_utf8(process::Command::new("git")
-        .args(&["lfs", "--version"])
-        .output()?.stdout)
-        .expect("Failed to parse utf8 string");
-    let git_regex = regex::Regex::new(r"[0-9]+\.[0-9]+\.[0-9]+")?;
-    let git_version = String::from(git_regex.find(&git_version)
-        .unwrap()
-        .as_str());
-    let lfs_regex = regex::Regex::new(r"[0-9]+\.[0-9]+\.[0-9]+")?;
-    let lfs_version = String::from(lfs_regex.find(&lfs_version)
-        .unwrap()
-        .as_str());
-    Ok((git_version, lfs_version))
-}
-
-/// Returns the absolute path to the higher expegit folder starting from `start_path`.
-pub fn search_expegit_root(start_path: &path::PathBuf) -> Result<path::PathBuf, crate::Error> {
-    debug!("Searching expegit repository root from {}", 
-        fs::canonicalize(start_path).unwrap().to_str().unwrap());
-    let start_path = fs::canonicalize(start_path)?;
-    if start_path.is_file() { panic!("Should provide a folder path.") };
-    // We add a dummy folder that will be popped directly to check for .
-    let mut start_path = start_path.join("dummy_folder");
-    while start_path.pop() {
-        if start_path.join(CMPCONF_RPATH).exists() {
-            debug!("Expegit root found at {}", start_path.to_str().unwrap());
-            return Ok(start_path);
-        }
-    }
-    warn!("Unable to find .expegit file in parents folders");
-    Err(crate::Error::Misc(Error::InvalidRepository))
-}
 
 /// Parses a parameters string with a number of repetitions and generate a vector of parameters
 /// combinations.
@@ -288,10 +251,7 @@ pub fn get_hostname() -> Result<String, crate::Error> {
     Ok(format!("{}@{}", user, host))
 }
 
-use std::process::{Output};
-use std::os::unix::process::ExitStatusExt;
-
-/// Compacts a list of outputs in a single output: 
+/// Compacts a list of outputs in a single output:
 /// + The stdouts are concatenated
 /// + The stderrs are concatenated
 /// + The last error code is kept
@@ -305,7 +265,7 @@ pub fn compact_outputs(outputs: Vec<Output>) -> Output{
                   acc.status = o.status;
                   acc
               })
-} 
+}
 
 /// Formats commands and output properly
 pub fn format_commands_outputs(commands: &Vec<String>, outputs: &Vec<Output>) -> String{
@@ -317,41 +277,30 @@ pub fn format_commands_outputs(commands: &Vec<String>, outputs: &Vec<Output>) ->
         })
 }
 
-//-------------------------------------------------------------------------------------------- TESTS
+/// Initializes tracing
+pub fn init_tracing(level: tracing::Level, env: String){
+    let subscriber = Subscriber::builder()
+        .compact()
+        .with_max_level(level)
+        .with_env_filter(env.as_str())
+        .without_time()
+        .with_target(false)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).expect("Failed to set global subscriber for tracing.");
+}
 
+/// Retrieves user name
+pub fn get_user() -> String{
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("echo $USER")
+        .output()
+        .unwrap();
+    String::from_utf8(output.stdout).unwrap().replace("\n", "")
+}
 
-#[cfg(test)]
-mod test {
-    use std::fs;
-    use std::path;
-    use super::*;
-
-    // Modify the files with the variables that suits your setup to run the test.
-    static TEST_PATH: &str = "/tmp";
-    static TEST_HOSTNAME: &str = "";
-
-    #[test]
-    fn test_check_git_lfs_versions() {
-        check_git_lfs_versions().unwrap();
-    }
-
-    #[test]
-    fn test_search_expegit_root() {
-        let test_path = path::PathBuf::from(TEST_PATH).join("liborchestra/misc/search_expegit_root");
-        println!("{:?}", test_path);
-        if !test_path.exists() {
-            fs::create_dir_all(&test_path).unwrap();
-            fs::create_dir_all(&test_path.join("no/1/2")).unwrap();
-            fs::create_dir_all(&test_path.join("yes/1/2")).unwrap();
-            fs::File::create(&test_path.join("yes/.expegit")).unwrap();
-        }
-        let no_res = search_expegit_root(&test_path.join("no/1/2"));
-        assert!(no_res.is_err());
-        let yes_res = search_expegit_root(&test_path.join("yes/1/2"));
-        assert!(yes_res.is_ok());
-        assert_eq!(yes_res.unwrap(), test_path.join("yes"));
-        let yes_res = search_expegit_root(&test_path.join("yes"));
-        assert!(yes_res.is_ok());
-        assert_eq!(yes_res.unwrap(), test_path.join("yes"));
-    }
+/// Get a uuid string
+pub fn get_uuid() -> String {
+    let uuid = Uuid::new_v4();
+    format!("{}", uuid)
 }
